@@ -1,0 +1,328 @@
+"""Vista de Pedidos: tablero de estados, alertas de audio y tickets de cocina."""
+import streamlit as st
+import streamlit.components.v1
+from sqlalchemy import text
+import pandas as pd
+import json
+from datetime import datetime
+
+from db import engine
+
+# ── Constantes ─────────────────────────────────────────────────────────────────
+ESTADOS = ["pendiente", "en preparacion", "listo", "entregado"]
+ESTADO_SIGUIENTE = {
+    "pendiente":      "en preparacion",
+    "en preparacion": "listo",
+    "listo":          "entregado",
+    "entregado":      None
+}
+ESTADO_LABEL_BTN = {
+    "pendiente":      "▶ Iniciar preparación",
+    "en preparacion": "✓ Marcar listo",
+    "listo":          "✓ Entregar",
+    "entregado":      None
+}
+
+
+# ── DB: pedidos ────────────────────────────────────────────────────────────────
+def cargar_pedidos():
+    with engine.connect() as conn:
+        resultado = conn.execute(text("SELECT * FROM pedidos ORDER BY fecha DESC"))
+        return pd.DataFrame(resultado.fetchall(), columns=resultado.keys())
+
+def avanzar_estado(pedido_id: int, estado_actual: str):
+    siguiente = ESTADO_SIGUIENTE.get(estado_actual)
+    if not siguiente:
+        return
+    with engine.begin() as conn:
+        conn.execute(
+            text("UPDATE pedidos SET estado = :estado WHERE id = :id"),
+            {"estado": siguiente, "id": pedido_id}
+        )
+    st.rerun()
+
+def revertir_estado(pedido_id: int, estado_actual: str):
+    idx = ESTADOS.index(estado_actual)
+    if idx == 0:
+        return
+    anterior = ESTADOS[idx - 1]
+    with engine.begin() as conn:
+        conn.execute(
+            text("UPDATE pedidos SET estado = :estado WHERE id = :id"),
+            {"estado": anterior, "id": pedido_id}
+        )
+    st.rerun()
+
+def cancelar_pedido(pedido_id: int):
+    with engine.begin() as conn:
+        conn.execute(
+            text("UPDATE pedidos SET estado = :estado WHERE id = :id"),
+            {"estado": "cancelado", "id": pedido_id}
+        )
+    st.rerun()
+
+
+# ── Helpers visuales ───────────────────────────────────────────────────────────
+def badge_html(estado: str) -> str:
+    cls = {
+        "pendiente":      "badge-pendiente",
+        "en preparacion": "badge-preparacion",
+        "listo":          "badge-listo",
+        "entregado":      "badge-entregado",
+        "cancelado":      "badge-cancelado",
+    }.get(estado, "badge-pendiente")
+    label = {
+        "pendiente":      "● Pendiente",
+        "en preparacion": "◎ En preparación",
+        "listo":          "✓ Listo",
+        "entregado":      "✓ Entregado",
+        "cancelado":      "✕ Cancelado",
+    }.get(estado, estado)
+    return f'<span class="badge {cls}">{label}</span>'
+
+def formatear_items(items_raw) -> str:
+    if isinstance(items_raw, list):
+        return ", ".join(
+            f"{i.get('nombre','?')} x{i.get('cantidad',1)}"
+            if isinstance(i, dict) else str(i)
+            for i in items_raw
+        )
+    return str(items_raw)
+
+def formatear_fecha(fecha) -> str:
+    if pd.isna(fecha):
+        return "—"
+    try:
+        return pd.to_datetime(fecha).strftime("%-d %b · %H:%M")
+    except:
+        return str(fecha)
+
+
+# ── Ticket de cocina ───────────────────────────────────────────────────────────
+def generar_ticket_html(pid, cliente, items_raw, total_p, fecha, estado):
+    """Genera el HTML del ticket termico para imprimir."""
+    if isinstance(items_raw, str):
+        try:
+            items_list = json.loads(items_raw)
+        except:
+            items_list = []
+    elif isinstance(items_raw, list):
+        items_list = items_raw
+    else:
+        items_list = []
+
+    lineas_items = ""
+    for item in items_list:
+        if isinstance(item, dict):
+            qty    = item.get("cantidad", 1)
+            nombre = item.get("nombre", "?")
+            lineas_items += f"<tr><td>{qty}x</td><td>{nombre}</td></tr>"
+        else:
+            lineas_items += f"<tr><td>1x</td><td>{str(item)}</td></tr>"
+
+    fecha_str  = str(fecha) if fecha else datetime.now().strftime("%-d %b · %H:%M")
+    estado_str = estado.upper()
+    total_fmt  = f"{total_p:,.0f}"
+
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><style>
+  *{{margin:0;padding:0;box-sizing:border-box;}}
+  body{{font-family:'Courier New',monospace;font-size:13px;color:#000;background:#fff;width:280px;padding:12px;}}
+  .header{{text-align:center;margin-bottom:8px;}}
+  .restaurant{{font-size:16px;font-weight:bold;letter-spacing:1px;}}
+  .sub{{font-size:11px;color:#333;margin-top:2px;}}
+  .divider{{border-top:1px dashed #000;margin:8px 0;}}
+  .label{{font-size:10px;text-transform:uppercase;color:#555;}}
+  .value{{font-size:13px;font-weight:bold;}}
+  table{{width:100%;border-collapse:collapse;margin:6px 0;}}
+  td{{padding:2px 0;vertical-align:top;}}
+  td:first-child{{width:30px;font-weight:bold;}}
+  .total-row{{font-size:16px;font-weight:bold;text-align:right;margin-top:8px;}}
+  .footer{{text-align:center;margin-top:10px;font-size:11px;color:#444;}}
+  .estado-badge{{display:inline-block;border:1px solid #000;padding:1px 8px;font-size:10px;margin-top:4px;}}
+  @media print{{body{{width:100%;}} @page{{margin:4mm;size:80mm auto;}}}}
+</style></head><body>
+  <div class="header">
+    <div class="restaurant">RESTAURANTE</div>
+    <div class="sub">Control de Cocina</div>
+  </div>
+  <div class="divider"></div>
+  <div class="label">Pedido</div><div class="value">#{pid}</div>
+  <div class="label" style="margin-top:4px;">Cliente</div><div class="value">{cliente}</div>
+  <div class="label" style="margin-top:4px;">Fecha</div><div class="value">{fecha_str}</div>
+  <div class="estado-badge">{estado_str}</div>
+  <div class="divider"></div>
+  <div class="label">Items</div>
+  <table>{lineas_items}</table>
+  <div class="divider"></div>
+  <div class="total-row">TOTAL: ${total_fmt}</div>
+  <div class="divider"></div>
+  <div class="footer">--- Control de Cocina ---</div>
+</body></html>"""
+
+
+def render_pedidos(dataframe: pd.DataFrame, tab_key: str = "all"):
+    if dataframe.empty:
+        st.markdown('<p style="color:#444; font-size:0.85rem; padding:1rem 0;">Sin pedidos en esta categoría.</p>', unsafe_allow_html=True)
+        return
+    for idx, (_, row) in enumerate(dataframe.iterrows()):
+        pid     = row["id"]
+        estado  = row.get("estado", "pendiente")
+        cliente = row.get("numero_cliente", "—")
+        items   = formatear_items(row.get("items", []))
+        total_p = row.get("total", 0)
+        fecha   = formatear_fecha(row.get("fecha"))
+        uid     = f"{tab_key}_{pid}_{idx}"
+
+        # Fix 2: info col wider, actions col narrower and self-contained
+        col_info, col_acciones = st.columns([4, 1])
+        with col_info:
+            st.markdown(f"""
+            <div class="order-card">
+              <div style="display:flex; justify-content:space-between; align-items:flex-start;">
+                <div>
+                  <div class="order-id">Pedido #{pid}</div>
+                  <div class="order-num">📱 {cliente}</div>
+                  <div class="order-items">{items}</div>
+                  <div class="order-fecha">{fecha}</div>
+                </div>
+                <div style="text-align:right;">
+                  {badge_html(estado)}
+                  <div class="order-total" style="margin-top:8px;">${total_p:,.0f}</div>
+                </div>
+              </div>
+            </div>
+            """, unsafe_allow_html=True)
+        with col_acciones:
+            # Fix 2: stack buttons vertically, full width, no height spacer
+            btn_label = ESTADO_LABEL_BTN.get(estado)
+            if btn_label:
+                if st.button(btn_label, key=f"avanzar_{uid}", type="primary"):
+                    avanzar_estado(pid, estado)
+
+            # Print ticket button
+            items_raw = row.get("items", [])
+            ticket_html = generar_ticket_html(pid, cliente, items_raw, total_p, fecha, estado)
+            ticket_escaped = ticket_html.replace("\\", "\\\\").replace("`", "\\`").replace("${", "\\${").replace("</script>", "<" + "/script>")
+            print_js = f"""
+            <script>
+            function imprimirTicket_{uid.replace("-","_")}() {{
+                var w = window.open('', '_blank', 'width=320,height=500,scrollbars=yes');
+                w.document.write(`{ticket_escaped}`);
+                w.document.close();
+                w.focus();
+                setTimeout(function() {{ w.print(); w.close(); }}, 300);
+            }}
+            </script>
+            <button onclick="imprimirTicket_{uid.replace("-","_")}()" style="
+                width:100%; margin-top:4px; padding:6px 8px;
+                background:#1a1a1a; color:#aaa;
+                border:1px solid #333; border-radius:8px;
+                font-family:'DM Sans',sans-serif; font-size:0.75rem;
+                cursor:pointer; transition:all 0.15s;
+            " onmouseover="this.style.borderColor='#555';this.style.color='#f0ede8';"
+               onmouseout="this.style.borderColor='#333';this.style.color='#aaa';">
+                🖨 Ticket
+            </button>
+            """
+            st.components.v1.html(print_js, height=48, scrolling=False)
+
+            if estado in ESTADOS and ESTADOS.index(estado) > 0 and estado != "entregado":
+                if st.button("↩ Revertir", key=f"revertir_{uid}"):
+                    revertir_estado(pid, estado)
+            if estado == "pendiente":
+                st.markdown('<div class="btn-cancelar">', unsafe_allow_html=True)
+                if st.button("✕ Cancelar", key=f"cancelar_{uid}"):
+                    cancelar_pedido(pid)
+                st.markdown('</div>', unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SECCIÓN: PEDIDOS
+# ══════════════════════════════════════════════════════════════════════════════
+def render():
+    df = cargar_pedidos()
+
+    # ── Audio alert: detect new pending orders ─────────────────────────────────
+    pending_ids = set(df[df["estado"] == "pendiente"]["id"].tolist())
+
+    if "known_pending_ids" not in st.session_state:
+        # First load — seed silently, don't play sound
+        st.session_state["known_pending_ids"] = pending_ids
+        play_alert = False
+    else:
+        new_orders = pending_ids - st.session_state["known_pending_ids"]
+        play_alert = len(new_orders) > 0
+        st.session_state["known_pending_ids"] = pending_ids
+
+    if play_alert:
+        st.components.v1.html("""
+        <audio id="alert" preload="auto">
+          <source src="https://www.soundjay.com/buttons/sounds/button-09a.mp3" type="audio/mpeg">
+          <source src="https://cdn.freesound.org/previews/411/411460_5121236-lq.mp3" type="audio/mpeg">
+        </audio>
+        <script>
+          var a = document.getElementById('alert');
+          if (a) {
+            var p = a.play();
+            if (p !== undefined) { p.catch(function() {}); }
+          }
+        </script>
+        """, height=0)
+
+    total      = len(df)
+    pend       = len(df[df["estado"] == "pendiente"])
+    en_prep    = len(df[df["estado"] == "en preparacion"])
+    listos     = len(df[df["estado"] == "listo"])
+    entregados = len(df[df["estado"] == "entregado"])
+    cancelados = len(df[df["estado"] == "cancelado"]) if "cancelado" in df["estado"].values else 0
+    # Fix: exclude cancelled orders from sales
+    ventas_hoy = df[
+        (pd.to_datetime(df["fecha"]).dt.date == datetime.now().date()) &
+        (df["estado"] != "cancelado")
+    ]["total"].sum() if "total" in df.columns else 0
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    with c1:
+        st.markdown(f'<div class="metric-card"><div class="metric-value">{total}</div><div class="metric-label">Total pedidos</div></div>', unsafe_allow_html=True)
+    with c2:
+        st.markdown(f'<div class="metric-card"><div class="metric-value metric-accent">{pend}</div><div class="metric-label">Pendientes</div></div>', unsafe_allow_html=True)
+    with c3:
+        st.markdown(f'<div class="metric-card"><div class="metric-value metric-blue">{en_prep}</div><div class="metric-label">En preparación</div></div>', unsafe_allow_html=True)
+    with c4:
+        st.markdown(f'<div class="metric-card"><div class="metric-value metric-green">{listos}</div><div class="metric-label">Listos</div></div>', unsafe_allow_html=True)
+    with c5:
+        # Fix 5: reduced clamp max to 1.6rem to handle large numbers
+        st.markdown(f'<div class="metric-card"><div class="metric-value" style="font-size:clamp(0.85rem, 1.5vw, 1.6rem); white-space:nowrap;">${ventas_hoy:,.0f}</div><div class="metric-label">Ventas hoy</div></div>', unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    tab_todos, tab_pend, tab_prep, tab_listo, tab_entregado, tab_cancelado = st.tabs([
+        f"Todos ({total})",
+        f"Pendientes ({pend})",
+        f"En preparación ({en_prep})",
+        f"Listos ({listos})",
+        f"Entregados ({entregados})",
+        f"Cancelados ({cancelados})"
+    ])
+
+    with tab_todos:
+        render_pedidos(df, "todos")
+    with tab_pend:
+        render_pedidos(df[df["estado"] == "pendiente"].copy(), "pend")
+    with tab_prep:
+        render_pedidos(df[df["estado"] == "en preparacion"].copy(), "prep")
+    with tab_listo:
+        render_pedidos(df[df["estado"] == "listo"].copy(), "listo")
+    with tab_entregado:
+        render_pedidos(df[df["estado"] == "entregado"].copy(), "entregado")
+    with tab_cancelado:
+        render_pedidos(df[df["estado"] == "cancelado"].copy(), "cancelado")
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    col_r1, col_r2 = st.columns([1, 4])
+    with col_r1:
+        if st.button("🔄 Actualizar ahora"):
+            st.rerun()
+    with col_r2:
+        st.markdown('<p style="color:#333; font-size:0.75rem; padding-top:8px;">Los cambios se guardan inmediatamente en la base de datos.</p>', unsafe_allow_html=True)
