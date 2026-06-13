@@ -44,6 +44,34 @@ def init_db():
                 ('Pizza',       35000, TRUE, 2),
                 ('Ensalada',    18000, TRUE, 3)
             """))
+
+        # ── Mesas: gestión dinámica de mesas del restaurante ───────────────────
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS mesas (
+                id      SERIAL PRIMARY KEY,
+                nombre  VARCHAR(50)  NOT NULL,
+                activa  BOOLEAN      NOT NULL DEFAULT TRUE,
+                creada  TIMESTAMP    NOT NULL DEFAULT NOW()
+            )
+        """))
+
+        # ── Pedidos: creado explícitamente aquí (antes no lo creaba ningún código)
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS pedidos (
+                id              SERIAL PRIMARY KEY,
+                numero_cliente  VARCHAR(50)  NOT NULL,
+                items           TEXT         NOT NULL,
+                total           INTEGER      NOT NULL,
+                estado          VARCHAR(30)  NOT NULL DEFAULT 'pendiente',
+                fecha           TIMESTAMP    NOT NULL DEFAULT NOW(),
+                mesa_id         INTEGER      REFERENCES mesas(id)
+            )
+        """))
+        # Actualiza tablas 'pedidos' preexistentes que aún no tienen mesa_id
+        conn.execute(text(
+            "ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS mesa_id INTEGER REFERENCES mesas(id)"
+        ))
+
         conn.commit()
 
 init_db()
