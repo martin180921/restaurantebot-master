@@ -2,8 +2,9 @@
 import streamlit as st
 from sqlalchemy import text
 import json
+import html
 
-from db import engine, cargar_menu
+from db import engine, cargar_menu, fmt_money
 
 
 # ── DB: crear pedido manual ────────────────────────────────────────────────────
@@ -49,9 +50,9 @@ def render():
                 # Fix 1: tighter columns [4, 1, 1] to keep controls close to name
                 col_nombre, col_precio, col_qty = st.columns([4, 1, 1])
                 with col_nombre:
-                    st.markdown(f'<div style="padding:8px 0; font-size:0.9rem; color:#1a1a1a;">{nombre}</div>', unsafe_allow_html=True)
+                    st.markdown(f'<div style="padding:8px 0; font-size:0.9rem; color:#1a1a1a;">{html.escape(str(nombre))}</div>', unsafe_allow_html=True)
                 with col_precio:
-                    st.markdown(f'<div style="padding:8px 0; font-size:0.85rem; color:#6b7280; white-space:nowrap;">${precio:,.0f}</div>', unsafe_allow_html=True)
+                    st.markdown(f'<div style="padding:8px 0; font-size:0.85rem; color:#6b7280; white-space:nowrap;">${fmt_money(precio)}</div>', unsafe_allow_html=True)
                 with col_qty:
                     c_menos, c_num, c_mas = st.columns([1, 1, 1])
                     with c_menos:
@@ -88,15 +89,15 @@ def render():
                     items_pedido.append({"id": str(pid), "nombre": nombre, "precio": precio, "cantidad": qty})
                     st.markdown(f"""
                     <div style="display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px solid #e5e7eb; font-size:0.85rem;">
-                        <span style="color:#1a1a1a;">{qty}x {nombre}</span>
-                        <span style="color:#6b7280;">${subtotal:,.0f}</span>
+                        <span style="color:#1a1a1a;">{qty}x {html.escape(str(nombre))}</span>
+                        <span style="color:#6b7280;">${fmt_money(subtotal)}</span>
                     </div>
                     """, unsafe_allow_html=True)
 
             st.markdown(f"""
             <div style="display:flex; justify-content:space-between; padding:12px 0 4px 0;">
                 <span style="font-family:'Syne',sans-serif; font-weight:700; color:#1a1a1a;">Total</span>
-                <span style="font-family:'Syne',sans-serif; font-size:1.2rem; font-weight:800; color:#1a1a1a;">${total_pedido:,.0f}</span>
+                <span style="font-family:'Syne',sans-serif; font-size:1.2rem; font-weight:800; color:#1a1a1a;">${fmt_money(total_pedido)}</span>
             </div>
             <div style="font-size:0.78rem; color:#9ca3af; margin-bottom:1rem;">Mesa {int(mesa)}</div>
             """, unsafe_allow_html=True)

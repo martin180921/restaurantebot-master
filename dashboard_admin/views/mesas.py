@@ -2,6 +2,7 @@
 import streamlit as st
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
+import html
 
 from db import engine
 
@@ -114,7 +115,7 @@ def render():
                     <div class="{card_cls}">
                       <div style="display:flex; justify-content:space-between; align-items:center;">
                         <div>
-                          <div class="menu-nombre">🪑 {nombre}</div>
+                          <div class="menu-nombre">🪑 {html.escape(str(nombre))}</div>
                           <div class="menu-precio">{sub}</div>
                         </div>
                         {badge}

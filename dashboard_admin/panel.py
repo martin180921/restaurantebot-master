@@ -8,7 +8,7 @@ de forma independiente:
     - views/mesas.py         → gestión de mesas
 """
 import streamlit as st
-import streamlit.components.v1
+from streamlit_autorefresh import st_autorefresh
 from dotenv import load_dotenv
 import hashlib
 import os
@@ -85,13 +85,13 @@ if not st.session_state["autenticado"]:
                 st.error("Contraseña incorrecta")
     st.stop()
 
-# ── Auto-refresh (30s) ────────────────────────────────────────────────────────
-# JS-only refresh: reloads the Streamlit iframe every 30s.
-# Does NOT call st.rerun() so session_state["autenticado"] is preserved.
-st.components.v1.html(
-    "<script>setTimeout(function(){ window.parent.location.reload(); }, 30000);</script>",
-    height=0
-)
+# ── Auto-refresh (30s) — C1 + P2 ───────────────────────────────────────────────
+# Partial rerun en vez de un reload completo del navegador. Esto PRESERVA
+# st.session_state (antes el reload lo borraba), así que:
+#   • la alerta de audio de pedidos nuevos vuelve a funcionar (known_pending_ids
+#     sobrevive entre refrescos, ya no se re-siembra como "primera carga"); y
+#   • no se pierde el scroll ni parpadea toda la app cada 30s.
+st_autorefresh(interval=30000, key="panel_autorefresh")
 
 # ── Estilos (Light Mode) ───────────────────────────────────────────────────────
 st.markdown("""

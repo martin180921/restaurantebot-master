@@ -4,9 +4,10 @@ import streamlit.components.v1
 from sqlalchemy import text
 import pandas as pd
 import json
+import html
 from datetime import datetime
 
-from db import engine
+from db import engine, fmt_money
 
 # ── Constantes ─────────────────────────────────────────────────────────────────
 ESTADOS = ["pendiente", "en preparacion", "listo", "entregado"]
@@ -81,13 +82,21 @@ def badge_html(estado: str) -> str:
     return f'<span class="badge {cls}">{label}</span>'
 
 def formatear_items(items_raw) -> str:
+    # C3: en la BD 'items' es TEXT con JSON; hay que parsearlo o el tablero
+    # mostraba la cadena cruda [{"nombre":...}] en vez de "Pizza x2".
+    if isinstance(items_raw, str):
+        try:
+            items_raw = json.loads(items_raw)
+        except (ValueError, TypeError):
+            return html.escape(items_raw)  # C2
     if isinstance(items_raw, list):
+        # C2: escapamos nombres (pueden venir de entrada no confiable).
         return ", ".join(
-            f"{i.get('nombre','?')} x{i.get('cantidad',1)}"
-            if isinstance(i, dict) else str(i)
+            html.escape(f"{i.get('nombre','?')} x{i.get('cantidad',1)}")
+            if isinstance(i, dict) else html.escape(str(i))
             for i in items_raw
         )
-    return str(items_raw)
+    return html.escape(str(items_raw))
 
 def formatear_fecha(fecha) -> str:
     if pd.isna(fecha):
@@ -114,15 +123,17 @@ def generar_ticket_html(pid, cliente, items_raw, total_p, fecha, estado):
     lineas_items = ""
     for item in items_list:
         if isinstance(item, dict):
-            qty    = item.get("cantidad", 1)
-            nombre = item.get("nombre", "?")
+            qty    = html.escape(str(item.get("cantidad", 1)))      # C2
+            nombre = html.escape(str(item.get("nombre", "?")))      # C2
             lineas_items += f"<tr><td>{qty}x</td><td>{nombre}</td></tr>"
         else:
-            lineas_items += f"<tr><td>1x</td><td>{str(item)}</td></tr>"
+            lineas_items += f"<tr><td>1x</td><td>{html.escape(str(item))}</td></tr>"
 
-    fecha_str  = str(fecha) if fecha else datetime.now().strftime("%-d %b · %H:%M")
-    estado_str = estado.upper()
-    total_fmt  = f"{total_p:,.0f}"
+    # C2: cliente y estado se escapan antes de inyectarse en el ticket.
+    cliente    = html.escape(str(cliente))
+    fecha_str  = html.escape(str(fecha)) if fecha else datetime.now().strftime("%-d %b · %H:%M")
+    estado_str = html.escape(str(estado).upper())
+    total_fmt  = fmt_money(total_p)                                 # C6
 
     return f"""<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><style>
@@ -182,13 +193,13 @@ def render_pedidos(dataframe: pd.DataFrame, tab_key: str = "all"):
               <div style="display:flex; justify-content:space-between; align-items:flex-start;">
                 <div>
                   <div class="order-id">Pedido #{pid}</div>
-                  <div class="order-num">📱 {cliente}</div>
+                  <div class="order-num">📱 {html.escape(str(cliente))}</div>
                   <div class="order-items">{items}</div>
                   <div class="order-fecha">{fecha}</div>
                 </div>
                 <div style="text-align:right;">
                   {badge_html(estado)}
-                  <div class="order-total" style="margin-top:8px;">${total_p:,.0f}</div>
+                  <div class="order-total" style="margin-top:8px;">${fmt_money(total_p)}</div>
                 </div>
               </div>
             </div>
@@ -273,7 +284,7 @@ def render_por_mesa(df: pd.DataFrame, mesa_nombres: dict):
         sub = activos[activos["__grupo"] == grupo].copy()
         total_grupo = sub["total"].sum() if "total" in sub.columns else 0
         st.markdown(
-            f'<div class="section-title">🪑 {grupo} · {len(sub)} activo(s) · ${total_grupo:,.0f}</div>',
+            f'<div class="section-title">🪑 {html.escape(str(grupo))} · {len(sub)} activo(s) · ${fmt_money(total_grupo)}</div>',
             unsafe_allow_html=True,
         )
         render_pedidos(sub, tab_key=f"mesa{gi}")
@@ -335,7 +346,7 @@ def render():
         st.markdown(f'<div class="metric-card"><div class="metric-value metric-green">{listos}</div><div class="metric-label">Listos</div></div>', unsafe_allow_html=True)
     with c5:
         # Fix 5: reduced clamp max to 1.6rem to handle large numbers
-        st.markdown(f'<div class="metric-card"><div class="metric-value" style="font-size:clamp(0.85rem, 1.5vw, 1.6rem); white-space:nowrap;">${ventas_hoy:,.0f}</div><div class="metric-label">Ventas hoy</div></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="metric-card"><div class="metric-value" style="font-size:clamp(0.85rem, 1.5vw, 1.6rem); white-space:nowrap;">${fmt_money(ventas_hoy)}</div><div class="metric-label">Ventas hoy</div></div>', unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
 

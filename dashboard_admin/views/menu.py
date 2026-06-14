@@ -1,8 +1,9 @@
 """Vista de Menú: alta, edición, activación y borrado de platos."""
 import streamlit as st
 from sqlalchemy import text
+import html
 
-from db import engine, cargar_menu
+from db import engine, cargar_menu, fmt_money
 
 
 # ── DB: menú ───────────────────────────────────────────────────────────────────
@@ -70,8 +71,8 @@ def render():
                     <div class="{card_cls}">
                       <div style="display:flex; justify-content:space-between; align-items:center;">
                         <div>
-                          <div class="menu-nombre">{nombre}</div>
-                          <div class="menu-precio">${precio:,.0f}</div>
+                          <div class="menu-nombre">{html.escape(str(nombre))}</div>
+                          <div class="menu-precio">${fmt_money(precio)}</div>
                         </div>
                         {badge}
                       </div>

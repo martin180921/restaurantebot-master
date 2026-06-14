@@ -12,12 +12,40 @@ import streamlit as st
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
 import json
+import html
 import os
 
 load_dotenv()
 
-DATABASE_URL = os.getenv("DATABASE_URL")
-engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+
+def _normalizar_db_url(url):
+    """Valida/normaliza DATABASE_URL (C7).
+
+    Railway entrega 'postgres://', que SQLAlchemy 2.0 rechaza → 'postgresql://'.
+    Si falta, fallamos con un mensaje claro en vez de create_engine(None).
+    """
+    if not url:
+        raise RuntimeError(
+            "DATABASE_URL no está configurada. Define la variable de entorno con "
+            "la cadena de conexión de PostgreSQL antes de arrancar la app."
+        )
+    if url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql://", 1)
+    return url
+
+
+DATABASE_URL = _normalizar_db_url(os.getenv("DATABASE_URL"))
+# C5: pre_ping + recycle para no reutilizar conexiones que Railway ya cerró.
+engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_recycle=1800)
+
+
+# ── Formato de moneda LATAM $XX.XXX (C6) ────────────────────────────────────────
+def fmt_money(valor) -> str:
+    """Formatea un monto entero con punto de miles: 35000 → '35.000'."""
+    try:
+        return f"{int(round(float(valor))):,}".replace(",", ".")
+    except (TypeError, ValueError):
+        return "0"
 
 st.set_page_config(
     page_title="Carta Digital",
@@ -108,7 +136,7 @@ if st.session_state["pedido_enviado"]:
     <div style="text-align:center; padding:3rem 1rem;">
       <div style="font-size:3rem;">✅</div>
       <div style="font-size:1.3rem; font-weight:700; color:#1a1a1a; margin-top:0.5rem;">¡Pedido enviado!</div>
-      <div style="color:#777; margin-top:0.4rem;">{info['mesa']} · ${info['total']:,.0f}</div>
+      <div style="color:#777; margin-top:0.4rem;">{html.escape(str(info['mesa']))} · ${fmt_money(info['total'])}</div>
       <div style="color:#999; font-size:0.85rem; margin-top:0.9rem;">La cocina ya recibió tu pedido. ¡Gracias!</div>
     </div>
     """, unsafe_allow_html=True)
@@ -172,8 +200,8 @@ for item in menu:
     c_info, c_minus, c_qty, c_plus = st.columns([4, 1, 1, 1])
     with c_info:
         st.markdown(
-            f'<div class="c-item"><span class="c-name">{nombre}</span>'
-            f'<span class="c-price">${precio:,.0f}</span></div>',
+            f'<div class="c-item"><span class="c-name">{html.escape(str(nombre))}</span>'
+            f'<span class="c-price">${fmt_money(precio)}</span></div>',
             unsafe_allow_html=True,
         )
     with c_minus:
@@ -211,19 +239,25 @@ if not items_pedido:
                 unsafe_allow_html=True)
 else:
     filas = "".join(
-        f'<div class="c-row"><span>{it["cantidad"]}× {it["nombre"]}</span>'
-        f'<span>${it["precio"] * it["cantidad"]:,.0f}</span></div>'
+        f'<div class="c-row"><span>{it["cantidad"]}× {html.escape(str(it["nombre"]))}</span>'
+        f'<span>${fmt_money(it["precio"] * it["cantidad"])}</span></div>'
         for it in items_pedido
     )
     st.markdown(
         f'<div class="c-summary">{filas}'
-        f'<div class="c-total"><span>Total</span><span>${total:,.0f}</span></div></div>',
+        f'<div class="c-total"><span>Total</span><span>${fmt_money(total)}</span></div></div>',
         unsafe_allow_html=True,
     )
 
-    if st.button(f"Enviar pedido · ${total:,.0f}", type="primary", use_container_width=True):
-        tel_param      = qp.get("tel")
-        numero_cliente = str(tel_param) if tel_param else mesa_labels[mesa_sel]
+    if st.button(f"Enviar pedido · ${fmt_money(total)}", type="primary", use_container_width=True):
+        # C2: ?tel viene de una URL pública. Lo limpiamos y acotamos antes de
+        # guardarlo (y además se escapa al renderizarlo en el panel/ticket).
+        tel_param = qp.get("tel")
+        if tel_param:
+            limpio = "".join(c for c in str(tel_param) if c not in "<>\"'`").strip()[:40]
+            numero_cliente = limpio or mesa_labels[mesa_sel]
+        else:
+            numero_cliente = mesa_labels[mesa_sel]
         guardar_pedido(numero_cliente, mesa_sel, items_pedido, total)
         st.session_state["pedido_enviado"] = {"mesa": mesa_labels[mesa_sel], "total": total}
         st.session_state["carrito"] = {}
