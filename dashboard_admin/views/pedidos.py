@@ -237,6 +237,48 @@ def render_pedidos(dataframe: pd.DataFrame, tab_key: str = "all"):
                 st.markdown('</div>', unsafe_allow_html=True)
 
 
+# ── Agrupación por mesa (Req 3) ────────────────────────────────────────────────
+ESTADOS_ACTIVOS = ["pendiente", "en preparacion", "listo"]
+
+def cargar_mesas_nombres() -> dict:
+    """Mapa {id: nombre} de mesas para etiquetar los grupos (tolerante a fallos)."""
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(text("SELECT id, nombre FROM mesas")).mappings().all()
+        return {int(r["id"]): r["nombre"] for r in rows}
+    except Exception:
+        return {}
+
+def grupo_de_mesa(row, mesa_nombres: dict) -> str:
+    """Etiqueta de grupo de un pedido: mesa real (mesa_id), 'Mesa N' heredada en
+    numero_cliente, o 'Sin mesa' para pedidos de WhatsApp / sin asignar."""
+    mid = row.get("mesa_id")
+    if mid is not None and not pd.isna(mid):
+        return mesa_nombres.get(int(mid), f"Mesa {int(mid)}")
+    cliente = str(row.get("numero_cliente", "") or "").strip()
+    if cliente.lower().startswith("mesa"):
+        return cliente
+    return "Sin mesa"
+
+def render_por_mesa(df: pd.DataFrame, mesa_nombres: dict):
+    """Agrupa y renderiza los pedidos ACTIVOS por mesa."""
+    activos = df[df["estado"].isin(ESTADOS_ACTIVOS)].copy()
+    if activos.empty:
+        st.markdown('<p style="color:#444; font-size:0.85rem; padding:1rem 0;">No hay pedidos activos en este momento.</p>', unsafe_allow_html=True)
+        return
+    activos["__grupo"] = activos.apply(lambda r: grupo_de_mesa(r, mesa_nombres), axis=1)
+    # Mesas reales primero (por nombre); 'Sin mesa' al final.
+    grupos = sorted(activos["__grupo"].unique(), key=lambda g: (g == "Sin mesa", str(g)))
+    for gi, grupo in enumerate(grupos):
+        sub = activos[activos["__grupo"] == grupo].copy()
+        total_grupo = sub["total"].sum() if "total" in sub.columns else 0
+        st.markdown(
+            f'<div class="section-title">🪑 {grupo} · {len(sub)} activo(s) · ${total_grupo:,.0f}</div>',
+            unsafe_allow_html=True,
+        )
+        render_pedidos(sub, tab_key=f"mesa{gi}")
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # SECCIÓN: PEDIDOS
 # ══════════════════════════════════════════════════════════════════════════════
@@ -297,27 +339,37 @@ def render():
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    tab_todos, tab_pend, tab_prep, tab_listo, tab_entregado, tab_cancelado = st.tabs([
-        f"Todos ({total})",
-        f"Pendientes ({pend})",
-        f"En preparación ({en_prep})",
-        f"Listos ({listos})",
-        f"Entregados ({entregados})",
-        f"Cancelados ({cancelados})"
-    ])
+    # Req 3: alterna entre el tablero agrupado por mesa y la vista por estado.
+    vista = st.radio(
+        "Vista", ["🪑 Por mesa", "📋 Por estado"],
+        horizontal=True, label_visibility="collapsed", key="vista_pedidos"
+    )
+    st.markdown("<br>", unsafe_allow_html=True)
 
-    with tab_todos:
-        render_pedidos(df, "todos")
-    with tab_pend:
-        render_pedidos(df[df["estado"] == "pendiente"].copy(), "pend")
-    with tab_prep:
-        render_pedidos(df[df["estado"] == "en preparacion"].copy(), "prep")
-    with tab_listo:
-        render_pedidos(df[df["estado"] == "listo"].copy(), "listo")
-    with tab_entregado:
-        render_pedidos(df[df["estado"] == "entregado"].copy(), "entregado")
-    with tab_cancelado:
-        render_pedidos(df[df["estado"] == "cancelado"].copy(), "cancelado")
+    if vista == "🪑 Por mesa":
+        render_por_mesa(df, cargar_mesas_nombres())
+    else:
+        tab_todos, tab_pend, tab_prep, tab_listo, tab_entregado, tab_cancelado = st.tabs([
+            f"Todos ({total})",
+            f"Pendientes ({pend})",
+            f"En preparación ({en_prep})",
+            f"Listos ({listos})",
+            f"Entregados ({entregados})",
+            f"Cancelados ({cancelados})"
+        ])
+
+        with tab_todos:
+            render_pedidos(df, "todos")
+        with tab_pend:
+            render_pedidos(df[df["estado"] == "pendiente"].copy(), "pend")
+        with tab_prep:
+            render_pedidos(df[df["estado"] == "en preparacion"].copy(), "prep")
+        with tab_listo:
+            render_pedidos(df[df["estado"] == "listo"].copy(), "listo")
+        with tab_entregado:
+            render_pedidos(df[df["estado"] == "entregado"].copy(), "entregado")
+        with tab_cancelado:
+            render_pedidos(df[df["estado"] == "cancelado"].copy(), "cancelado")
 
     st.markdown("<br>", unsafe_allow_html=True)
     col_r1, col_r2 = st.columns([1, 4])
