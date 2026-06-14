@@ -48,12 +48,12 @@ def render():
         with ca:
             st.markdown(f'<div class="metric-card"><div class="metric-value metric-green">{activos}</div><div class="metric-label">Activos</div></div>', unsafe_allow_html=True)
         with ci:
-            st.markdown(f'<div class="metric-card"><div class="metric-value" style="color:#555">{inactivos}</div><div class="metric-label">Inactivos</div></div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="metric-card"><div class="metric-value" style="color:#9ca3af">{inactivos}</div><div class="metric-label">Inactivos</div></div>', unsafe_allow_html=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
 
         if df_menu.empty:
-            st.markdown('<p style="color:#444; font-size:0.85rem;">No hay platos en el menú.</p>', unsafe_allow_html=True)
+            st.markdown('<p style="color:#9ca3af; font-size:0.85rem;">No hay platos en el menú.</p>', unsafe_allow_html=True)
         else:
             for idx, row in df_menu.iterrows():
                 pid      = int(row["id"])
@@ -151,10 +151,10 @@ def render():
 
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown("""
-        <div style="background:#161616; border:1px solid #222; border-radius:10px; padding:1rem; font-size:0.78rem; color:#555;">
-          <div style="color:#888; font-weight:600; margin-bottom:6px;">💡 Cómo funciona</div>
+        <div style="background:#f9fafb; border:1px solid #e5e7eb; border-radius:10px; padding:1rem; font-size:0.78rem; color:#6b7280;">
+          <div style="color:#374151; font-weight:600; margin-bottom:6px;">💡 Cómo funciona</div>
           Los cambios se reflejan en WhatsApp de inmediato.<br><br>
-          <b style="color:#666;">Desactivar</b> oculta el plato del menú sin borrarlo.<br>
-          <b style="color:#666;">Eliminar</b> lo borra permanentemente.
+          <b style="color:#4b5563;">Desactivar</b> oculta el plato del menú sin borrarlo.<br>
+          <b style="color:#4b5563;">Eliminar</b> lo borra permanentemente.
         </div>
         """, unsafe_allow_html=True)

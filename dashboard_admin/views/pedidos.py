@@ -163,7 +163,7 @@ def generar_ticket_html(pid, cliente, items_raw, total_p, fecha, estado):
 
 def render_pedidos(dataframe: pd.DataFrame, tab_key: str = "all"):
     if dataframe.empty:
-        st.markdown('<p style="color:#444; font-size:0.85rem; padding:1rem 0;">Sin pedidos en esta categoría.</p>', unsafe_allow_html=True)
+        st.markdown('<p style="color:#9ca3af; font-size:0.85rem; padding:1rem 0;">Sin pedidos en esta categoría.</p>', unsafe_allow_html=True)
         return
     for idx, (_, row) in enumerate(dataframe.iterrows()):
         pid     = row["id"]
@@ -216,12 +216,12 @@ def render_pedidos(dataframe: pd.DataFrame, tab_key: str = "all"):
             </script>
             <button onclick="imprimirTicket_{uid.replace("-","_")}()" style="
                 width:100%; margin-top:4px; padding:6px 8px;
-                background:#1a1a1a; color:#aaa;
-                border:1px solid #333; border-radius:8px;
+                background:#ffffff; color:#374151;
+                border:1px solid #d1d5db; border-radius:8px;
                 font-family:'DM Sans',sans-serif; font-size:0.75rem;
                 cursor:pointer; transition:all 0.15s;
-            " onmouseover="this.style.borderColor='#555';this.style.color='#f0ede8';"
-               onmouseout="this.style.borderColor='#333';this.style.color='#aaa';">
+            " onmouseover="this.style.borderColor='#9ca3af';this.style.color='#111827';"
+               onmouseout="this.style.borderColor='#d1d5db';this.style.color='#374151';">
                 🖨 Ticket
             </button>
             """
@@ -264,7 +264,7 @@ def render_por_mesa(df: pd.DataFrame, mesa_nombres: dict):
     """Agrupa y renderiza los pedidos ACTIVOS por mesa."""
     activos = df[df["estado"].isin(ESTADOS_ACTIVOS)].copy()
     if activos.empty:
-        st.markdown('<p style="color:#444; font-size:0.85rem; padding:1rem 0;">No hay pedidos activos en este momento.</p>', unsafe_allow_html=True)
+        st.markdown('<p style="color:#9ca3af; font-size:0.85rem; padding:1rem 0;">No hay pedidos activos en este momento.</p>', unsafe_allow_html=True)
         return
     activos["__grupo"] = activos.apply(lambda r: grupo_de_mesa(r, mesa_nombres), axis=1)
     # Mesas reales primero (por nombre); 'Sin mesa' al final.
@@ -377,4 +377,4 @@ def render():
         if st.button("🔄 Actualizar ahora"):
             st.rerun()
     with col_r2:
-        st.markdown('<p style="color:#333; font-size:0.75rem; padding-top:8px;">Los cambios se guardan inmediatamente en la base de datos.</p>', unsafe_allow_html=True)
+        st.markdown('<p style="color:#9ca3af; font-size:0.75rem; padding-top:8px;">Los cambios se guardan inmediatamente en la base de datos.</p>', unsafe_allow_html=True)
