@@ -5,6 +5,7 @@ de forma independiente:
     - views/pedidos.py       → tablero, alertas de audio y tickets
     - views/nuevo_pedido.py  → creación manual de pedidos
     - views/menu.py          → CRUD del menú
+    - views/mesas.py         → gestión de mesas
 """
 import streamlit as st
 import streamlit.components.v1
@@ -44,21 +45,21 @@ if not st.session_state["autenticado"]:
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=DM+Sans:wght@400;500&display=swap');
     html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
-    .stApp { background: #0f0f0f; color: #f0ede8; }
+    .stApp { background: #f7f7f5; color: #1a1a1a; }
     #MainMenu, footer, header { visibility: hidden; }
     .stTextInput > div > div > input {
-        background: #1a1a1a !important; border-color: #333 !important;
-        color: #f0ede8 !important; border-radius: 8px !important;
+        background: #ffffff !important; border-color: #d1d5db !important;
+        color: #1a1a1a !important; border-radius: 8px !important;
         text-align: center; font-size: 1.1rem; letter-spacing: 4px;
     }
     .stButton > button {
-        width: 100%; background: #f0ede8 !important; color: #0f0f0f !important;
+        width: 100%; background: #1a1a1a !important; color: #ffffff !important;
         border: none !important; border-radius: 8px !important;
         font-family: 'DM Sans', sans-serif !important;
         font-weight: 600 !important; font-size: 0.9rem !important;
         padding: 10px !important; margin-top: 8px !important;
     }
-    .stButton > button:hover { background: #ddd9d4 !important; }
+    .stButton > button:hover { background: #374151 !important; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -67,8 +68,8 @@ if not st.session_state["autenticado"]:
     with col_i:
         st.markdown("""
         <div style='text-align:center; margin-bottom: 2rem;'>
-          <div style='font-family:Syne,sans-serif; font-size:1.5rem; font-weight:800; color:#f0ede8;'>🍽️ RestauranteBOT</div>
-          <div style='font-size:0.82rem; color:#555; margin-top:4px;'>Panel de operaciones · Acceso restringido</div>
+          <div style='font-family:Syne,sans-serif; font-size:1.5rem; font-weight:800; color:#1a1a1a;'>🍽️ RestauranteBOT</div>
+          <div style='font-size:0.82rem; color:#9ca3af; margin-top:4px;'>Panel de operaciones · Acceso restringido</div>
         </div>
         """, unsafe_allow_html=True)
         password_input = st.text_input(
@@ -92,23 +93,23 @@ st.components.v1.html(
     height=0
 )
 
-# ── Estilos ────────────────────────────────────────────────────────────────────
+# ── Estilos (Light Mode) ───────────────────────────────────────────────────────
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:wght@300;400;500&display=swap');
 
 html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
-.stApp { background: #0f0f0f; color: #f0ede8; }
+.stApp { background: #f7f7f5; color: #1a1a1a; }
 
 .panel-header {
     display: flex; align-items: center; justify-content: space-between;
-    padding: 2rem 0 1.5rem 0; border-bottom: 1px solid #222; margin-bottom: 2rem;
+    padding: 1.25rem 0 1rem 0; border-bottom: 1px solid #e5e7eb; margin-bottom: 1.25rem;
 }
 .panel-title {
     font-family: 'Syne', sans-serif; font-size: 1.6rem;
-    font-weight: 800; color: #f0ede8; letter-spacing: -0.5px;
+    font-weight: 800; color: #1a1a1a; letter-spacing: -0.5px;
 }
-.panel-subtitle { font-size: 0.8rem; color: #666; margin-top: 2px; }
+.panel-subtitle { font-size: 0.8rem; color: #6b7280; margin-top: 2px; }
 .live-dot {
     width: 8px; height: 8px; background: #22c55e; border-radius: 50%;
     display: inline-block; margin-right: 6px; animation: pulse 1.8s infinite;
@@ -116,135 +117,142 @@ html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
 
 .metric-card {
-    background: #161616; border: 1px solid #222;
+    background: #ffffff; border: 1px solid #e5e7eb;
     border-radius: 12px; padding: 1.2rem 1.5rem; text-align: center;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.04);
 }
 .metric-value {
     font-family: 'Syne', sans-serif; font-size: 2.4rem;
-    font-weight: 800; color: #f0ede8; line-height: 1;
+    font-weight: 800; color: #1a1a1a; line-height: 1;
 }
 .metric-label {
-    font-size: 0.72rem; color: #555;
+    font-size: 0.72rem; color: #9ca3af;
     text-transform: uppercase; letter-spacing: 1px; margin-top: 4px;
 }
-.metric-accent { color: #f59e0b; }
-.metric-green  { color: #22c55e; }
-.metric-blue   { color: #60a5fa; }
+.metric-accent { color: #d97706; }
+.metric-green  { color: #16a34a; }
+.metric-blue   { color: #2563eb; }
 
 .badge {
     display: inline-block; padding: 3px 10px; border-radius: 999px;
     font-size: 0.72rem; font-weight: 500; letter-spacing: 0.3px;
 }
-.badge-pendiente   { background: #292218; color: #f59e0b; border: 1px solid #3d2e10; }
-.badge-preparacion { background: #1a1f35; color: #60a5fa; border: 1px solid #1e3a5f; }
-.badge-listo       { background: #1a2e22; color: #4ade80; border: 1px solid #166534; }
-.badge-entregado   { background: #1a1a1a; color: #888;    border: 1px solid #333; }
-.badge-cancelado   { background: #1a0a0a; color: #f87171; border: 1px solid #7f1d1d; }
-.badge-activo      { background: #1a2e22; color: #4ade80; border: 1px solid #166534; }
-.badge-inactivo    { background: #1a1a1a; color: #555;    border: 1px solid #333; }
+.badge-pendiente   { background: #fef3c7; color: #b45309; border: 1px solid #fde68a; }
+.badge-preparacion { background: #dbeafe; color: #1d4ed8; border: 1px solid #bfdbfe; }
+.badge-listo       { background: #dcfce7; color: #15803d; border: 1px solid #bbf7d0; }
+.badge-entregado   { background: #f3f4f6; color: #6b7280; border: 1px solid #e5e7eb; }
+.badge-cancelado   { background: #fee2e2; color: #b91c1c; border: 1px solid #fecaca; }
+.badge-activo      { background: #dcfce7; color: #15803d; border: 1px solid #bbf7d0; }
+.badge-inactivo    { background: #f3f4f6; color: #9ca3af; border: 1px solid #e5e7eb; }
 
 .order-card {
-    background: #141414; border: 1px solid #222; border-radius: 14px;
+    background: #ffffff; border: 1px solid #e5e7eb; border-radius: 14px;
     padding: 1.2rem 1.4rem; margin-bottom: 0.8rem; transition: border-color 0.2s;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.04);
 }
-.order-card:hover { border-color: #333; }
-.order-id    { font-family: 'Syne', sans-serif; font-size: 0.75rem; color: #444; }
-.order-num   { font-size: 0.9rem; font-weight: 500; color: #f0ede8; }
-.order-items { font-size: 0.82rem; color: #888; margin: 4px 0; }
-.order-total { font-family: 'Syne', sans-serif; font-size: 1.1rem; font-weight: 700; color: #f0ede8; }
-.order-fecha { font-size: 0.72rem; color: #444; }
+.order-card:hover { border-color: #d1d5db; }
+.order-id    { font-family: 'Syne', sans-serif; font-size: 0.75rem; color: #9ca3af; }
+.order-num   { font-size: 0.9rem; font-weight: 500; color: #1a1a1a; }
+.order-items { font-size: 0.82rem; color: #6b7280; margin: 4px 0; }
+.order-total { font-family: 'Syne', sans-serif; font-size: 1.1rem; font-weight: 700; color: #1a1a1a; }
+.order-fecha { font-size: 0.72rem; color: #9ca3af; }
 
 .menu-card {
-    background: #141414; border: 1px solid #222; border-radius: 14px;
+    background: #ffffff; border: 1px solid #e5e7eb; border-radius: 14px;
     padding: 1rem 1.2rem; margin-bottom: 0.6rem; transition: border-color 0.2s;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.04);
 }
-.menu-card:hover { border-color: #333; }
-.menu-card.inactivo { opacity: 0.45; }
-.menu-nombre { font-family: 'Syne', sans-serif; font-size: 1rem; font-weight: 700; color: #f0ede8; }
-.menu-precio { font-size: 0.85rem; color: #888; margin-top: 2px; }
+.menu-card:hover { border-color: #d1d5db; }
+.menu-card.inactivo { opacity: 0.55; }
+.menu-nombre { font-family: 'Syne', sans-serif; font-size: 1rem; font-weight: 700; color: #1a1a1a; }
+.menu-precio { font-size: 0.85rem; color: #6b7280; margin-top: 2px; }
 
 .section-title {
     font-family: 'Syne', sans-serif; font-size: 1rem;
-    font-weight: 700; color: #f0ede8; margin-bottom: 1rem;
-    padding-bottom: 0.5rem; border-bottom: 1px solid #1e1e1e;
+    font-weight: 700; color: #1a1a1a; margin-bottom: 1rem;
+    padding-bottom: 0.5rem; border-bottom: 1px solid #e5e7eb;
 }
 
-/* Fix 2: All buttons base */
+/* All buttons base */
 .stButton > button {
     border-radius: 8px !important; font-family: 'DM Sans', sans-serif !important;
     font-size: 0.78rem !important; font-weight: 500 !important;
-    border: 1px solid #333 !important; background: #1a1a1a !important;
-    color: #aaa !important; padding: 6px 12px !important;
+    border: 1px solid #d1d5db !important; background: #ffffff !important;
+    color: #374151 !important; padding: 6px 12px !important;
     transition: all 0.15s !important; height: auto !important;
     width: 100% !important;
 }
 .stButton > button:hover {
-    background: #222 !important; color: #f0ede8 !important; border-color: #555 !important;
+    background: #f3f4f6 !important; color: #111827 !important; border-color: #9ca3af !important;
 }
-/* Fix 2: Primary button full width, larger target */
+/* Primary button full width, larger target */
 div[data-testid="column"] .stButton > button[kind="primary"] {
-    background: #f0ede8 !important; color: #0f0f0f !important;
-    border-color: #f0ede8 !important; font-weight: 700 !important;
+    background: #1a1a1a !important; color: #ffffff !important;
+    border-color: #1a1a1a !important; font-weight: 700 !important;
     font-size: 0.85rem !important; padding: 10px 12px !important;
     width: 100% !important;
 }
 
 /* Botón cancelar en rojo */
 .btn-cancelar button {
-    border-color: #7f1d1d !important; color: #f87171 !important;
-    background: #1a0a0a !important; width: 100% !important;
+    border-color: #fecaca !important; color: #dc2626 !important;
+    background: #fef2f2 !important; width: 100% !important;
 }
 .btn-cancelar button:hover {
-    background: #2a0f0f !important; border-color: #f87171 !important; color: #fca5a5 !important;
+    background: #fee2e2 !important; border-color: #f87171 !important; color: #b91c1c !important;
 }
 
-/* Fix 3: Navigation as pill buttons */
+/* Navigation as pill buttons */
 div[data-testid="stRadio"] > label { display: none !important; }
 div[data-testid="stRadio"] > div {
     display: flex !important; gap: 6px !important; flex-wrap: wrap !important;
     background: transparent !important; border: none !important;
 }
 div[data-testid="stRadio"] > div > label {
-    background: #1a1a1a !important; border: 1px solid #333 !important;
+    background: #ffffff !important; border: 1px solid #e5e7eb !important;
     border-radius: 999px !important; padding: 7px 20px !important;
     cursor: pointer !important; transition: all 0.15s !important;
-    font-size: 0.82rem !important; color: #666 !important;
+    font-size: 0.82rem !important; color: #6b7280 !important;
     font-family: 'DM Sans', sans-serif !important;
 }
 div[data-testid="stRadio"] > div > label:hover {
-    border-color: #555 !important; color: #f0ede8 !important;
+    border-color: #9ca3af !important; color: #1a1a1a !important;
 }
 div[data-testid="stRadio"] > div > label > div:first-child { display: none !important; }
 div[data-testid="stRadio"] > div > label:has(input:checked) {
-    background: #f0ede8 !important; border-color: #f0ede8 !important;
-    color: #0f0f0f !important; font-weight: 600 !important;
+    background: #1a1a1a !important; border-color: #1a1a1a !important;
+    color: #ffffff !important; font-weight: 600 !important;
 }
 
 .stTabs [data-baseweb="tab-list"] {
-    background: transparent; border-bottom: 1px solid #222; gap: 0;
+    background: transparent; border-bottom: 1px solid #e5e7eb; gap: 0;
 }
 .stTabs [data-baseweb="tab"] {
-    font-family: 'DM Sans', sans-serif; font-size: 0.8rem; color: #555;
+    font-family: 'DM Sans', sans-serif; font-size: 0.8rem; color: #9ca3af;
     background: transparent; border: none; padding: 8px 20px;
 }
 .stTabs [aria-selected="true"] {
-    color: #f0ede8 !important; border-bottom: 2px solid #f0ede8 !important;
+    color: #1a1a1a !important; border-bottom: 2px solid #1a1a1a !important;
 }
 .stTabs [data-baseweb="tab-panel"] { padding-top: 1.2rem; }
 
 .stTextInput > div > div > input,
 .stNumberInput > div > div > input {
-    background: #161616 !important; border-color: #333 !important;
-    color: #f0ede8 !important; border-radius: 8px !important;
+    background: #ffffff !important; border-color: #d1d5db !important;
+    color: #1a1a1a !important; border-radius: 8px !important;
 }
 .stSelectbox > div > div {
-    background: #161616 !important; border-color: #333 !important;
-    color: #f0ede8 !important; border-radius: 8px !important;
+    background: #ffffff !important; border-color: #d1d5db !important;
+    color: #1a1a1a !important; border-radius: 8px !important;
 }
 
-hr { border-color: #1e1e1e !important; }
+hr { border-color: #e5e7eb !important; }
 #MainMenu, footer, header { visibility: hidden; }
-.block-container { padding-top: 1rem; }
+
+/* Req 1: tighter spacing to reclaim vertical space on mobile/tablet */
+.block-container { padding: 0.75rem 1rem 1rem 1rem !important; }
+.element-container { margin-bottom: 0.35rem !important; }
+.stButton > button { margin: 2px 0 !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -257,7 +265,7 @@ st.markdown(f"""
     <div class="panel-title">🍽️ RestauranteBOT</div>
     <div class="panel-subtitle">Panel de operaciones · {datetime.now().strftime("%-d de %B, %Y")}</div>
   </div>
-  <div style="font-size:0.8rem; color:#555;">
+  <div style="font-size:0.8rem; color:#9ca3af;">
     <span class="live-dot"></span>En vivo
   </div>
 </div>

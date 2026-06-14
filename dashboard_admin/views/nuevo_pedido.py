@@ -32,10 +32,10 @@ def render():
         st.markdown('<div class="section-title">Nuevo pedido</div>', unsafe_allow_html=True)
         mesa = st.number_input("Número de mesa", min_value=1, step=1, value=1, key="mesa_input")
 
-        st.markdown("<div style='margin-top:1rem; margin-bottom:0.5rem; font-size:0.8rem; color:#666; text-transform:uppercase; letter-spacing:1px;'>Selecciona los platos</div>", unsafe_allow_html=True)
+        st.markdown("<div style='margin-top:1rem; margin-bottom:0.5rem; font-size:0.8rem; color:#6b7280; text-transform:uppercase; letter-spacing:1px;'>Selecciona los platos</div>", unsafe_allow_html=True)
 
         if df_activo.empty:
-            st.markdown('<p style="color:#444; font-size:0.85rem;">No hay platos activos en el menú.</p>', unsafe_allow_html=True)
+            st.markdown('<p style="color:#9ca3af; font-size:0.85rem;">No hay platos activos en el menú.</p>', unsafe_allow_html=True)
         else:
             if "carrito_manual" not in st.session_state:
                 st.session_state["carrito_manual"] = {}
@@ -49,9 +49,9 @@ def render():
                 # Fix 1: tighter columns [4, 1, 1] to keep controls close to name
                 col_nombre, col_precio, col_qty = st.columns([4, 1, 1])
                 with col_nombre:
-                    st.markdown(f'<div style="padding:8px 0; font-size:0.9rem; color:#f0ede8;">{nombre}</div>', unsafe_allow_html=True)
+                    st.markdown(f'<div style="padding:8px 0; font-size:0.9rem; color:#1a1a1a;">{nombre}</div>', unsafe_allow_html=True)
                 with col_precio:
-                    st.markdown(f'<div style="padding:8px 0; font-size:0.85rem; color:#666; white-space:nowrap;">${precio:,.0f}</div>', unsafe_allow_html=True)
+                    st.markdown(f'<div style="padding:8px 0; font-size:0.85rem; color:#6b7280; white-space:nowrap;">${precio:,.0f}</div>', unsafe_allow_html=True)
                 with col_qty:
                     c_menos, c_num, c_mas = st.columns([1, 1, 1])
                     with c_menos:
@@ -62,7 +62,7 @@ def render():
                                     del st.session_state["carrito_manual"][pid]
                             st.rerun()
                     with c_num:
-                        st.markdown(f'<div style="text-align:center; padding:4px 0; font-size:0.9rem; color:#f0ede8; font-weight:600;">{qty}</div>', unsafe_allow_html=True)
+                        st.markdown(f'<div style="text-align:center; padding:4px 0; font-size:0.9rem; color:#1a1a1a; font-weight:600;">{qty}</div>', unsafe_allow_html=True)
                     with c_mas:
                         if st.button("+", key=f"mas_{pid}"):
                             st.session_state["carrito_manual"][pid] = qty + 1
@@ -76,7 +76,7 @@ def render():
         total_pedido = 0
 
         if not carrito:
-            st.markdown('<p style="color:#444; font-size:0.85rem;">Agrega platos para ver el resumen.</p>', unsafe_allow_html=True)
+            st.markdown('<p style="color:#9ca3af; font-size:0.85rem;">Agrega platos para ver el resumen.</p>', unsafe_allow_html=True)
         else:
             for pid, qty in carrito.items():
                 row = df_activo[df_activo["id"] == pid]
@@ -87,18 +87,18 @@ def render():
                     total_pedido += subtotal
                     items_pedido.append({"id": str(pid), "nombre": nombre, "precio": precio, "cantidad": qty})
                     st.markdown(f"""
-                    <div style="display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px solid #1e1e1e; font-size:0.85rem;">
-                        <span style="color:#f0ede8;">{qty}x {nombre}</span>
-                        <span style="color:#888;">${subtotal:,.0f}</span>
+                    <div style="display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px solid #e5e7eb; font-size:0.85rem;">
+                        <span style="color:#1a1a1a;">{qty}x {nombre}</span>
+                        <span style="color:#6b7280;">${subtotal:,.0f}</span>
                     </div>
                     """, unsafe_allow_html=True)
 
             st.markdown(f"""
             <div style="display:flex; justify-content:space-between; padding:12px 0 4px 0;">
-                <span style="font-family:'Syne',sans-serif; font-weight:700; color:#f0ede8;">Total</span>
-                <span style="font-family:'Syne',sans-serif; font-size:1.2rem; font-weight:800; color:#f0ede8;">${total_pedido:,.0f}</span>
+                <span style="font-family:'Syne',sans-serif; font-weight:700; color:#1a1a1a;">Total</span>
+                <span style="font-family:'Syne',sans-serif; font-size:1.2rem; font-weight:800; color:#1a1a1a;">${total_pedido:,.0f}</span>
             </div>
-            <div style="font-size:0.78rem; color:#555; margin-bottom:1rem;">Mesa {int(mesa)}</div>
+            <div style="font-size:0.78rem; color:#9ca3af; margin-bottom:1rem;">Mesa {int(mesa)}</div>
             """, unsafe_allow_html=True)
 
             if st.button("✓ Confirmar pedido", type="primary", key="btn_confirmar_manual"):
