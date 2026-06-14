@@ -1,6 +1,7 @@
 """Vista de Pedidos: tablero de estados, alertas de audio y tickets de cocina."""
 import streamlit as st
 import streamlit.components.v1
+from streamlit_autorefresh import st_autorefresh
 from sqlalchemy import text
 import pandas as pd
 import json
@@ -172,6 +173,52 @@ def generar_ticket_html(pid, cliente, items_raw, total_p, fecha, estado):
 </body></html>"""
 
 
+# ── Impresión bajo demanda (P3) ─────────────────────────────────────────────────
+def _emit_print(ticket_html: str, tid: int) -> None:
+    """Emite UN solo iframe de impresión (antes había uno por tarjeta → decenas
+    de iframes en un tablero ocupado). Intenta abrir la ventana automáticamente;
+    si el navegador bloquea los popups, deja un botón para imprimir con un clic.
+    """
+    escaped = (ticket_html.replace("\\", "\\\\").replace("`", "\\`")
+               .replace("${", "\\${").replace("</script>", "<" + "/script>"))
+    fn = f"imprimir_{tid}"
+    st.components.v1.html(f"""
+    <div style="font-family:'DM Sans',sans-serif; font-size:0.8rem; color:#6b7280; display:flex; align-items:center; gap:10px;">
+      <span id="msg_{tid}">🖨 Abriendo impresión del ticket #{tid}…</span>
+      <button onclick="{fn}()" style="padding:6px 14px; background:#1a1a1a; color:#fff; border:none; border-radius:8px; font-family:'DM Sans',sans-serif; font-size:0.78rem; cursor:pointer;">Imprimir #{tid}</button>
+    </div>
+    <script>
+      function {fn}() {{
+        var w = window.open('', '_blank', 'width=320,height=500,scrollbars=yes');
+        if (!w) {{
+          document.getElementById('msg_{tid}').textContent =
+            'Permite las ventanas emergentes y toca Imprimir.';
+          return;
+        }}
+        w.document.write(`{escaped}`); w.document.close(); w.focus();
+        setTimeout(function() {{ w.print(); w.close(); }}, 300);
+      }}
+      {fn}();  // intento automático (funciona si los popups están permitidos)
+    </script>
+    """, height=44)
+
+
+def _maybe_print_ticket(df: pd.DataFrame) -> None:
+    """Si una tarjeta pidió imprimir (print_ticket_id), genera y emite el ticket."""
+    tid = st.session_state.pop("print_ticket_id", None)
+    if tid is None:
+        return
+    match = df[df["id"] == tid]
+    if match.empty:
+        return
+    r = match.iloc[0]
+    ticket_html = generar_ticket_html(
+        int(r["id"]), r.get("numero_cliente", "—"), r.get("items", []),
+        r.get("total", 0), formatear_fecha(r.get("fecha")), r.get("estado", "pendiente"),
+    )
+    _emit_print(ticket_html, int(tid))
+
+
 def render_pedidos(dataframe: pd.DataFrame, tab_key: str = "all"):
     if dataframe.empty:
         st.markdown('<p style="color:#9ca3af; font-size:0.85rem; padding:1rem 0;">Sin pedidos en esta categoría.</p>', unsafe_allow_html=True)
@@ -211,32 +258,11 @@ def render_pedidos(dataframe: pd.DataFrame, tab_key: str = "all"):
                 if st.button(btn_label, key=f"avanzar_{uid}", type="primary"):
                     avanzar_estado(pid, estado)
 
-            # Print ticket button
-            items_raw = row.get("items", [])
-            ticket_html = generar_ticket_html(pid, cliente, items_raw, total_p, fecha, estado)
-            ticket_escaped = ticket_html.replace("\\", "\\\\").replace("`", "\\`").replace("${", "\\${").replace("</script>", "<" + "/script>")
-            print_js = f"""
-            <script>
-            function imprimirTicket_{uid.replace("-","_")}() {{
-                var w = window.open('', '_blank', 'width=320,height=500,scrollbars=yes');
-                w.document.write(`{ticket_escaped}`);
-                w.document.close();
-                w.focus();
-                setTimeout(function() {{ w.print(); w.close(); }}, 300);
-            }}
-            </script>
-            <button onclick="imprimirTicket_{uid.replace("-","_")}()" style="
-                width:100%; margin-top:4px; padding:6px 8px;
-                background:#ffffff; color:#374151;
-                border:1px solid #d1d5db; border-radius:8px;
-                font-family:'DM Sans',sans-serif; font-size:0.75rem;
-                cursor:pointer; transition:all 0.15s;
-            " onmouseover="this.style.borderColor='#9ca3af';this.style.color='#111827';"
-               onmouseout="this.style.borderColor='#d1d5db';this.style.color='#374151';">
-                🖨 Ticket
-            </button>
-            """
-            st.components.v1.html(print_js, height=48, scrolling=False)
+            # P3: botón nativo; la impresión usa UN solo iframe bajo demanda
+            # (_maybe_print_ticket en render()), no un iframe por tarjeta.
+            if st.button("🖨 Ticket", key=f"ticket_{uid}"):
+                st.session_state["print_ticket_id"] = int(pid)
+                st.rerun()
 
             if estado in ESTADOS and ESTADOS.index(estado) > 0 and estado != "entregado":
                 if st.button("↩ Revertir", key=f"revertir_{uid}"):
@@ -251,6 +277,7 @@ def render_pedidos(dataframe: pd.DataFrame, tab_key: str = "all"):
 # ── Agrupación por mesa (Req 3) ────────────────────────────────────────────────
 ESTADOS_ACTIVOS = ["pendiente", "en preparacion", "listo"]
 
+@st.cache_data(ttl=60)  # P1: el mapa de mesas cambia poco; TTL corto basta
 def cargar_mesas_nombres() -> dict:
     """Mapa {id: nombre} de mesas para etiquetar los grupos (tolerante a fallos)."""
     try:
@@ -294,6 +321,10 @@ def render_por_mesa(df: pd.DataFrame, mesa_nombres: dict):
 # SECCIÓN: PEDIDOS
 # ══════════════════════════════════════════════════════════════════════════════
 def render():
+    # P4: el auto-refresco vive en el tablero (no en panel.py) para que solo
+    # corra aquí y no relance la app mientras se arma un pedido en otra pestaña.
+    st_autorefresh(interval=30000, key="pedidos_autorefresh")
+
     df = cargar_pedidos()
 
     # ── Audio alert: detect new pending orders ─────────────────────────────────
@@ -349,6 +380,9 @@ def render():
         st.markdown(f'<div class="metric-card"><div class="metric-value" style="font-size:clamp(0.85rem, 1.5vw, 1.6rem); white-space:nowrap;">${fmt_money(ventas_hoy)}</div><div class="metric-label">Ventas hoy</div></div>', unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
+
+    # P3: emite el ticket pedido por una tarjeta (un único iframe, no uno por orden).
+    _maybe_print_ticket(df)
 
     # Req 3: alterna entre el tablero agrupado por mesa y la vista por estado.
     vista = st.radio(

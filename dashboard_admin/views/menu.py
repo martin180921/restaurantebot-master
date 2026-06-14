@@ -13,22 +13,26 @@ def agregar_plato(nombre: str, precio: int):
         conn.execute(text(
             "INSERT INTO menu (nombre, precio, activo, orden) VALUES (:n, :p, TRUE, :o)"
         ), {"n": nombre.strip(), "p": precio, "o": max_orden + 1})
+    cargar_menu.clear()  # P1: invalida la caché del menú
 
 def actualizar_plato(plato_id: int, nombre: str, precio: int):
     with engine.begin() as conn:
         conn.execute(text(
             "UPDATE menu SET nombre = :n, precio = :p WHERE id = :id"
         ), {"n": nombre.strip(), "p": precio, "id": plato_id})
+    cargar_menu.clear()  # P1
 
 def toggle_plato(plato_id: int, activo_actual: bool):
     with engine.begin() as conn:
         conn.execute(text(
             "UPDATE menu SET activo = :a WHERE id = :id"
         ), {"a": not activo_actual, "id": plato_id})
+    cargar_menu.clear()  # P1
 
 def eliminar_plato(plato_id: int):
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM menu WHERE id = :id"), {"id": plato_id})
+    cargar_menu.clear()  # P1
 
 
 # ══════════════════════════════════════════════════════════════════════════════

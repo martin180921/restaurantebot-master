@@ -26,10 +26,13 @@ def _ensure_schema():
 
 
 # ── DB: mesas ──────────────────────────────────────────────────────────────────
+# P1: cacheamos el listado (cambia poco) y lo invalidamos tras cada escritura.
+# Devolvemos dicts (no RowMapping) para que sean serializables por st.cache_data.
+@st.cache_data(ttl=30)
 def cargar_mesas():
     """Mesas + nº de pedidos activos asociados (para mostrar y para el borrado)."""
     with engine.connect() as conn:
-        return conn.execute(text("""
+        rows = conn.execute(text("""
             SELECT m.id, m.nombre, m.activa,
                    COALESCE(p.cnt, 0) AS pedidos_activos
             FROM mesas m
@@ -42,20 +45,24 @@ def cargar_mesas():
             ) p ON p.mesa_id = m.id
             ORDER BY m.id
         """)).mappings().all()
+    return [dict(r) for r in rows]
 
 def crear_mesa(nombre: str):
     with engine.begin() as conn:
         conn.execute(text("INSERT INTO mesas (nombre) VALUES (:n)"), {"n": nombre.strip()})
+    cargar_mesas.clear()  # P1
 
 def renombrar_mesa(mesa_id: int, nombre: str):
     with engine.begin() as conn:
         conn.execute(text("UPDATE mesas SET nombre = :n WHERE id = :id"),
                      {"n": nombre.strip(), "id": mesa_id})
+    cargar_mesas.clear()  # P1
 
 def toggle_mesa(mesa_id: int, activa_actual: bool):
     with engine.begin() as conn:
         conn.execute(text("UPDATE mesas SET activa = :a WHERE id = :id"),
                      {"a": not activa_actual, "id": mesa_id})
+    cargar_mesas.clear()  # P1
 
 def eliminar_mesa(mesa_id: int) -> str:
     """Borra la mesa; si tiene pedidos asociados (historial) la archiva en su lugar.
@@ -67,11 +74,13 @@ def eliminar_mesa(mesa_id: int) -> str:
     try:
         with engine.begin() as conn:
             conn.execute(text("DELETE FROM mesas WHERE id = :id"), {"id": mesa_id})
-        return "deleted"
+        resultado = "deleted"
     except IntegrityError:
         with engine.begin() as conn:
             conn.execute(text("UPDATE mesas SET activa = FALSE WHERE id = :id"), {"id": mesa_id})
-        return "archived"
+        resultado = "archived"
+    cargar_mesas.clear()  # P1
+    return resultado
 
 
 # ══════════════════════════════════════════════════════════════════════════════
