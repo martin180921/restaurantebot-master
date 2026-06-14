@@ -26,6 +26,18 @@ ESTADO_LABEL_BTN = {
 }
 
 
+# ── Esquema defensivo (F1) ──────────────────────────────────────────────────────
+# El panel puede arrancar antes de que el bot ejecute init_db(); garantizamos la
+# columna que necesita el flujo de cancelación con motivo.
+ESTADOS_ACTIVOS = ["pendiente", "en preparacion", "listo"]
+
+def _ensure_pedidos_schema():
+    with engine.begin() as conn:
+        conn.execute(text(
+            "ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS motivo_cancelacion TEXT"
+        ))
+
+
 # ── DB: pedidos ────────────────────────────────────────────────────────────────
 def cargar_pedidos():
     with engine.connect() as conn:
@@ -55,11 +67,11 @@ def revertir_estado(pedido_id: int, estado_actual: str):
         )
     st.rerun()
 
-def cancelar_pedido(pedido_id: int):
+def cancelar_pedido(pedido_id: int, motivo: str = ""):
     with engine.begin() as conn:
         conn.execute(
-            text("UPDATE pedidos SET estado = :estado WHERE id = :id"),
-            {"estado": "cancelado", "id": pedido_id}
+            text("UPDATE pedidos SET estado = 'cancelado', motivo_cancelacion = :m WHERE id = :id"),
+            {"m": (motivo or "").strip() or None, "id": pedido_id}
         )
     st.rerun()
 
@@ -311,16 +323,31 @@ def render_pedidos(dataframe: pd.DataFrame, tab_key: str = "all", mesa_nombres=N
             if estado in ESTADOS and ESTADOS.index(estado) > 0 and estado != "entregado":
                 if st.button("↩ Revertir", key=f"revertir_{uid}"):
                     revertir_estado(pid, estado)
-            if estado == "pendiente":
-                st.markdown('<div class="btn-cancelar">', unsafe_allow_html=True)
+            # F1: cancelar disponible para cualquier pedido activo (antes solo pendiente)
+            if estado in ESTADOS_ACTIVOS:
                 if st.button("✕ Cancelar", key=f"cancelar_{uid}"):
-                    cancelar_pedido(pid)
-                st.markdown('</div>', unsafe_allow_html=True)
+                    st.session_state["confirmar_cancel"] = pid
+                    st.rerun()
+
+        # F1: confirmación con motivo opcional (ancho completo, debajo de la tarjeta)
+        if st.session_state.get("confirmar_cancel") == pid:
+            st.warning(f"¿Cancelar el pedido #{pid}?")
+            motivo = st.text_input(
+                "Motivo (opcional)", key=f"motivo_{uid}",
+                placeholder="Ej: cliente se retiró, error de cocina…",
+            )
+            cc1, cc2 = st.columns(2)
+            with cc1:
+                if st.button("Sí, cancelar", key=f"confirm_cancel_{uid}", type="primary"):
+                    st.session_state.pop("confirmar_cancel", None)
+                    cancelar_pedido(pid, motivo)
+            with cc2:
+                if st.button("Volver", key=f"volver_cancel_{uid}"):
+                    st.session_state.pop("confirmar_cancel", None)
+                    st.rerun()
 
 
 # ── Agrupación por mesa (Req 3) ────────────────────────────────────────────────
-ESTADOS_ACTIVOS = ["pendiente", "en preparacion", "listo"]
-
 @st.cache_data(ttl=60)  # P1: el mapa de mesas cambia poco; TTL corto basta
 def cargar_mesas_nombres() -> dict:
     """Mapa {id: nombre} de mesas para etiquetar los grupos (tolerante a fallos)."""
@@ -368,6 +395,11 @@ def render():
     # P4: el auto-refresco vive en el tablero (no en panel.py) para que solo
     # corra aquí y no relance la app mientras se arma un pedido en otra pestaña.
     st_autorefresh(interval=30000, key="pedidos_autorefresh")
+
+    # F1: garantiza la columna de motivo una vez por sesión.
+    if "pedidos_schema_ok" not in st.session_state:
+        _ensure_pedidos_schema()
+        st.session_state["pedidos_schema_ok"] = True
 
     df = cargar_pedidos()
 
