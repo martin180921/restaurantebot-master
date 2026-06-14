@@ -24,6 +24,13 @@ def crear_pedido_manual(mesa: int, items: list, total: int):
 # SECCIÓN: NUEVO PEDIDO
 # ══════════════════════════════════════════════════════════════════════════════
 def render():
+    # P4: el formulario corre como fragment; los +/- y el confirmar relanzan solo
+    # este bloque (st.rerun(scope="fragment")), no toda la app.
+    _form_fragment()
+
+
+@st.fragment
+def _form_fragment():
     df_menu  = cargar_menu()
     df_activo = df_menu[df_menu["activo"] == True].reset_index(drop=True)
 
@@ -61,13 +68,13 @@ def render():
                                 st.session_state["carrito_manual"][pid] = qty - 1
                                 if st.session_state["carrito_manual"][pid] == 0:
                                     del st.session_state["carrito_manual"][pid]
-                            st.rerun()
+                            st.rerun(scope="fragment")
                     with c_num:
                         st.markdown(f'<div style="text-align:center; padding:4px 0; font-size:0.9rem; color:#1a1a1a; font-weight:600;">{qty}</div>', unsafe_allow_html=True)
                     with c_mas:
                         if st.button("+", key=f"mas_{pid}"):
                             st.session_state["carrito_manual"][pid] = qty + 1
-                            st.rerun()
+                            st.rerun(scope="fragment")
 
     with col_resumen:
         st.markdown('<div class="section-title">Resumen</div>', unsafe_allow_html=True)
@@ -106,10 +113,10 @@ def render():
                 crear_pedido_manual(int(mesa), items_pedido, total_pedido)
                 st.session_state["carrito_manual"] = {}
                 st.success(f"Pedido para Mesa {int(mesa)} creado ✓")
-                st.rerun()
+                st.rerun(scope="fragment")
 
         if carrito:
             st.markdown("<br>", unsafe_allow_html=True)
             if st.button("🗑 Limpiar", key="btn_limpiar"):
                 st.session_state["carrito_manual"] = {}
-                st.rerun()
+                st.rerun(scope="fragment")

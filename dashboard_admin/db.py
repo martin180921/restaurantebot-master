@@ -1,6 +1,7 @@
 """Conexión compartida a la base de datos y lecturas comunes entre vistas."""
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
+import streamlit as st
 import pandas as pd
 import os
 
@@ -44,6 +45,10 @@ def fmt_money(valor) -> str:
 
 
 # ── Menú (lectura compartida por views/menu.py y views/nuevo_pedido.py) ────────
+# P1: el menú cambia poco; lo cacheamos para no consultar la BD en cada rerun
+# (cada tap de +/- dispara un rerun). menu.py llama cargar_menu.clear() tras
+# cada escritura para reflejar los cambios al instante.
+@st.cache_data(ttl=60)
 def cargar_menu():
     with engine.connect() as conn:
         resultado = conn.execute(text(

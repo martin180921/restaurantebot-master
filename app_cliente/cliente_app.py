@@ -101,17 +101,23 @@ hr { border-color: #eaeaea !important; }
 
 
 # ── DB ─────────────────────────────────────────────────────────────────────────
+# P1: menú y mesas cambian poco; cacheamos con TTL corto para no consultar la BD
+# en cada tap de +/-. Devolvemos dicts (no RowMapping) por serializabilidad.
+@st.cache_data(ttl=30)
 def cargar_menu():
     with engine.connect() as conn:
-        return conn.execute(text(
+        rows = conn.execute(text(
             "SELECT id, nombre, precio FROM menu WHERE activo = TRUE ORDER BY orden, id"
         )).mappings().all()
+    return [dict(r) for r in rows]
 
+@st.cache_data(ttl=30)
 def cargar_mesas():
     with engine.connect() as conn:
-        return conn.execute(text(
+        rows = conn.execute(text(
             "SELECT id, nombre FROM mesas WHERE activa = TRUE ORDER BY id"
         )).mappings().all()
+    return [dict(r) for r in rows]
 
 def guardar_pedido(numero_cliente: str, mesa_id: int, items: list, total: int):
     with engine.begin() as conn:
@@ -120,6 +126,86 @@ def guardar_pedido(numero_cliente: str, mesa_id: int, items: list, total: int):
             VALUES (:n, :i, :t, 'pendiente', :m)
         """), {"n": numero_cliente, "i": json.dumps(items, ensure_ascii=False),
                "t": total, "m": mesa_id})
+
+
+# ── Pedido (fragment P4) ────────────────────────────────────────────────────────
+# Menú + resumen + envío corren como un fragment: los +/- relanzan SOLO este
+# bloque (st.rerun(scope="fragment")) en vez de re-ejecutar todo el script.
+@st.fragment
+def _ordenar(menu, mesa_sel, mesa_labels, qp):
+    st.markdown('<div class="c-section">Menú</div>', unsafe_allow_html=True)
+    carrito = st.session_state["carrito"]
+
+    for item in menu:
+        iid    = int(item["id"])
+        nombre = item["nombre"]
+        precio = int(item["precio"])
+        qty    = carrito.get(iid, 0)
+
+        c_info, c_minus, c_qty, c_plus = st.columns([4, 1, 1, 1])
+        with c_info:
+            st.markdown(
+                f'<div class="c-item"><span class="c-name">{html.escape(str(nombre))}</span>'
+                f'<span class="c-price">${fmt_money(precio)}</span></div>',
+                unsafe_allow_html=True,
+            )
+        with c_minus:
+            if st.button("−", key=f"m_{iid}"):
+                if qty > 0:
+                    carrito[iid] = qty - 1
+                    if carrito[iid] == 0:
+                        del carrito[iid]
+                st.rerun(scope="fragment")
+        with c_qty:
+            st.markdown(f'<div class="c-qty">{qty}</div>', unsafe_allow_html=True)
+        with c_plus:
+            if st.button("+", key=f"p_{iid}"):
+                carrito[iid] = qty + 1
+                st.rerun(scope="fragment")
+
+    menu_by_id   = {int(m["id"]): m for m in menu}
+    items_pedido = []
+    total        = 0
+    for iid, qty in carrito.items():
+        m = menu_by_id.get(iid)
+        if m and qty > 0:
+            precio   = int(m["precio"])
+            subtotal = precio * qty
+            total   += subtotal
+            items_pedido.append({"id": str(iid), "nombre": m["nombre"],
+                                 "precio": precio, "cantidad": qty})
+
+    st.markdown("<hr>", unsafe_allow_html=True)
+
+    if not items_pedido:
+        st.markdown('<div class="c-empty">Agrega platos para armar tu pedido.</div>',
+                    unsafe_allow_html=True)
+        return
+
+    filas = "".join(
+        f'<div class="c-row"><span>{it["cantidad"]}× {html.escape(str(it["nombre"]))}</span>'
+        f'<span>${fmt_money(it["precio"] * it["cantidad"])}</span></div>'
+        for it in items_pedido
+    )
+    st.markdown(
+        f'<div class="c-summary">{filas}'
+        f'<div class="c-total"><span>Total</span><span>${fmt_money(total)}</span></div></div>',
+        unsafe_allow_html=True,
+    )
+
+    if st.button(f"Enviar pedido · ${fmt_money(total)}", type="primary", use_container_width=True):
+        # C2: ?tel viene de una URL pública. Lo limpiamos y acotamos antes de
+        # guardarlo (y además se escapa al renderizarlo en el panel/ticket).
+        tel_param = qp.get("tel")
+        if tel_param:
+            limpio = "".join(c for c in str(tel_param) if c not in "<>\"'`").strip()[:40]
+            numero_cliente = limpio or mesa_labels[mesa_sel]
+        else:
+            numero_cliente = mesa_labels[mesa_sel]
+        guardar_pedido(numero_cliente, mesa_sel, items_pedido, total)
+        st.session_state["pedido_enviado"] = {"mesa": mesa_labels[mesa_sel], "total": total}
+        st.session_state["carrito"] = {}
+        st.rerun(scope="app")  # salir del fragment → pantalla de confirmación
 
 
 # ── Estado de sesión ───────────────────────────────────────────────────────────
@@ -187,78 +273,5 @@ mesa_sel = st.selectbox(
 )
 
 
-# ── Menú con steppers de cantidad ──────────────────────────────────────────────
-st.markdown('<div class="c-section">Menú</div>', unsafe_allow_html=True)
-carrito = st.session_state["carrito"]
-
-for item in menu:
-    iid    = int(item["id"])
-    nombre = item["nombre"]
-    precio = int(item["precio"])
-    qty    = carrito.get(iid, 0)
-
-    c_info, c_minus, c_qty, c_plus = st.columns([4, 1, 1, 1])
-    with c_info:
-        st.markdown(
-            f'<div class="c-item"><span class="c-name">{html.escape(str(nombre))}</span>'
-            f'<span class="c-price">${fmt_money(precio)}</span></div>',
-            unsafe_allow_html=True,
-        )
-    with c_minus:
-        if st.button("−", key=f"m_{iid}"):
-            if qty > 0:
-                carrito[iid] = qty - 1
-                if carrito[iid] == 0:
-                    del carrito[iid]
-            st.rerun()
-    with c_qty:
-        st.markdown(f'<div class="c-qty">{qty}</div>', unsafe_allow_html=True)
-    with c_plus:
-        if st.button("+", key=f"p_{iid}"):
-            carrito[iid] = qty + 1
-            st.rerun()
-
-
-# ── Resumen + enviar ───────────────────────────────────────────────────────────
-menu_by_id   = {int(m["id"]): m for m in menu}
-items_pedido = []
-total        = 0
-for iid, qty in carrito.items():
-    m = menu_by_id.get(iid)
-    if m and qty > 0:
-        precio   = int(m["precio"])
-        subtotal = precio * qty
-        total   += subtotal
-        items_pedido.append({"id": str(iid), "nombre": m["nombre"],
-                             "precio": precio, "cantidad": qty})
-
-st.markdown("<hr>", unsafe_allow_html=True)
-
-if not items_pedido:
-    st.markdown('<div class="c-empty">Agrega platos para armar tu pedido.</div>',
-                unsafe_allow_html=True)
-else:
-    filas = "".join(
-        f'<div class="c-row"><span>{it["cantidad"]}× {html.escape(str(it["nombre"]))}</span>'
-        f'<span>${fmt_money(it["precio"] * it["cantidad"])}</span></div>'
-        for it in items_pedido
-    )
-    st.markdown(
-        f'<div class="c-summary">{filas}'
-        f'<div class="c-total"><span>Total</span><span>${fmt_money(total)}</span></div></div>',
-        unsafe_allow_html=True,
-    )
-
-    if st.button(f"Enviar pedido · ${fmt_money(total)}", type="primary", use_container_width=True):
-        # C2: ?tel viene de una URL pública. Lo limpiamos y acotamos antes de
-        # guardarlo (y además se escapa al renderizarlo en el panel/ticket).
-        tel_param = qp.get("tel")
-        if tel_param:
-            limpio = "".join(c for c in str(tel_param) if c not in "<>\"'`").strip()[:40]
-            numero_cliente = limpio or mesa_labels[mesa_sel]
-        else:
-            numero_cliente = mesa_labels[mesa_sel]
-        guardar_pedido(numero_cliente, mesa_sel, items_pedido, total)
-        st.session_state["pedido_enviado"] = {"mesa": mesa_labels[mesa_sel], "total": total}
-        st.session_state["carrito"] = {}
-        st.rerun()
+# ── Menú + resumen + envío (corre como fragment, P4) ───────────────────────────
+_ordenar(menu, mesa_sel, mesa_labels, qp)
