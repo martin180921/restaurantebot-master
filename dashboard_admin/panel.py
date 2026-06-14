@@ -13,7 +13,7 @@ import hashlib
 import os
 from datetime import datetime
 
-from views import pedidos, nuevo_pedido, menu, mesas
+from views import pedidos, nuevo_pedido, menu, mesas, resumen
 from db import fecha_larga
 
 load_dotenv()
@@ -191,12 +191,14 @@ div[data-testid="column"] .stButton > button[kind="primary"] {
     width: 100% !important;
 }
 
-/* Botón cancelar en rojo */
-.btn-cancelar button {
+/* F1: botón cancelar en rojo, vía clase st-key-<key> (Streamlit >= 1.39).
+   Antes se usaba un wrapper .btn-cancelar que no envolvía al botón en el DOM
+   (cada st.markdown vive en su propio contenedor) y además añadía hueco. */
+[class*="st-key-cancelar_"] button {
     border-color: #fecaca !important; color: #dc2626 !important;
-    background: #fef2f2 !important; width: 100% !important;
+    background: #fef2f2 !important;
 }
-.btn-cancelar button:hover {
+[class*="st-key-cancelar_"] button:hover {
     background: #fee2e2 !important; border-color: #f87171 !important; color: #b91c1c !important;
 }
 
@@ -251,6 +253,11 @@ hr { border-color: #e5e7eb !important; }
 .block-container { padding: 0.75rem 1rem 1rem 1rem !important; }
 .element-container { margin-bottom: 0.35rem !important; }
 .stButton > button { margin: 2px 0 !important; }
+
+/* F1/UX: botones de acción apilados (columna de acciones del tablero) más juntos.
+   El gran hueco venía del margen por contenedor de cada botón. */
+div[data-testid="column"] .element-container:has(.stButton) { margin-bottom: 0 !important; }
+div[data-testid="column"] .stButton > button { margin: 1px 0 !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -272,7 +279,7 @@ st.markdown(f"""
 # Fix 3: Navigation as pills
 seccion = st.radio(
     "Navegación",
-    ["📋 Pedidos", "➕ Nuevo pedido", "🍽️ Menú", "🪑 Mesas"],
+    ["📋 Pedidos", "➕ Nuevo pedido", "🍽️ Menú", "🪑 Mesas", "📊 Resumen"],
     horizontal=True,
     label_visibility="collapsed"
 )
@@ -287,3 +294,5 @@ elif seccion == "🍽️ Menú":
     menu.render()
 elif seccion == "🪑 Mesas":
     mesas.render()
+elif seccion == "📊 Resumen":
+    resumen.render()
