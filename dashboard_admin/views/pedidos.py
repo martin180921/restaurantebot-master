@@ -26,16 +26,9 @@ ESTADO_LABEL_BTN = {
 }
 
 
-# ── Esquema defensivo (F1) ──────────────────────────────────────────────────────
-# El panel puede arrancar antes de que el bot ejecute init_db(); garantizamos la
-# columna que necesita el flujo de cancelación con motivo.
+# F1: el esquema (columna motivo_cancelacion) lo garantiza db._ensure_schema()
+# al importar db.py, así que aquí ya está disponible.
 ESTADOS_ACTIVOS = ["pendiente", "en preparacion", "listo"]
-
-def _ensure_pedidos_schema():
-    with engine.begin() as conn:
-        conn.execute(text(
-            "ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS motivo_cancelacion TEXT"
-        ))
 
 
 # ── DB: pedidos ────────────────────────────────────────────────────────────────
@@ -395,11 +388,6 @@ def render():
     # P4: el auto-refresco vive en el tablero (no en panel.py) para que solo
     # corra aquí y no relance la app mientras se arma un pedido en otra pestaña.
     st_autorefresh(interval=30000, key="pedidos_autorefresh")
-
-    # F1: garantiza la columna de motivo una vez por sesión.
-    if "pedidos_schema_ok" not in st.session_state:
-        _ensure_pedidos_schema()
-        st.session_state["pedidos_schema_ok"] = True
 
     df = cargar_pedidos()
 

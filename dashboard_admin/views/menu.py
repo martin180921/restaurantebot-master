@@ -1,7 +1,9 @@
-"""Vista de Menú: alta, edición, activación y borrado de platos."""
+"""Vista de Menú: alta, edición, activación, agotado-hoy y borrado de platos."""
 import streamlit as st
 from sqlalchemy import text
 import html
+import pandas as pd
+from datetime import date
 
 from db import engine, cargar_menu, fmt_money
 
@@ -34,6 +36,29 @@ def eliminar_plato(plato_id: int):
         conn.execute(text("DELETE FROM menu WHERE id = :id"), {"id": plato_id})
     cargar_menu.clear()  # P1
 
+# F6: "86 / agotado hoy" — se marca con la fecha de hoy y vuelve a estar
+# disponible solo (automáticamente) al cambiar el día.
+def marcar_agotado(plato_id: int):
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE menu SET agotado_hasta = CURRENT_DATE WHERE id = :id"),
+                     {"id": plato_id})
+    cargar_menu.clear()
+
+def quitar_agotado(plato_id: int):
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE menu SET agotado_hasta = NULL WHERE id = :id"),
+                     {"id": plato_id})
+    cargar_menu.clear()
+
+def _agotado_hoy(valor) -> bool:
+    """True si agotado_hasta cubre el día de hoy."""
+    if valor is None or pd.isna(valor):
+        return False
+    try:
+        return pd.Timestamp(valor).date() >= date.today()
+    except (ValueError, TypeError):
+        return False
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SECCIÓN: MENÚ
@@ -61,15 +86,18 @@ def render():
             st.markdown('<p style="color:#9ca3af; font-size:0.85rem;">No hay platos en el menú.</p>', unsafe_allow_html=True)
         else:
             for idx, row in df_menu.iterrows():
-                pid      = int(row["id"])
-                nombre   = row["nombre"]
-                precio   = int(row["precio"])
-                activo   = bool(row["activo"])
-                card_cls = "menu-card" if activo else "menu-card inactivo"
-                badge    = '<span class="badge badge-activo">● Activo</span>' if activo else '<span class="badge badge-inactivo">○ Inactivo</span>'
+                pid        = int(row["id"])
+                nombre     = row["nombre"]
+                precio     = int(row["precio"])
+                activo     = bool(row["activo"])
+                agotado    = _agotado_hoy(row.get("agotado_hasta"))  # F6
+                card_cls   = "menu-card" if (activo and not agotado) else "menu-card inactivo"
+                badge      = '<span class="badge badge-activo">● Activo</span>' if activo else '<span class="badge badge-inactivo">○ Inactivo</span>'
+                if agotado:
+                    badge += ' <span class="badge badge-agotado">🚫 Hoy</span>'
 
-                # Fix 4: [3, 1] instead of [3, 2] — buttons tighter to card
-                col_card, col_btns = st.columns([3, 1])
+                # Fix 4 / F6: 4 acciones, columna un poco más ancha
+                col_card, col_btns = st.columns([3, 1.4])
                 with col_card:
                     st.markdown(f"""
                     <div class="{card_cls}">
@@ -78,14 +106,14 @@ def render():
                           <div class="menu-nombre">{html.escape(str(nombre))}</div>
                           <div class="menu-precio">${fmt_money(precio)}</div>
                         </div>
-                        {badge}
+                        <div style="text-align:right;">{badge}</div>
                       </div>
                     </div>
                     """, unsafe_allow_html=True)
 
                 with col_btns:
                     st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
-                    b1, b2, b3 = st.columns(3)
+                    b1, b2, b3, b4 = st.columns(4)
                     with b1:
                         toggle_label = "⏸" if activo else "▶"
                         toggle_help  = "Desactivar" if activo else "Activar"
@@ -93,12 +121,22 @@ def render():
                             toggle_plato(pid, activo)
                             st.rerun()
                     with b2:
+                        # F6: 86 = agotar hoy; ♻ = volver a habilitar
+                        if agotado:
+                            if st.button("♻", key=f"unago_{pid}_{idx}", help="Disponible de nuevo"):
+                                quitar_agotado(pid)
+                                st.rerun()
+                        else:
+                            if st.button("86", key=f"ago_{pid}_{idx}", help="Agotado hoy (vuelve mañana)"):
+                                marcar_agotado(pid)
+                                st.rerun()
+                    with b3:
                         if st.button("✏️", key=f"edit_{pid}_{idx}", help="Editar"):
                             st.session_state["editar_id"]     = pid
                             st.session_state["editar_nombre"] = nombre
                             st.session_state["editar_precio"] = precio
                             st.rerun()
-                    with b3:
+                    with b4:
                         if st.button("🗑", key=f"del_{pid}_{idx}", help="Eliminar"):
                             st.session_state["confirmar_del"] = pid
                             st.rerun()
@@ -158,8 +196,9 @@ def render():
         st.markdown("""
         <div style="background:#f9fafb; border:1px solid #e5e7eb; border-radius:10px; padding:1rem; font-size:0.78rem; color:#6b7280;">
           <div style="color:#374151; font-weight:600; margin-bottom:6px;">💡 Cómo funciona</div>
-          Los cambios se reflejan en WhatsApp de inmediato.<br><br>
-          <b style="color:#4b5563;">Desactivar</b> oculta el plato del menú sin borrarlo.<br>
-          <b style="color:#4b5563;">Eliminar</b> lo borra permanentemente.
+          Los cambios se reflejan en la carta de inmediato.<br><br>
+          <b style="color:#4b5563;">86</b> marca el plato como agotado solo por hoy; vuelve solo mañana.<br>
+          <b style="color:#4b5563;">Desactivar</b> (⏸) oculta el plato del menú sin borrarlo.<br>
+          <b style="color:#4b5563;">Eliminar</b> (🗑) lo borra permanentemente.
         </div>
         """, unsafe_allow_html=True)

@@ -66,13 +66,18 @@ def init_db():
         """))
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS menu (
-                id       SERIAL PRIMARY KEY,
-                nombre   VARCHAR(100) NOT NULL,
-                precio   INTEGER NOT NULL,
-                activo   BOOLEAN NOT NULL DEFAULT TRUE,
-                orden    INTEGER NOT NULL DEFAULT 0
+                id            SERIAL PRIMARY KEY,
+                nombre        VARCHAR(100) NOT NULL,
+                precio        INTEGER NOT NULL,
+                activo        BOOLEAN NOT NULL DEFAULT TRUE,
+                orden         INTEGER NOT NULL DEFAULT 0,
+                agotado_hasta DATE
             )
         """))
+        # F6: "86 / agotado hoy" — disponible de nuevo automáticamente al día siguiente
+        conn.execute(text(
+            "ALTER TABLE menu ADD COLUMN IF NOT EXISTS agotado_hasta DATE"
+        ))
         count = conn.execute(text("SELECT COUNT(*) FROM menu")).scalar()
         if count == 0:
             conn.execute(text("""

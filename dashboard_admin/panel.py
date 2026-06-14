@@ -142,6 +142,7 @@ html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
 .badge-cancelado   { background: #fee2e2; color: #b91c1c; border: 1px solid #fecaca; }
 .badge-activo      { background: #dcfce7; color: #15803d; border: 1px solid #bbf7d0; }
 .badge-inactivo    { background: #f3f4f6; color: #9ca3af; border: 1px solid #e5e7eb; }
+.badge-agotado     { background: #fef2f2; color: #dc2626; border: 1px solid #fecaca; }
 
 .order-card {
     background: #ffffff; border: 1px solid #e5e7eb; border-radius: 14px;
