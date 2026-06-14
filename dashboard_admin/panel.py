@@ -13,7 +13,7 @@ import hashlib
 import os
 from datetime import datetime
 
-from views import pedidos, nuevo_pedido, menu
+from views import pedidos, nuevo_pedido, menu, mesas
 
 load_dotenv()
 
@@ -266,7 +266,7 @@ st.markdown(f"""
 # Fix 3: Navigation as pills
 seccion = st.radio(
     "Navegación",
-    ["📋 Pedidos", "➕ Nuevo pedido", "🍽️ Menú"],
+    ["📋 Pedidos", "➕ Nuevo pedido", "🍽️ Menú", "🪑 Mesas"],
     horizontal=True,
     label_visibility="collapsed"
 )
@@ -279,3 +279,5 @@ elif seccion == "➕ Nuevo pedido":
     nuevo_pedido.render()
 elif seccion == "🍽️ Menú":
     menu.render()
+elif seccion == "🪑 Mesas":
+    mesas.render()
