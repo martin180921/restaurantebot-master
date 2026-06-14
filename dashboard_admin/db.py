@@ -44,6 +44,25 @@ def fmt_money(valor) -> str:
         return "0"
 
 
+# ── Fechas en español, sin depender del locale ni de %-d (U4) ───────────────────
+# %-d y %B/%b dependen de glibc (revientan en Windows) y del locale (devuelven
+# meses en inglés). Formateamos a mano para que sea portable y en español.
+_MESES = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio",
+          "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
+_MESES_ABBR = ["ene", "feb", "mar", "abr", "may", "jun", "jul",
+               "ago", "sep", "oct", "nov", "dic"]
+
+
+def fecha_larga(dt) -> str:
+    """'13 de junio, 2026'."""
+    return f"{dt.day} de {_MESES[dt.month - 1]}, {dt.year}"
+
+
+def fecha_corta(dt) -> str:
+    """'13 jun · 14:30'."""
+    return f"{dt.day} {_MESES_ABBR[dt.month - 1]} · {dt.hour:02d}:{dt.minute:02d}"
+
+
 # ── Menú (lectura compartida por views/menu.py y views/nuevo_pedido.py) ────────
 # P1: el menú cambia poco; lo cacheamos para no consultar la BD en cada rerun
 # (cada tap de +/- dispara un rerun). menu.py llama cargar_menu.clear() tras

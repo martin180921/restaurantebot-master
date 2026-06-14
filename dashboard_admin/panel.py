@@ -14,6 +14,7 @@ import os
 from datetime import datetime
 
 from views import pedidos, nuevo_pedido, menu, mesas
+from db import fecha_larga
 
 load_dotenv()
 
@@ -260,7 +261,7 @@ st.markdown(f"""
 <div class="panel-header">
   <div>
     <div class="panel-title">🍽️ RestauranteBOT</div>
-    <div class="panel-subtitle">Panel de operaciones · {datetime.now().strftime("%-d de %B, %Y")}</div>
+    <div class="panel-subtitle">Panel de operaciones · {fecha_larga(datetime.now())}</div>
   </div>
   <div style="font-size:0.8rem; color:#9ca3af;">
     <span class="live-dot"></span>En vivo
