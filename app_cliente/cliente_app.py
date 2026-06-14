@@ -9,13 +9,19 @@ La URL puede traer parámetros del enlace del bot:
     ?tel=<num>   → identifica al cliente en el pedido
 """
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
 import json
 import html
+import time
 import os
 
 load_dotenv()
+
+# F4: límites anti-spam para el enlace público de pedidos.
+COOLDOWN_SEG          = 25   # espera mínima entre envíos por sesión
+MAX_ACTIVAS_POR_MESA  = 6    # tope de pedidos en curso por mesa
 
 
 def _normalizar_db_url(url):
@@ -37,6 +43,15 @@ def _normalizar_db_url(url):
 DATABASE_URL = _normalizar_db_url(os.getenv("DATABASE_URL"))
 # C5: pre_ping + recycle para no reutilizar conexiones que Railway ya cerró.
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_recycle=1800)
+
+
+# F6: garantiza la columna agotado_hasta antes de consultarla (el bot la crea,
+# pero esta app puede arrancar antes). Una vez por proceso, idempotente.
+try:
+    with engine.begin() as _c:
+        _c.execute(text("ALTER TABLE menu ADD COLUMN IF NOT EXISTS agotado_hasta DATE"))
+except Exception:
+    pass
 
 
 # ── Formato de moneda LATAM $XX.XXX (C6) ────────────────────────────────────────
@@ -117,7 +132,10 @@ hr { border-color: #eaeaea !important; }
 def cargar_menu():
     with engine.connect() as conn:
         rows = conn.execute(text(
-            "SELECT id, nombre, precio FROM menu WHERE activo = TRUE ORDER BY orden, id"
+            # F6: oculta platos agotados hoy a los comensales.
+            "SELECT id, nombre, precio FROM menu "
+            "WHERE activo = TRUE AND (agotado_hasta IS NULL OR agotado_hasta < CURRENT_DATE) "
+            "ORDER BY orden, id"
         )).mappings().all()
     return [dict(r) for r in rows]
 
@@ -129,13 +147,29 @@ def cargar_mesas():
         )).mappings().all()
     return [dict(r) for r in rows]
 
-def guardar_pedido(numero_cliente: str, mesa_id: int, items: list, total: int):
+def guardar_pedido(numero_cliente: str, mesa_id: int, items: list, total: int) -> int:
     with engine.begin() as conn:
-        conn.execute(text("""
+        return int(conn.execute(text("""
             INSERT INTO pedidos (numero_cliente, items, total, estado, mesa_id)
-            VALUES (:n, :i, :t, 'pendiente', :m)
+            VALUES (:n, :i, :t, 'pendiente', :m) RETURNING id
         """), {"n": numero_cliente, "i": json.dumps(items, ensure_ascii=False),
-               "t": total, "m": mesa_id})
+               "t": total, "m": mesa_id}).scalar())
+
+def estado_pedido(pid: int):
+    """Estado actual de un pedido (F3, seguimiento), o None si no existe."""
+    with engine.connect() as conn:
+        row = conn.execute(text("SELECT estado FROM pedidos WHERE id = :id"),
+                           {"id": pid}).fetchone()
+    return row[0] if row else None
+
+def pedidos_activos_mesa(mesa_id: int) -> int:
+    """Pedidos en curso de una mesa (F4, tope anti-spam)."""
+    with engine.connect() as conn:
+        n = conn.execute(text(
+            "SELECT COUNT(*) FROM pedidos "
+            "WHERE mesa_id = :m AND estado NOT IN ('entregado', 'cancelado')"
+        ), {"m": mesa_id}).scalar()
+    return int(n or 0)
 
 
 # ── Pedido (fragment P4) ────────────────────────────────────────────────────────
@@ -204,18 +238,28 @@ def _ordenar(menu, mesa_sel, mesa_labels, qp):
     )
 
     if st.button(f"Enviar pedido · ${fmt_money(total)}", type="primary", use_container_width=True):
-        # C2: ?tel viene de una URL pública. Lo limpiamos y acotamos antes de
-        # guardarlo (y además se escapa al renderizarlo en el panel/ticket).
-        tel_param = qp.get("tel")
-        if tel_param:
-            limpio = "".join(c for c in str(tel_param) if c not in "<>\"'`").strip()[:40]
-            numero_cliente = limpio or mesa_labels[mesa_sel]
+        ahora = time.time()
+        # F4: anti-spam — cooldown por sesión + tope de pedidos en curso por mesa.
+        if ahora - st.session_state.get("ultimo_envio", 0) < COOLDOWN_SEG:
+            st.toast("Espera unos segundos antes de enviar otro pedido.", icon="⏳")
+        elif pedidos_activos_mesa(mesa_sel) >= MAX_ACTIVAS_POR_MESA:
+            st.toast("Esta mesa ya tiene varios pedidos en curso. Avisa al personal.", icon="🚦")
         else:
-            numero_cliente = mesa_labels[mesa_sel]
-        guardar_pedido(numero_cliente, mesa_sel, items_pedido, total)
-        st.session_state["pedido_enviado"] = {"mesa": mesa_labels[mesa_sel], "total": total}
-        st.session_state["carrito"] = {}
-        st.rerun(scope="app")  # salir del fragment → pantalla de confirmación
+            # C2: ?tel viene de una URL pública. Lo limpiamos y acotamos antes de
+            # guardarlo (y además se escapa al renderizarlo en el panel/ticket).
+            tel_param = qp.get("tel")
+            if tel_param:
+                limpio = "".join(c for c in str(tel_param) if c not in "<>\"'`").strip()[:40]
+                numero_cliente = limpio or mesa_labels[mesa_sel]
+            else:
+                numero_cliente = mesa_labels[mesa_sel]
+            nuevo_id = guardar_pedido(numero_cliente, mesa_sel, items_pedido, total)
+            st.session_state["ultimo_envio"]   = ahora
+            st.session_state["pedido_enviado"] = {
+                "id": nuevo_id, "mesa": mesa_labels[mesa_sel], "total": total,
+            }
+            st.session_state["carrito"] = {}
+            st.rerun(scope="app")  # salir del fragment → pantalla de seguimiento
 
 
 # ── Estado de sesión ───────────────────────────────────────────────────────────
@@ -225,17 +269,56 @@ if "pedido_enviado" not in st.session_state:
     st.session_state["pedido_enviado"] = None
 
 
-# ── Pantalla de confirmación ───────────────────────────────────────────────────
+# ── Pantalla de seguimiento (F3) ───────────────────────────────────────────────
 if st.session_state["pedido_enviado"]:
-    info = st.session_state["pedido_enviado"]
+    info   = st.session_state["pedido_enviado"]
+    pid    = info.get("id")
+    estado = estado_pedido(pid) if pid else None
+
+    # Mientras el pedido esté en curso, refresca el estado solo cada 15s.
+    if estado in ("pendiente", "en preparacion", "listo"):
+        st_autorefresh(interval=15000, key="seguimiento_autorefresh")
+
     st.markdown(f"""
-    <div style="text-align:center; padding:3rem 1rem;">
-      <div style="font-size:3rem;">✅</div>
-      <div style="font-size:1.3rem; font-weight:700; color:#1a1a1a; margin-top:0.5rem;">¡Pedido enviado!</div>
-      <div style="color:#777; margin-top:0.4rem;">{html.escape(str(info['mesa']))} · ${fmt_money(info['total'])}</div>
-      <div style="color:#999; font-size:0.85rem; margin-top:0.9rem;">La cocina ya recibió tu pedido. ¡Gracias!</div>
+    <div style="text-align:center; padding:1.5rem 1rem 0.5rem 1rem;">
+      <div style="font-size:2.4rem;">🧾</div>
+      <div style="font-size:1.2rem; font-weight:700; color:#1a1a1a; margin-top:0.4rem;">Pedido #{pid if pid else '—'}</div>
+      <div style="color:#777; margin-top:0.2rem;">{html.escape(str(info['mesa']))} · ${fmt_money(info['total'])}</div>
     </div>
     """, unsafe_allow_html=True)
+
+    if estado == "cancelado":
+        st.markdown("""
+        <div style="text-align:center; padding:1.5rem 1rem;">
+          <div style="font-size:2.2rem;">❌</div>
+          <div style="font-size:1.05rem; font-weight:700; color:#dc2626; margin-top:0.4rem;">Pedido cancelado</div>
+          <div style="color:#999; font-size:0.85rem; margin-top:0.4rem;">Avisa al personal si crees que es un error.</div>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        pasos     = ["pendiente", "en preparacion", "listo", "entregado"]
+        etiquetas = ["Recibido", "En preparación", "Listo", "¡Entregado!"]
+        idx = pasos.index(estado) if estado in pasos else 0
+
+        filas = ""
+        for i, et in enumerate(etiquetas):
+            if i < idx:
+                circ = '<div style="width:28px;height:28px;border-radius:50%;background:#16a34a;color:#fff;display:flex;align-items:center;justify-content:center;font-size:0.85rem;flex:0 0 auto;">✓</div>'
+                col, peso = "#16a34a", "500"
+            elif i == idx:
+                circ = '<div style="width:28px;height:28px;border-radius:50%;background:#16a34a;color:#fff;display:flex;align-items:center;justify-content:center;font-size:0.7rem;flex:0 0 auto;box-shadow:0 0 0 4px #dcfce7;">●</div>'
+                col, peso = "#16a34a", "700"
+            else:
+                circ = '<div style="width:28px;height:28px;border-radius:50%;border:2px solid #ddd;color:#bbb;display:flex;align-items:center;justify-content:center;font-size:0.7rem;flex:0 0 auto;">○</div>'
+                col, peso = "#bbb", "500"
+            filas += f'<div style="display:flex;align-items:center;gap:12px;">{circ}<span style="color:{col};font-weight:{peso};font-size:1rem;">{et}</span></div>'
+            if i < len(etiquetas) - 1:
+                conector = "#16a34a" if i < idx else "#eee"
+                filas += f'<div style="width:2px;height:14px;background:{conector};margin-left:13px;"></div>'
+
+        st.markdown(f'<div style="max-width:280px; margin:0.5rem auto 1rem auto;">{filas}</div>', unsafe_allow_html=True)
+        st.markdown('<div style="text-align:center; color:#999; font-size:0.8rem;">Se actualiza solo cada 15 segundos.</div>', unsafe_allow_html=True)
+
     if st.button("Hacer otro pedido"):
         st.session_state["pedido_enviado"] = None
         st.session_state["carrito"] = {}

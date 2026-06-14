@@ -32,6 +32,21 @@ DATABASE_URL = _normalizar_db_url(os.getenv("DATABASE_URL"))
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_recycle=1800)
 
 
+# ── Esquema defensivo (F1/F6) ───────────────────────────────────────────────────
+# El bot es el dueño del esquema, pero el panel puede arrancar antes. Garantizamos
+# las columnas que necesitan sus flujos (motivo de cancelación, "agotado hoy") una
+# sola vez al importar este módulo (proceso del panel). Idempotente.
+def _ensure_schema():
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS motivo_cancelacion TEXT"))
+        conn.execute(text("ALTER TABLE menu ADD COLUMN IF NOT EXISTS agotado_hasta DATE"))
+
+try:
+    _ensure_schema()
+except Exception:
+    pass  # tablas aún sin crear (deploy nuevo): el bot las creará con las columnas
+
+
 # ── Formato de moneda LATAM $XX.XXX (C6) ────────────────────────────────────────
 def fmt_money(valor) -> str:
     """Formatea un monto entero con punto de miles: 35000 → '35.000'.
@@ -71,6 +86,17 @@ def fecha_corta(dt) -> str:
 def cargar_menu():
     with engine.connect() as conn:
         resultado = conn.execute(text(
-            "SELECT id, nombre, precio, activo, orden FROM menu ORDER BY orden, id"
+            "SELECT id, nombre, precio, activo, orden, agotado_hasta FROM menu ORDER BY orden, id"
         ))
         return pd.DataFrame(resultado.fetchall(), columns=resultado.keys())
+
+
+# ── Mesas activas (para selectores; F5) ─────────────────────────────────────────
+@st.cache_data(ttl=30)
+def cargar_mesas_activas():
+    """[{id, nombre}] de mesas activas. TTL corto; sin invalidación explícita."""
+    with engine.connect() as conn:
+        rows = conn.execute(text(
+            "SELECT id, nombre FROM mesas WHERE activa = TRUE ORDER BY id"
+        )).mappings().all()
+    return [dict(r) for r in rows]
