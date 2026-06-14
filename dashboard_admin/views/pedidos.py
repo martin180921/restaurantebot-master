@@ -8,7 +8,7 @@ import json
 import html
 from datetime import datetime
 
-from db import engine, fmt_money
+from db import engine, fmt_money, fecha_corta
 
 # ── Constantes ─────────────────────────────────────────────────────────────────
 ESTADOS = ["pendiente", "en preparacion", "listo", "entregado"]
@@ -103,9 +103,45 @@ def formatear_fecha(fecha) -> str:
     if pd.isna(fecha):
         return "—"
     try:
-        return pd.to_datetime(fecha).strftime("%-d %b · %H:%M")
-    except:
+        return fecha_corta(pd.to_datetime(fecha))  # U4: portable, en español
+    except Exception:
         return str(fecha)
+
+
+# ── Tiempo de espera (U2) ───────────────────────────────────────────────────────
+def minutos_espera(fecha):
+    """Minutos desde 'fecha', o None si no se puede calcular."""
+    if pd.isna(fecha):
+        return None
+    try:
+        dt = pd.to_datetime(fecha).to_pydatetime()
+        return max(0, int((datetime.now() - dt).total_seconds() // 60))
+    except Exception:
+        return None
+
+def urgencia(mins, estado):
+    """Color de antigüedad para pedidos ACTIVOS: verde <5 min, ámbar 5-10, rojo
+    >10. Devuelve un hex o None (sin acento para entregados/cancelados)."""
+    if estado not in ("pendiente", "en preparacion") or mins is None:
+        return None
+    if mins >= 10:
+        return "#dc2626"  # rojo: urgente
+    if mins >= 5:
+        return "#d97706"  # ámbar: atención
+    return "#16a34a"      # verde: reciente
+
+
+# ── Origen del pedido (U6) ──────────────────────────────────────────────────────
+def icono_cliente(row, mesa_nombres=None):
+    """(emoji, etiqueta) según el origen: 🪑 mesa (en local) o 📱 teléfono."""
+    mid = row.get("mesa_id")
+    cliente = str(row.get("numero_cliente", "—") or "—")
+    if mid is not None and not pd.isna(mid):
+        nombre = (mesa_nombres or {}).get(int(mid))
+        return ("🪑", nombre or cliente)
+    if cliente.lower().startswith("mesa"):
+        return ("🪑", cliente)
+    return ("📱", cliente)
 
 
 # ── Ticket de cocina ───────────────────────────────────────────────────────────
@@ -132,7 +168,7 @@ def generar_ticket_html(pid, cliente, items_raw, total_p, fecha, estado):
 
     # C2: cliente y estado se escapan antes de inyectarse en el ticket.
     cliente    = html.escape(str(cliente))
-    fecha_str  = html.escape(str(fecha)) if fecha else datetime.now().strftime("%-d %b · %H:%M")
+    fecha_str  = html.escape(str(fecha)) if fecha else fecha_corta(datetime.now())
     estado_str = html.escape(str(estado).upper())
     total_fmt  = fmt_money(total_p)                                 # C6
 
@@ -219,34 +255,42 @@ def _maybe_print_ticket(df: pd.DataFrame) -> None:
     _emit_print(ticket_html, int(tid))
 
 
-def render_pedidos(dataframe: pd.DataFrame, tab_key: str = "all"):
+def render_pedidos(dataframe: pd.DataFrame, tab_key: str = "all", mesa_nombres=None):
     if dataframe.empty:
         st.markdown('<p style="color:#9ca3af; font-size:0.85rem; padding:1rem 0;">Sin pedidos en esta categoría.</p>', unsafe_allow_html=True)
         return
     for idx, (_, row) in enumerate(dataframe.iterrows()):
         pid     = row["id"]
         estado  = row.get("estado", "pendiente")
-        cliente = row.get("numero_cliente", "—")
+        emoji, etiqueta = icono_cliente(row, mesa_nombres)   # U6
         items   = formatear_items(row.get("items", []))
         total_p = row.get("total", 0)
         fecha   = formatear_fecha(row.get("fecha"))
         uid     = f"{tab_key}_{pid}_{idx}"
 
+        # U2: acento de urgencia por tiempo de espera (solo pedidos activos)
+        mins        = minutos_espera(row.get("fecha"))
+        color_urg   = urgencia(mins, estado)
+        borde       = f' style="border-left:4px solid {color_urg};"' if color_urg else ""
+        chip_espera = (f'<div style="font-size:0.72rem; color:{color_urg}; font-weight:700; '
+                       f'margin-top:6px; white-space:nowrap;">⏱ {mins} min</div>') if color_urg else ""
+
         # Fix 2: info col wider, actions col narrower and self-contained
         col_info, col_acciones = st.columns([4, 1])
         with col_info:
             st.markdown(f"""
-            <div class="order-card">
+            <div class="order-card"{borde}>
               <div style="display:flex; justify-content:space-between; align-items:flex-start;">
                 <div>
                   <div class="order-id">Pedido #{pid}</div>
-                  <div class="order-num">📱 {html.escape(str(cliente))}</div>
+                  <div class="order-num">{emoji} {html.escape(str(etiqueta))}</div>
                   <div class="order-items">{items}</div>
                   <div class="order-fecha">{fecha}</div>
                 </div>
                 <div style="text-align:right;">
                   {badge_html(estado)}
                   <div class="order-total" style="margin-top:8px;">${fmt_money(total_p)}</div>
+                  {chip_espera}
                 </div>
               </div>
             </div>
@@ -314,7 +358,7 @@ def render_por_mesa(df: pd.DataFrame, mesa_nombres: dict):
             f'<div class="section-title">🪑 {html.escape(str(grupo))} · {len(sub)} activo(s) · ${fmt_money(total_grupo)}</div>',
             unsafe_allow_html=True,
         )
-        render_pedidos(sub, tab_key=f"mesa{gi}")
+        render_pedidos(sub, tab_key=f"mesa{gi}", mesa_nombres=mesa_nombres)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -340,17 +384,30 @@ def render():
         st.session_state["known_pending_ids"] = pending_ids
 
     if play_alert:
+        # U5: campana sintetizada con Web Audio — sin depender de URLs externas
+        # (antes soundjay/freesound podían dar 404/CORS y dejar la cocina sin aviso).
         st.components.v1.html("""
-        <audio id="alert" preload="auto">
-          <source src="https://www.soundjay.com/buttons/sounds/button-09a.mp3" type="audio/mpeg">
-          <source src="https://cdn.freesound.org/previews/411/411460_5121236-lq.mp3" type="audio/mpeg">
-        </audio>
         <script>
-          var a = document.getElementById('alert');
-          if (a) {
-            var p = a.play();
-            if (p !== undefined) { p.catch(function() {}); }
-          }
+        (function(){
+          try {
+            var AC = window.AudioContext || window.webkitAudioContext;
+            if (!AC) return;
+            var ctx = new AC();
+            function tono(freq, inicio, dur){
+              var o = ctx.createOscillator(), g = ctx.createGain();
+              o.connect(g); g.connect(ctx.destination);
+              o.type = 'sine'; o.frequency.value = freq;
+              var t = ctx.currentTime + inicio;
+              g.gain.setValueAtTime(0.0001, t);
+              g.gain.exponentialRampToValueAtTime(0.5, t + 0.03);
+              g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+              o.start(t); o.stop(t + dur + 0.02);
+            }
+            var sonar = function(){ tono(880, 0, 0.25); tono(1175, 0.18, 0.38); };
+            if (ctx.state === 'suspended') { ctx.resume().then(sonar).catch(function(){}); }
+            else { sonar(); }
+          } catch(e) {}
+        })();
         </script>
         """, height=0)
 
@@ -391,8 +448,10 @@ def render():
     )
     st.markdown("<br>", unsafe_allow_html=True)
 
+    mesa_nombres = cargar_mesas_nombres()  # U6/P1: una sola lectura cacheada
+
     if vista == "🪑 Por mesa":
-        render_por_mesa(df, cargar_mesas_nombres())
+        render_por_mesa(df, mesa_nombres)
     else:
         tab_todos, tab_pend, tab_prep, tab_listo, tab_entregado, tab_cancelado = st.tabs([
             f"Todos ({total})",
@@ -404,17 +463,17 @@ def render():
         ])
 
         with tab_todos:
-            render_pedidos(df, "todos")
+            render_pedidos(df, "todos", mesa_nombres=mesa_nombres)
         with tab_pend:
-            render_pedidos(df[df["estado"] == "pendiente"].copy(), "pend")
+            render_pedidos(df[df["estado"] == "pendiente"].copy(), "pend", mesa_nombres=mesa_nombres)
         with tab_prep:
-            render_pedidos(df[df["estado"] == "en preparacion"].copy(), "prep")
+            render_pedidos(df[df["estado"] == "en preparacion"].copy(), "prep", mesa_nombres=mesa_nombres)
         with tab_listo:
-            render_pedidos(df[df["estado"] == "listo"].copy(), "listo")
+            render_pedidos(df[df["estado"] == "listo"].copy(), "listo", mesa_nombres=mesa_nombres)
         with tab_entregado:
-            render_pedidos(df[df["estado"] == "entregado"].copy(), "entregado")
+            render_pedidos(df[df["estado"] == "entregado"].copy(), "entregado", mesa_nombres=mesa_nombres)
         with tab_cancelado:
-            render_pedidos(df[df["estado"] == "cancelado"].copy(), "cancelado")
+            render_pedidos(df[df["estado"] == "cancelado"].copy(), "cancelado", mesa_nombres=mesa_nombres)
 
     st.markdown("<br>", unsafe_allow_html=True)
     col_r1, col_r2 = st.columns([1, 4])

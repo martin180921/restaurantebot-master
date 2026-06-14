@@ -61,7 +61,7 @@ st.markdown("""
 html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
 .stApp { background: #f7f7f5; color: #1a1a1a; }
 #MainMenu, footer, header { visibility: hidden; }
-.block-container { padding: 1rem 1rem 4rem 1rem; max-width: 520px; }
+.block-container { padding: 1rem 1rem 6.5rem 1rem; max-width: 520px; }
 
 .c-header   { text-align: center; padding: 0.5rem 0 1rem 0; }
 .c-title    { font-size: 1.5rem; font-weight: 700; color: #1a1a1a; }
@@ -96,6 +96,16 @@ html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
 .c-empty { text-align: center; color: #aaa; font-size: 0.9rem; padding: 1rem 0; }
 .stSelectbox > div > div { background: #fff !important; border-radius: 10px !important; }
 hr { border-color: #eaeaea !important; }
+
+/* U3: CTA de envío fija al fondo (siempre visible, sin hacer scroll). Solo hay
+   un botón primario en la app — el de enviar — así que es seguro fijarlo. */
+.stButton:has(button[kind="primary"]) {
+    position: fixed; left: 50%; transform: translateX(-50%);
+    bottom: 12px; width: 100%; max-width: 520px; padding: 0 1rem; z-index: 1000;
+}
+.stButton:has(button[kind="primary"]) > button {
+    box-shadow: 0 8px 24px rgba(0,0,0,0.22) !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
