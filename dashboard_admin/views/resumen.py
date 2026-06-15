@@ -5,7 +5,7 @@ import pandas as pd
 import json
 from datetime import date
 
-from db import engine, fmt_money
+from db import engine, fmt_money, saldo_pedido, cobrado_pedido
 
 
 # ── DB ───────────────────────────────────────────────────────────────────────────
@@ -14,7 +14,7 @@ def cargar_pedidos_dia(dia: date):
     with engine.connect() as conn:
         rows = conn.execute(text("""
             SELECT id, numero_cliente, items, total, estado, fecha,
-                   mesa_id, motivo_cancelacion, pagado
+                   mesa_id, motivo_cancelacion, pagado, total_pagado
             FROM pedidos
             WHERE fecha::date = :dia
             ORDER BY fecha
@@ -56,25 +56,29 @@ def render():
         return
 
     df = pd.DataFrame(pedidos)
-    # Cierre de caja = dinero realmente cobrado. 'ventas' (y todo lo que deriva de
-    # ella: ticket, más vendidos, por hora) considera solo pedidos cobrados
-    # (pagado=TRUE) y no cancelados. 'pagado' puede faltar pre-migración → FALSE.
+    # Cierre de caja = dinero realmente cobrado. Con pagos parciales:
+    #   Cobrado    = Σ cobrado_pedido (total si pagado, si no el abono total_pagado)
+    #   Por cobrar = Σ saldo_pedido   (total − abonos) → juntos parten el total del día.
+    # Los conteos / ítems / por-hora siguen sobre pedidos cobrados POR COMPLETO
+    # (transacciones cerradas). 'pagado' puede faltar pre-migración → tratado FALSE.
     pagado_col = (df["pagado"].fillna(False).astype(bool) if "pagado" in df.columns
                   else pd.Series(False, index=df.index))
-    pagados    = df[pagado_col & (df["estado"] != "cancelado")]
-    pendientes = df[~pagado_col & (df["estado"] != "cancelado")]   # entregado/activo sin cobrar
+    no_cancelados = df[df["estado"] != "cancelado"]
+    pagados    = df[pagado_col & (df["estado"] != "cancelado")]   # cobrados por completo
     cancelados = df[df["estado"] == "cancelado"]
 
-    ventas       = int(pagados["total"].sum()) if not pagados.empty else 0
-    por_cobrar   = int(pendientes["total"].sum()) if not pendientes.empty else 0
-    n_ped        = len(pagados)
-    n_canc       = len(cancelados)
-    ticket       = ventas / n_ped if n_ped else 0
+    cobrado    = int(no_cancelados.apply(cobrado_pedido, axis=1).sum()) if not no_cancelados.empty else 0
+    por_cobrar = int(no_cancelados.apply(saldo_pedido, axis=1).sum()) if not no_cancelados.empty else 0
+    n_ped      = len(pagados)
+    n_canc     = len(cancelados)
+    # Ticket promedio = valor medio de los pedidos cobrados por completo.
+    ventas_completas = int(pagados["total"].sum()) if not pagados.empty else 0
+    ticket     = ventas_completas / n_ped if n_ped else 0
 
     # ── Métricas (cierre de caja) ──────────────────────────────────────────────
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
-        st.markdown(f'<div class="metric-card"><div class="metric-value metric-green" style="font-size:clamp(0.9rem,1.6vw,2rem); white-space:nowrap;">${fmt_money(ventas)}</div><div class="metric-label">Cobrado</div></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="metric-card"><div class="metric-value metric-green" style="font-size:clamp(0.9rem,1.6vw,2rem); white-space:nowrap;">${fmt_money(cobrado)}</div><div class="metric-label">Cobrado</div></div>', unsafe_allow_html=True)
     with c2:
         st.markdown(f'<div class="metric-card"><div class="metric-value">{n_ped}</div><div class="metric-label">Pedidos cobrados</div></div>', unsafe_allow_html=True)
     with c3:
@@ -131,13 +135,17 @@ def render():
     # estado de pago, para que contabilidad tenga el registro completo.
     export = df.copy()
     export["items"] = export["items"].apply(_items_texto)
+    # Abonado / Saldo por pedido: el registro de pagos parciales para contabilidad.
+    export["abonado"] = df.apply(cobrado_pedido, axis=1)
+    export["saldo"]   = df.apply(saldo_pedido, axis=1)
     if "pagado" in export.columns:
         export["pagado"] = export["pagado"].fillna(False).astype(bool).map({True: "Sí", False: "No"})
+    export = export.drop(columns=["total_pagado"], errors="ignore")
     export = export.rename(columns={
         "id": "Pedido", "numero_cliente": "Cliente", "items": "Items",
         "total": "Total", "estado": "Estado", "fecha": "Fecha",
         "mesa_id": "Mesa", "motivo_cancelacion": "Motivo cancelación",
-        "pagado": "Pagado",
+        "pagado": "Pagado", "abonado": "Abonado", "saldo": "Saldo",
     })
     csv = export.to_csv(index=False).encode("utf-8-sig")  # BOM → Excel lee acentos
     st.download_button(

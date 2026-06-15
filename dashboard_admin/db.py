@@ -42,6 +42,9 @@ def _ensure_schema():
         conn.execute(text("ALTER TABLE menu ADD COLUMN IF NOT EXISTS agotado_hasta DATE"))
         # pagado: cobro independiente del estado de cocina (lo usa el monitor de mesas).
         conn.execute(text("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS pagado BOOLEAN NOT NULL DEFAULT FALSE"))
+        # total_pagado: libro acumulado de abonos para pagos parciales / cuentas
+        # divididas (saldo = total − total_pagado). Canónico en el bot; defensivo aquí.
+        conn.execute(text("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS total_pagado INTEGER NOT NULL DEFAULT 0"))
 
 try:
     _ensure_schema()
@@ -74,6 +77,48 @@ def fmt_money(valor) -> str:
         return f"{int(round(float(valor))):,}".replace(",", ".")
     except (TypeError, ValueError):
         return "0"
+
+
+# ── Saldo / cobrado de un pedido (pagos parciales) ──────────────────────────────
+# 'total_pagado' (libro acumulado de abonos) permite cuentas divididas sin destruir
+# 'total'. saldo = total − total_pagado; cobrado = total_pagado (acotado a [0,total]).
+# CLAVE de migración: los pedidos cobrados ANTES de existir total_pagado tienen
+# total_pagado=0 pero pagado=TRUE, así que un pedido pagado se considera cobrado por
+# completo SIEMPRE (saldo 0), sin importar total_pagado. Aceptan filas pandas o dict.
+def _a_entero(valor) -> int:
+    try:
+        return int(round(float(valor)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _es_pagado(valor) -> bool:
+    """bool seguro para 'pagado': None/NaN/ausente → False (NaN es 'truthy' en Python)."""
+    if valor is None:
+        return False
+    try:
+        if pd.isna(valor):
+            return False
+    except (TypeError, ValueError):
+        pass
+    return bool(valor)
+
+
+def saldo_pedido(row) -> int:
+    """Saldo pendiente de un pedido = total − total_pagado, nunca negativo.
+    Un pedido con pagado=TRUE siempre tiene saldo 0 (incl. los pagados pre-migración)."""
+    if _es_pagado(row.get("pagado", False)):
+        return 0
+    return max(0, _a_entero(row.get("total", 0)) - _a_entero(row.get("total_pagado", 0)))
+
+
+def cobrado_pedido(row) -> int:
+    """Dinero realmente cobrado de un pedido. pagado=TRUE → total completo (cubre los
+    pagados antes de total_pagado); si no, total_pagado acotado a [0, total]."""
+    total = _a_entero(row.get("total", 0))
+    if _es_pagado(row.get("pagado", False)):
+        return total
+    return max(0, min(_a_entero(row.get("total_pagado", 0)), total))
 
 
 # ── Fechas en español, sin depender del locale ni de %-d (U4) ───────────────────

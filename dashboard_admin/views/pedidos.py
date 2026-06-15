@@ -2,13 +2,14 @@
 import streamlit as st
 import streamlit.components.v1
 from streamlit_autorefresh import st_autorefresh
-from sqlalchemy import text
+from sqlalchemy import text, bindparam
 import pandas as pd
 import json
 import html
 from datetime import datetime
 
-from db import engine, fmt_money, fecha_corta, flash, drain_toasts
+from db import (engine, fmt_money, fecha_corta, flash, drain_toasts,
+                saldo_pedido, cobrado_pedido)
 
 # ── Constantes ─────────────────────────────────────────────────────────────────
 ESTADOS = ["pendiente", "en preparacion", "listo", "entregado"]
@@ -76,6 +77,58 @@ def cancelar_pedido(pedido_id: int, motivo: str = ""):
         )
     flash(f"Pedido #{pedido_id} cancelado", "🗑️")
     st.rerun()
+
+
+# ── DB: cobro (pagos completos y parciales) ─────────────────────────────────────
+# 'pagado' es una dimensión aparte del estado de cocina: cobrar NO toca el flujo
+# pendiente→…→entregado, solo registra el pago. Una mesa se libera cuando todos sus
+# pedidos están pagados (o cancelados), no cuando se entregan.
+def _distribuir_abono(pendientes, monto):
+    """Reparte 'monto' entre 'pendientes' (del más antiguo al más nuevo) sin pasarse
+    del saldo de cada pedido. Función PURA (sin BD) para poder testearla.
+
+    'pendientes' = lista de dicts {id, total, total_pagado}. Devuelve la lista de
+    actualizaciones [{id, total_pagado, pagado}] solo para los pedidos tocados.
+    """
+    restante = max(0, int(monto))
+    updates = []
+    for p in pendientes:
+        if restante <= 0:
+            break
+        total = int(p["total"])
+        ya = int(p.get("total_pagado") or 0)
+        saldo = max(0, total - ya)
+        if saldo <= 0:
+            continue
+        aplicar = min(saldo, restante)
+        nuevo = ya + aplicar
+        updates.append({"id": int(p["id"]), "total_pagado": nuevo, "pagado": nuevo >= total})
+        restante -= aplicar
+    return updates
+
+
+def registrar_pago(ids, monto):
+    """Registra un abono de 'monto' contra los pedidos 'ids' (uno o varios),
+    repartiéndolo del más antiguo al más nuevo. Cada pedido cuyo saldo quede en 0 se
+    marca pagado=TRUE; el resto acumula en total_pagado y sigue pagado=FALSE. Lee y
+    escribe en la MISMA transacción (FOR UPDATE) para repartir sobre el saldo real.
+    """
+    ids = [int(i) for i in ids]
+    monto = int(round(float(monto or 0)))
+    if not ids or monto <= 0:
+        return
+    sel = text("""
+        SELECT id, total, COALESCE(total_pagado, 0) AS total_pagado
+        FROM pedidos
+        WHERE id IN :ids AND pagado = FALSE AND estado <> 'cancelado'
+        ORDER BY fecha, id
+        FOR UPDATE
+    """).bindparams(bindparam("ids", expanding=True))
+    upd = text("UPDATE pedidos SET total_pagado = :total_pagado, pagado = :pagado WHERE id = :id")
+    with engine.begin() as conn:
+        pendientes = [dict(r) for r in conn.execute(sel, {"ids": ids}).mappings().all()]
+        for u in _distribuir_abono(pendientes, monto):
+            conn.execute(upd, u)
 
 
 # ── Helpers visuales ───────────────────────────────────────────────────────────
@@ -293,6 +346,100 @@ def dialog_cancelar(pid: int, uid: str):
             st.rerun()
 
 
+# ── Modal de cobro: efectivo/transferencia y abonos parciales (Fase: pagos) ──────
+# Pop-up centrado compartido entre el tablero y el monitor de mesas
+# (pedidos.dialog_cobrar). 'ids' = pedidos a cobrar (uno o varios); 'titulo' = mesa
+# o pedido; 'total' = saldo pendiente total (lo calcula la vista con db.saldo_pedido).
+@st.dialog("💵 Cobrar")
+def dialog_cobrar(ids, titulo, total, uid):
+    ids = [int(i) for i in ids]
+    total = max(0, int(total))
+
+    st.markdown(f"**{html.escape(str(titulo))}**")
+    st.markdown(
+        '<div style="font-size:0.78rem; color:#6b7280; text-transform:uppercase; '
+        'letter-spacing:0.04em;">Total por pagar</div>'
+        f'<div style="font-family:\'Syne\',sans-serif; font-size:1.9rem; font-weight:800; '
+        f'color:#1a1a1a; line-height:1.1;">${fmt_money(total)}</div>',
+        unsafe_allow_html=True,
+    )
+
+    if total <= 0:
+        st.info("Esta cuenta ya está saldada.")
+        if st.button("Cerrar", key=f"volver_cobrar_{uid}", use_container_width=True):
+            st.rerun()
+        return
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # Método de pago. El CSS global pinta el st.radio horizontal como píldoras
+    # (segmented-control) y oculta su label → ponemos uno propio con st.caption.
+    st.caption("Método de pago")
+    metodo = st.radio(
+        "Método de pago", ["💵 Efectivo", "💳 Transferencia"],
+        horizontal=True, label_visibility="collapsed", key=f"metodo_{uid}",
+    )
+    es_efectivo = metodo == "💵 Efectivo"
+
+    # Monto a abonar: por defecto el total (cobro completo). Reducirlo = abono
+    # parcial. min_value=0 bloquea negativos; max_value=total impide sobre-cobrar.
+    abono = int(st.number_input(
+        "Monto a abonar", min_value=0, max_value=total, value=total, step=1000,
+        format="%d", key=f"abono_{uid}",
+        help="Por defecto cobra el total. Reduce el monto para registrar un abono parcial.",
+    ) or 0)
+
+    # Efectivo: cuánto entrega el cliente → cambio = entregado − abono (nunca < 0).
+    efectivo_corto = False
+    if es_efectivo:
+        recibe = int(st.number_input(
+            "¿Con cuánto paga el cliente?", min_value=0, value=abono, step=1000,
+            format="%d", key=f"recibe_{uid}",
+        ) or 0)
+        if recibe >= abono:
+            st.markdown(
+                '<div style="background:#dcfce7; border:1px solid #86efac; border-radius:10px; '
+                'padding:10px 14px; margin-top:6px; display:flex; justify-content:space-between; '
+                'align-items:center;"><span style="color:#14532d; font-weight:600;">Cambio</span>'
+                f'<span style="font-family:\'Syne\',sans-serif; font-weight:800; font-size:1.2rem; '
+                f'color:#14532d;">${fmt_money(recibe - abono)}</span></div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            # No mostramos cambio negativo: el efectivo no alcanza para el abono.
+            efectivo_corto = True
+            st.markdown(
+                '<div style="background:#fef3c7; border:1px solid #fcd34d; border-radius:10px; '
+                'padding:10px 14px; margin-top:6px; color:#92400e; font-weight:600;">'
+                f'Efectivo insuficiente: faltan ${fmt_money(abono - recibe)} para abonar '
+                f'${fmt_money(abono)}.</div>',
+                unsafe_allow_html=True,
+            )
+
+    if abono < total and not efectivo_corto:
+        st.markdown(
+            f'<div style="font-size:0.8rem; color:#1e3a8a; margin-top:8px;">Abono parcial · '
+            f'saldo restante: <b>${fmt_money(total - abono)}</b> (la cuenta sigue abierta).</div>',
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("✓ Confirmar pago", key=f"confirm_cobrar_{uid}", type="primary",
+                     use_container_width=True, disabled=(abono <= 0 or efectivo_corto)):
+            registrar_pago(ids, abono)
+            if abono >= total:
+                flash(f"Pago completo · {titulo} · ${fmt_money(total)}", "💵")
+            else:
+                flash(f"Abono registrado · {titulo} · saldo ${fmt_money(total - abono)}", "🧾")
+            st.rerun()
+    with c2:
+        if st.button("Cancelar", key=f"volver_cobrar_{uid}", use_container_width=True):
+            st.rerun()
+
+
 def render_pedidos(dataframe: pd.DataFrame, tab_key: str = "all", mesa_nombres=None):
     if dataframe.empty:
         st.markdown('<p style="color:#9ca3af; font-size:0.85rem; padding:1rem 0;">Sin pedidos en esta categoría.</p>', unsafe_allow_html=True)
@@ -340,6 +487,15 @@ def render_pedidos(dataframe: pd.DataFrame, tab_key: str = "all", mesa_nombres=N
                 if st.button(btn_label, key=f"avanzar_{uid}", type="primary",
                              use_container_width=True):
                     avanzar_estado(pid, estado)
+
+            # Cobrar: abre el modal de pago (efectivo/transferencia + abonos
+            # parciales). Visible mientras el pedido tenga saldo y no esté cancelado;
+            # cubre también pedidos de WhatsApp/teléfono (sin mesa), que solo se
+            # cobran desde aquí (el monitor solo lista pedidos de mesa).
+            saldo = saldo_pedido(row)
+            if estado != "cancelado" and saldo > 0:
+                if st.button("💵 Cobrar", key=f"cobrar_{uid}", use_container_width=True):
+                    dialog_cobrar([int(pid)], f"Pedido #{int(pid)}", saldo, uid)
 
             # P3: botón nativo; la impresión usa UN solo iframe bajo demanda
             # (_maybe_print_ticket en render()), no un iframe por tarjeta.
@@ -454,16 +610,15 @@ def render():
     listos     = len(df[df["estado"] == "listo"])
     entregados = len(df[df["estado"] == "entregado"])
     cancelados = len(df[df["estado"] == "cancelado"]) if "cancelado" in df["estado"].values else 0
-    # Ventas = dinero realmente cobrado (pagado=TRUE), no solo entregado. Excluye
-    # cancelados por si un pedido pagado se anula después. 'pagado' puede faltar si
-    # el esquema aún no se aplicó → se trata como FALSE.
-    pagado_col = (df["pagado"].fillna(False).astype(bool) if "pagado" in df.columns
-                  else pd.Series(False, index=df.index))
-    ventas_hoy = df[
+    # Ventas = dinero realmente cobrado, no solo entregado. Suma lo COBRADO de cada
+    # pedido no cancelado de hoy (cobrado_pedido = total si pagado, si no el abono
+    # parcial total_pagado) → incluye las cuentas parciales abiertas. Defensivo ante
+    # columnas faltantes pre-migración (cobrado_pedido las trata como 0/FALSE).
+    hoy_df = df[
         (pd.to_datetime(df["fecha"]).dt.date == datetime.now().date()) &
-        (df["estado"] != "cancelado") &
-        pagado_col
-    ]["total"].sum() if "total" in df.columns else 0
+        (df["estado"] != "cancelado")
+    ]
+    ventas_hoy = int(hoy_df.apply(cobrado_pedido, axis=1).sum()) if not hoy_df.empty else 0
 
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1:

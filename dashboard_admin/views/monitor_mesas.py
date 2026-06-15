@@ -14,11 +14,10 @@ session_state, así que el st_autorefresh (rerun parcial) lo conserva.
 """
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
-from sqlalchemy import text, bindparam
 import pandas as pd
 import html
 
-from db import engine, fmt_money, cargar_mesas_activas
+from db import fmt_money, cargar_mesas_activas, saldo_pedido
 from views import pedidos
 
 
@@ -39,41 +38,12 @@ CARD_TINT = {
 }
 
 
-# ── DB: cobrar (marcar pagado) ──────────────────────────────────────────────────
+# ── Cobro ───────────────────────────────────────────────────────────────────────
 # 'pagado' es una dimensión aparte del estado de cocina: cobrar NO toca el flujo
 # pendiente→…→entregado, solo registra el pago. Una mesa se libera cuando todos sus
-# pedidos están pagados (o cancelados), no cuando se entregan.
-def cobrar_pedidos(ids):
-    """Marca como pagados los pedidos indicados (uno o varios)."""
-    ids = [int(i) for i in ids]
-    if not ids:
-        return
-    stmt = text("UPDATE pedidos SET pagado = TRUE WHERE id IN :ids").bindparams(
-        bindparam("ids", expanding=True)
-    )
-    with engine.begin() as conn:
-        conn.execute(stmt, {"ids": ids})
-
-
-# ── Modal: cobrar y cerrar mesa (Fase 3) ────────────────────────────────────────
-# Pop-up centrado en vez del aviso inline que empujaba el layout hacia abajo.
-@st.dialog("Cobrar y cerrar mesa")
-def _dialog_cobrar_mesa(mid: int, nombre: str, ids: list):
-    n = len(ids)
-    st.markdown(
-        f"¿**Cobrar y cerrar {html.escape(str(nombre))}**?  \n"
-        f"Sus **{n} pedido(s)** se marcarán como pagados y la mesa quedará libre."
-    )
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button("💵 Sí, cobrar mesa", key=f"confirm_cobrar_mesa_{mid}",
-                     type="primary", use_container_width=True):
-            cobrar_pedidos(ids)
-            pedidos.flash(f"{nombre}: {n} pedido(s) cobrados", "💵")
-            st.rerun()
-    with c2:
-        if st.button("Volver", key=f"volver_cobrar_{mid}", use_container_width=True):
-            st.rerun()
+# pedidos están pagados (o cancelados), no cuando se entregan. El cobro (completo o
+# parcial, efectivo/transferencia + cambio) vive en el modal compartido
+# pedidos.dialog_cobrar; el saldo pendiente sale de db.saldo_pedido (total − abonos).
 
 
 # ── Resumen del salón ───────────────────────────────────────────────────────────
@@ -229,9 +199,9 @@ def render():
             if sub.empty:
                 resumen = "Libre"
             else:
-                total = int(sub["total"].sum()) if "total" in sub.columns else 0
+                saldo = int(sub.apply(saldo_pedido, axis=1).sum())
                 etiqueta = "por cobrar" if color == AZUL else "pedido(s)"
-                resumen = f"{len(sub)} {etiqueta} · ${fmt_money(total)}"
+                resumen = f"{len(sub)} {etiqueta} · ${fmt_money(saldo)}"
 
             if st.button(f"{dot}  {nombre}\n\n{resumen}", key=f"mesabtn_{mid}",
                          use_container_width=True):
@@ -267,7 +237,8 @@ def _placeholder():
 # ── Detalle: ambiente de una mesa ───────────────────────────────────────────────
 def _detalle_mesa(mid: int, nombre: str, sub: pd.DataFrame, color: str,
                   estado_txt: str, df_full: pd.DataFrame):
-    total_activo = int(sub["total"].sum()) if not sub.empty and "total" in sub.columns else 0
+    # Saldo pendiente de la mesa = Σ (total − abonos) de sus pedidos activos.
+    saldo_activo = int(sub.apply(saldo_pedido, axis=1).sum()) if not sub.empty else 0
 
     # Cobradas hoy (contexto): pedidos pagados de esta mesa con fecha de hoy.
     # (Sin columna de fecha de pago, usamos 'fecha' del pedido, como el resto del
@@ -295,21 +266,24 @@ def _detalle_mesa(mid: int, nombre: str, sub: pd.DataFrame, color: str,
           <div style="font-size:0.8rem; color:{color}; font-weight:600; margin-top:2px;">{html.escape(estado_txt)}</div>
         </div>
         <div style="text-align:right;">
-          <div class="metric-label">Total en mesa</div>
-          <div class="order-total" style="font-size:1.4rem;">${fmt_money(total_activo)}</div>
+          <div class="metric-label">Por cobrar</div>
+          <div class="order-total" style="font-size:1.4rem;">${fmt_money(saldo_activo)}</div>
           <div style="font-size:0.72rem; color:#9ca3af; margin-top:4px;">Cobradas hoy: {cerradas_n} · ${fmt_money(cerradas_total)}</div>
         </div>
       </div>
     </div>
     """, unsafe_allow_html=True)
 
-    # Acciones de mesa. Fase 3: el cobro abre un modal centrado (no aviso inline).
+    # Acciones de mesa. El cobro abre el modal compartido (efectivo/transferencia,
+    # cambio y abonos parciales). Cobra contra los ids visibles de 'sub' (así también
+    # entran los pedidos heredados con mesa_id NULL); un abono parcial deja la mesa
+    # abierta, un pago completo la libera.
     a1, a2 = st.columns([2, 1])
     with a1:
         if not sub.empty:
-            if st.button("💵 Cobrar y cerrar mesa", key=f"mon_cobrar_mesa_{mid}",
+            if st.button("💵 Cobrar mesa", key=f"mon_cobrar_mesa_{mid}",
                          type="primary", use_container_width=True):
-                _dialog_cobrar_mesa(mid, nombre, sub["id"].tolist())
+                pedidos.dialog_cobrar(sub["id"].tolist(), nombre, saldo_activo, f"mesa_{mid}")
     with a2:
         if st.button("✕ Deseleccionar", key=f"mon_deselect_{mid}",
                      use_container_width=True):
@@ -336,7 +310,9 @@ def _detalle_pedido(row, idx: int):
     pid     = int(row["id"])
     estado  = row.get("estado", "pendiente")
     items   = pedidos.formatear_items(row.get("items", []))
-    total_p = row.get("total", 0)
+    total_p = int(row.get("total", 0) or 0)
+    saldo   = saldo_pedido(row)          # lo que falta por cobrar de este pedido
+    abonado = max(0, total_p - saldo)    # abono parcial ya recibido (0 si no hay)
     fecha   = pedidos.formatear_fecha(row.get("fecha"))
     uid     = f"mon_{pid}_{idx}"
 
@@ -345,6 +321,10 @@ def _detalle_pedido(row, idx: int):
     chip = (f'<div style="font-size:0.72rem; color:{color_urg}; font-weight:700; margin-top:6px;">⏱ {mins} min</div>'
             if color_urg else "")
     borde = f' style="border-left:4px solid {color_urg};"' if color_urg else ""
+    # Cuando hay abono parcial, el número grande es el SALDO y se anota lo abonado.
+    abono_html = (f'<div style="font-size:0.72rem; color:#1e3a8a; font-weight:600; margin-top:2px;">'
+                  f'Abonado ${fmt_money(abonado)} de ${fmt_money(total_p)}</div>'
+                  if abonado > 0 else "")
 
     st.markdown(f"""
     <div class="order-card"{borde}>
@@ -356,7 +336,8 @@ def _detalle_pedido(row, idx: int):
         </div>
         <div style="text-align:right;">
           {pedidos.badge_html(estado)}
-          <div class="order-total" style="margin-top:8px;">${fmt_money(total_p)}</div>
+          <div class="order-total" style="margin-top:8px;">${fmt_money(saldo)}</div>
+          {abono_html}
           {chip}
         </div>
       </div>
@@ -375,10 +356,9 @@ def _detalle_pedido(row, idx: int):
             st.rerun()
     with b3:
         if st.button("💵 Cobrar", key=f"cobrar_{uid}", use_container_width=True,
-                     help="Marcar este pedido como pagado"):
-            cobrar_pedidos([pid])
-            pedidos.flash(f"Pedido #{pid} cobrado", "💵")
-            st.rerun()
+                     help="Cobrar este pedido (efectivo/transferencia, abono parcial)",
+                     disabled=saldo <= 0):
+            pedidos.dialog_cobrar([pid], f"Pedido #{pid}", saldo, uid)
     with b4:
         # Fase 3: modal centrado en vez de aviso inline (compartido con el tablero).
         if st.button("✕ Cancelar", key=f"cancelar_{uid}", use_container_width=True):

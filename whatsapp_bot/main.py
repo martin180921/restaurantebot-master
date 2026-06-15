@@ -108,7 +108,8 @@ def init_db():
                 fecha               TIMESTAMP    NOT NULL DEFAULT NOW(),
                 mesa_id             INTEGER      REFERENCES mesas(id),
                 motivo_cancelacion  TEXT,
-                pagado              BOOLEAN      NOT NULL DEFAULT FALSE
+                pagado              BOOLEAN      NOT NULL DEFAULT FALSE,
+                total_pagado        INTEGER      NOT NULL DEFAULT 0
             )
         """))
         # Actualiza tablas 'pedidos' preexistentes que aún no tienen estas columnas
@@ -122,6 +123,14 @@ def init_db():
         # de mesas marca 'pagado' sin tocar el flujo pendiente→…→entregado).
         conn.execute(text(
             "ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS pagado BOOLEAN NOT NULL DEFAULT FALSE"
+        ))
+        # total_pagado: monto abonado hasta ahora (libro acumulado para pagos
+        # parciales / cuentas divididas). saldo = total − total_pagado. Cuando cubre
+        # el total, el cobro marca además pagado=TRUE. Los pedidos ya pagados antes
+        # de esta columna tienen total_pagado=0 pero pagado=TRUE → el panel los trata
+        # como cobrados por completo (ver db.saldo_pedido/cobrado_pedido).
+        conn.execute(text(
+            "ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS total_pagado INTEGER NOT NULL DEFAULT 0"
         ))
 
         conn.commit()
