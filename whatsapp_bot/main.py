@@ -107,7 +107,8 @@ def init_db():
                 estado              VARCHAR(30)  NOT NULL DEFAULT 'pendiente',
                 fecha               TIMESTAMP    NOT NULL DEFAULT NOW(),
                 mesa_id             INTEGER      REFERENCES mesas(id),
-                motivo_cancelacion  TEXT
+                motivo_cancelacion  TEXT,
+                pagado              BOOLEAN      NOT NULL DEFAULT FALSE
             )
         """))
         # Actualiza tablas 'pedidos' preexistentes que aún no tienen estas columnas
@@ -116,6 +117,11 @@ def init_db():
         ))
         conn.execute(text(
             "ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS motivo_cancelacion TEXT"
+        ))
+        # pagado: dimensión de cobro independiente del estado de cocina (el monitor
+        # de mesas marca 'pagado' sin tocar el flujo pendiente→…→entregado).
+        conn.execute(text(
+            "ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS pagado BOOLEAN NOT NULL DEFAULT FALSE"
         ))
 
         conn.commit()

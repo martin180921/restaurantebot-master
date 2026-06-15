@@ -40,6 +40,8 @@ def _ensure_schema():
     with engine.begin() as conn:
         conn.execute(text("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS motivo_cancelacion TEXT"))
         conn.execute(text("ALTER TABLE menu ADD COLUMN IF NOT EXISTS agotado_hasta DATE"))
+        # pagado: cobro independiente del estado de cocina (lo usa el monitor de mesas).
+        conn.execute(text("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS pagado BOOLEAN NOT NULL DEFAULT FALSE"))
 
 try:
     _ensure_schema()

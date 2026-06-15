@@ -437,10 +437,15 @@ def render():
     listos     = len(df[df["estado"] == "listo"])
     entregados = len(df[df["estado"] == "entregado"])
     cancelados = len(df[df["estado"] == "cancelado"]) if "cancelado" in df["estado"].values else 0
-    # Fix: exclude cancelled orders from sales
+    # Ventas = dinero realmente cobrado (pagado=TRUE), no solo entregado. Excluye
+    # cancelados por si un pedido pagado se anula después. 'pagado' puede faltar si
+    # el esquema aún no se aplicó → se trata como FALSE.
+    pagado_col = (df["pagado"].fillna(False).astype(bool) if "pagado" in df.columns
+                  else pd.Series(False, index=df.index))
     ventas_hoy = df[
         (pd.to_datetime(df["fecha"]).dt.date == datetime.now().date()) &
-        (df["estado"] != "cancelado")
+        (df["estado"] != "cancelado") &
+        pagado_col
     ]["total"].sum() if "total" in df.columns else 0
 
     c1, c2, c3, c4, c5 = st.columns(5)

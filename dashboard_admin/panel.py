@@ -2,10 +2,11 @@
 
 Cada pestaña vive en su propio módulo dentro de views/ para poder trabajarlas
 de forma independiente:
-    - views/pedidos.py       → tablero, alertas de audio y tickets
-    - views/nuevo_pedido.py  → creación manual de pedidos
-    - views/menu.py          → CRUD del menú
-    - views/mesas.py         → gestión de mesas
+    - views/pedidos.py        → tablero, alertas de audio y tickets
+    - views/monitor_mesas.py  → monitor maestro-detalle del salón
+    - views/nuevo_pedido.py   → creación manual de pedidos
+    - views/menu.py           → CRUD del menú
+    - views/mesas.py          → gestión de mesas
 """
 import streamlit as st
 from dotenv import load_dotenv
@@ -13,7 +14,7 @@ import hashlib
 import os
 from datetime import datetime
 
-from views import pedidos, nuevo_pedido, menu, mesas, resumen
+from views import pedidos, monitor_mesas, nuevo_pedido, menu, mesas, resumen
 from db import fecha_larga
 
 load_dotenv()
@@ -280,7 +281,7 @@ st.markdown(f"""
 # Fix 3: Navigation as pills
 seccion = st.radio(
     "Navegación",
-    ["📋 Pedidos", "➕ Nuevo pedido", "🍽️ Menú", "🪑 Mesas", "📊 Resumen"],
+    ["📋 Pedidos", "🖥️ Monitor", "➕ Nuevo pedido", "🍽️ Menú", "🪑 Mesas", "📊 Resumen"],
     horizontal=True,
     label_visibility="collapsed"
 )
@@ -289,6 +290,8 @@ st.markdown("<br>", unsafe_allow_html=True)
 # ── Despacho a cada vista ──────────────────────────────────────────────────────
 if seccion == "📋 Pedidos":
     pedidos.render()
+elif seccion == "🖥️ Monitor":
+    monitor_mesas.render()
 elif seccion == "➕ Nuevo pedido":
     nuevo_pedido.render()
 elif seccion == "🍽️ Menú":
