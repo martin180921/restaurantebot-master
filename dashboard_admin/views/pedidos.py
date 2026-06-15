@@ -1,7 +1,6 @@
 """Vista de Pedidos: tablero de estados, alertas de audio y tickets de cocina."""
 import streamlit as st
 import streamlit.components.v1
-from streamlit_autorefresh import st_autorefresh
 from sqlalchemy import text, bindparam
 import pandas as pd
 import json
@@ -564,10 +563,15 @@ def render_por_mesa(df: pd.DataFrame, mesa_nombres: dict):
 # SECCIÓN: PEDIDOS
 # ══════════════════════════════════════════════════════════════════════════════
 def render():
-    # P4: el auto-refresco vive en el tablero (no en panel.py) para que solo
-    # corra aquí y no relance la app mientras se arma un pedido en otra pestaña.
-    st_autorefresh(interval=30000, key="pedidos_autorefresh")
+    # Refresco en vivo: SOLO este fragmento se re-ejecuta en el intervalo (no toda
+    # la app ni panel.py), a diferencia del antiguo st_autorefresh → menos parpadeo
+    # y menos carga. Las acciones (avanzar/cobrar/cancelar) siguen llamando st.rerun()
+    # (scope app) para refrescar todo y vaciar los toasts en panel.py.
+    _tablero_en_vivo()
 
+
+@st.fragment(run_every="30s")
+def _tablero_en_vivo():
     df = cargar_pedidos()
 
     # ── Audio alert: detect new pending orders ─────────────────────────────────

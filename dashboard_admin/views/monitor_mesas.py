@@ -10,10 +10,9 @@ Layout maestro-detalle (master-detail) sin recargar la página:
 Reutiliza los helpers del tablero (views/pedidos.py) para no duplicar lógica:
 formato de ítems/fechas, badges de estado, tiempo de espera, ticket de cocina e
 impresión bajo demanda. El cambio entre la vista general y la de una mesa vive en
-session_state, así que el st_autorefresh (rerun parcial) lo conserva.
+session_state, así que el refresco en vivo (st.fragment run_every) lo conserva.
 """
 import streamlit as st
-from streamlit_autorefresh import st_autorefresh
 import pandas as pd
 import html
 
@@ -80,10 +79,15 @@ def _estado_mesa(sub: pd.DataFrame):
 # SECCIÓN: MONITOR DE MESAS
 # ══════════════════════════════════════════════════════════════════════════════
 def render():
-    # Monitor en vivo: rerun parcial cada 30s; PRESERVA session_state (la mesa
-    # seleccionada no se pierde al refrescar). Misma técnica que el tablero.
-    st_autorefresh(interval=30000, key="monitor_autorefresh")
+    # Monitor en vivo: SOLO este fragmento se re-ejecuta en el intervalo (no toda la
+    # app ni panel.py) → menos parpadeo y carga que el antiguo st_autorefresh. La mesa
+    # seleccionada vive en session_state, así que se conserva entre refrescos; las
+    # acciones siguen usando st.rerun() (scope app) para refrescar todo.
+    _monitor_en_vivo()
 
+
+@st.fragment(run_every="30s")
+def _monitor_en_vivo():
     st.markdown('<div class="section-title">🖥️ Monitor de mesas</div>', unsafe_allow_html=True)
 
     mesas = cargar_mesas_activas()

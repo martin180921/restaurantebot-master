@@ -56,6 +56,18 @@ def _ensure_schema():
                 fecha      TIMESTAMP   NOT NULL DEFAULT NOW()
             )
         """))
+        # turnos_caja: arqueo de caja (apertura con fondo, cierre con conteo).
+        # Canónico en el bot; defensivo aquí para operar pre-redeploy.
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS turnos_caja (
+                id               SERIAL PRIMARY KEY,
+                abierto          TIMESTAMP NOT NULL DEFAULT NOW(),
+                cerrado          TIMESTAMP,
+                fondo_inicial    INTEGER   NOT NULL DEFAULT 0,
+                efectivo_contado INTEGER,
+                nota             TEXT
+            )
+        """))
 
 try:
     _ensure_schema()

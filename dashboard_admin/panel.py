@@ -14,7 +14,7 @@ import hashlib
 import os
 from datetime import datetime
 
-from views import pedidos, monitor_mesas, nuevo_pedido, menu, mesas, resumen
+from views import pedidos, monitor_mesas, nuevo_pedido, menu, mesas, resumen, caja
 from db import fecha_larga
 
 load_dotenv()
@@ -89,10 +89,10 @@ if not st.session_state["autenticado"]:
     st.stop()
 
 # ── Auto-refresh (30s) — C1 + P2 + P4 ──────────────────────────────────────────
-# El st_autorefresh vive ahora dentro de views/pedidos.py (solo corre en el
-# tablero). Es un partial rerun que PRESERVA st.session_state (antes el reload
-# completo lo borraba y mataba la alerta de audio); además ya no relanza la app
-# cada 30s mientras se arma un pedido en las pestañas Nuevo/Menú/Mesas.
+# El refresco en vivo vive ahora dentro de cada vista como un st.fragment
+# (run_every="30s"): solo se re-ejecuta ESE fragmento, no panel.py ni la app
+# entera, así que PRESERVA st.session_state y la alerta de audio, y no relanza la
+# app mientras se arma un pedido en otras pestañas. (Antes: st_autorefresh.)
 
 # ── Estilos (Light Mode) ───────────────────────────────────────────────────────
 st.markdown("""
@@ -336,7 +336,7 @@ st.markdown(f"""
 # Fix 3: Navigation as pills
 seccion = st.radio(
     "Navegación",
-    ["📋 Pedidos", "🖥️ Monitor", "➕ Nuevo pedido", "🍽️ Menú", "🪑 Mesas", "📊 Resumen"],
+    ["📋 Pedidos", "🖥️ Monitor", "➕ Nuevo pedido", "🍽️ Menú", "🪑 Mesas", "📊 Resumen", "💰 Caja"],
     horizontal=True,
     label_visibility="collapsed"
 )
@@ -360,3 +360,5 @@ elif seccion == "🪑 Mesas":
     mesas.render()
 elif seccion == "📊 Resumen":
     resumen.render()
+elif seccion == "💰 Caja":
+    caja.render()

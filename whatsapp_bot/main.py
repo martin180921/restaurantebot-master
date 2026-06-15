@@ -147,6 +147,21 @@ def init_db():
             )
         """))
 
+        # ── Turnos de caja: arqueo (apertura con fondo, cierre con conteo) ──────
+        # Esperado = fondo_inicial + efectivo cobrado entre abierto y cerrado (de
+        # 'pagos'); diferencia = efectivo_contado − esperado. Las transferencias no
+        # entran a la caja física.
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS turnos_caja (
+                id               SERIAL PRIMARY KEY,
+                abierto          TIMESTAMP NOT NULL DEFAULT NOW(),
+                cerrado          TIMESTAMP,
+                fondo_inicial    INTEGER   NOT NULL DEFAULT 0,
+                efectivo_contado INTEGER,
+                nota             TEXT
+            )
+        """))
+
         conn.commit()
 
 init_db()
