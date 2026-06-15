@@ -45,6 +45,17 @@ def _ensure_schema():
         # total_pagado: libro acumulado de abonos para pagos parciales / cuentas
         # divididas (saldo = total − total_pagado). Canónico en el bot; defensivo aquí.
         conn.execute(text("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS total_pagado INTEGER NOT NULL DEFAULT 0"))
+        # pagos: libro de abonos (método + hora real de pago). Canónico en el bot;
+        # defensivo aquí para que el panel cobre y desglose por método pre-redeploy.
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS pagos (
+                id         SERIAL PRIMARY KEY,
+                pedido_id  INTEGER     NOT NULL REFERENCES pedidos(id),
+                monto      INTEGER     NOT NULL,
+                metodo     VARCHAR(20) NOT NULL DEFAULT 'efectivo',
+                fecha      TIMESTAMP   NOT NULL DEFAULT NOW()
+            )
+        """))
 
 try:
     _ensure_schema()

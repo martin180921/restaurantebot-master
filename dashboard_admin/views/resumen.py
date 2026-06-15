@@ -22,6 +22,22 @@ def cargar_pedidos_dia(dia: date):
     return [dict(r) for r in rows]
 
 
+def cargar_cobros_por_metodo(dia: date) -> dict:
+    """{metodo: total} de los abonos del día desde el libro 'pagos' (por HORA REAL de
+    pago, no por fecha del pedido). Tolerante a fallos: si la tabla aún no existe
+    (pre-migración) o falla, devuelve {} → el desglose muestra $0 por método. El
+    libro empieza a registrar desde el deploy, así que días previos saldrán vacíos."""
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(text(
+                "SELECT metodo, COALESCE(SUM(monto), 0) AS total "
+                "FROM pagos WHERE fecha::date = :dia GROUP BY metodo"
+            ), {"dia": dia}).mappings().all()
+        return {r["metodo"]: int(r["total"]) for r in rows}
+    except Exception:
+        return {}
+
+
 def _parse_items(raw):
     if isinstance(raw, str):
         try:
@@ -88,6 +104,25 @@ def render():
     with c5:
         st.markdown(f'<div class="metric-card"><div class="metric-value" style="color:#dc2626">{n_canc}</div><div class="metric-label">Cancelados</div></div>', unsafe_allow_html=True)
 
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── Desglose de cobros por método (libro 'pagos', por hora real de pago) ─────
+    # Para cuadrar la caja: cuánto entró en efectivo vs transferencia. Es por hora de
+    # pago (no por fecha del pedido), así que puede diferir levemente de "Cobrado".
+    cobros = cargar_cobros_por_metodo(dia)
+    efvo   = cobros.get("efectivo", 0)
+    transf = cobros.get("transferencia", 0)
+    otros  = sum(v for k, v in cobros.items() if k not in ("efectivo", "transferencia"))
+    total_cobros = efvo + transf + otros
+    st.markdown('<div class="section-title">Cobros por método</div>', unsafe_allow_html=True)
+    d1, d2, d3 = st.columns(3)
+    with d1:
+        st.markdown(f'<div class="metric-card"><div class="metric-value metric-green" style="font-size:clamp(0.9rem,1.6vw,2rem); white-space:nowrap;">${fmt_money(efvo)}</div><div class="metric-label">💵 Efectivo</div></div>', unsafe_allow_html=True)
+    with d2:
+        st.markdown(f'<div class="metric-card"><div class="metric-value metric-blue" style="font-size:clamp(0.9rem,1.6vw,2rem); white-space:nowrap;">${fmt_money(transf)}</div><div class="metric-label">💳 Transferencia</div></div>', unsafe_allow_html=True)
+    with d3:
+        st.markdown(f'<div class="metric-card"><div class="metric-value" style="font-size:clamp(0.9rem,1.6vw,2rem); white-space:nowrap;">${fmt_money(total_cobros)}</div><div class="metric-label">Total cobros</div></div>', unsafe_allow_html=True)
+    st.markdown('<p style="color:#9ca3af; font-size:0.72rem; margin-top:4px;">Por hora real de pago (libro de pagos). Empieza a registrar desde su activación; días anteriores pueden verse en $0.</p>', unsafe_allow_html=True)
     st.markdown("<br>", unsafe_allow_html=True)
 
     col_items, col_horas = st.columns(2)

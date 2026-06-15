@@ -88,7 +88,8 @@ def _distribuir_abono(pendientes, monto):
     del saldo de cada pedido. Función PURA (sin BD) para poder testearla.
 
     'pendientes' = lista de dicts {id, total, total_pagado}. Devuelve la lista de
-    actualizaciones [{id, total_pagado, pagado}] solo para los pedidos tocados.
+    actualizaciones [{id, total_pagado, pagado, aplicado}] solo para los pedidos
+    tocados; 'aplicado' = lo abonado a ese pedido ahora (una fila del libro 'pagos').
     """
     restante = max(0, int(monto))
     updates = []
@@ -102,19 +103,22 @@ def _distribuir_abono(pendientes, monto):
             continue
         aplicar = min(saldo, restante)
         nuevo = ya + aplicar
-        updates.append({"id": int(p["id"]), "total_pagado": nuevo, "pagado": nuevo >= total})
+        updates.append({"id": int(p["id"]), "total_pagado": nuevo,
+                        "pagado": nuevo >= total, "aplicado": aplicar})
         restante -= aplicar
     return updates
 
 
-def registrar_pago(ids, monto):
-    """Registra un abono de 'monto' contra los pedidos 'ids' (uno o varios),
-    repartiéndolo del más antiguo al más nuevo. Cada pedido cuyo saldo quede en 0 se
-    marca pagado=TRUE; el resto acumula en total_pagado y sigue pagado=FALSE. Lee y
-    escribe en la MISMA transacción (FOR UPDATE) para repartir sobre el saldo real.
+def registrar_pago(ids, monto, metodo="efectivo"):
+    """Registra un abono de 'monto' (en 'metodo') contra los pedidos 'ids' (uno o
+    varios), repartiéndolo del más antiguo al más nuevo. Cada pedido cuyo saldo quede
+    en 0 se marca pagado=TRUE; el resto acumula en total_pagado y sigue pagado=FALSE.
+    Cada abono aplicado se anota además en el libro 'pagos' (método + hora real de
+    pago). Lee y escribe en la MISMA transacción (FOR UPDATE) sobre el saldo real.
     """
     ids = [int(i) for i in ids]
     monto = int(round(float(monto or 0)))
+    metodo = metodo if metodo in ("efectivo", "transferencia") else "efectivo"
     if not ids or monto <= 0:
         return
     sel = text("""
@@ -125,10 +129,12 @@ def registrar_pago(ids, monto):
         FOR UPDATE
     """).bindparams(bindparam("ids", expanding=True))
     upd = text("UPDATE pedidos SET total_pagado = :total_pagado, pagado = :pagado WHERE id = :id")
+    ins = text("INSERT INTO pagos (pedido_id, monto, metodo) VALUES (:pedido_id, :monto, :metodo)")
     with engine.begin() as conn:
         pendientes = [dict(r) for r in conn.execute(sel, {"ids": ids}).mappings().all()]
         for u in _distribuir_abono(pendientes, monto):
-            conn.execute(upd, u)
+            conn.execute(upd, {"total_pagado": u["total_pagado"], "pagado": u["pagado"], "id": u["id"]})
+            conn.execute(ins, {"pedido_id": u["id"], "monto": u["aplicado"], "metodo": metodo})
 
 
 # ── Helpers visuales ───────────────────────────────────────────────────────────
@@ -429,7 +435,7 @@ def dialog_cobrar(ids, titulo, total, uid):
     with c1:
         if st.button("✓ Confirmar pago", key=f"confirm_cobrar_{uid}", type="primary",
                      use_container_width=True, disabled=(abono <= 0 or efectivo_corto)):
-            registrar_pago(ids, abono)
+            registrar_pago(ids, abono, "efectivo" if es_efectivo else "transferencia")
             if abono >= total:
                 flash(f"Pago completo · {titulo} · ${fmt_money(total)}", "💵")
             else:

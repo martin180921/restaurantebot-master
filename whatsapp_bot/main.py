@@ -133,6 +133,20 @@ def init_db():
             "ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS total_pagado INTEGER NOT NULL DEFAULT 0"
         ))
 
+        # ── Pagos: libro de abonos (uno por pedido tocado en cada cobro) ────────
+        # Detalle del cobro que 'pedidos.total_pagado' resume: método (efectivo /
+        # transferencia) y hora REAL del pago. Fuente para el desglose de caja por
+        # método; total_pagado se mantiene denormalizado para el saldo en cada render.
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS pagos (
+                id         SERIAL PRIMARY KEY,
+                pedido_id  INTEGER     NOT NULL REFERENCES pedidos(id),
+                monto      INTEGER     NOT NULL,
+                metodo     VARCHAR(20) NOT NULL DEFAULT 'efectivo',
+                fecha      TIMESTAMP   NOT NULL DEFAULT NOW()
+            )
+        """))
+
         conn.commit()
 
 init_db()
