@@ -27,7 +27,7 @@ PANEL_PASSWORD = os.getenv("PANEL_PASSWORD", "")
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Restaurante Sencillo · Panel",
+    page_title="Restaurante · Panel",
     page_icon="🍽️",
     layout="wide",
     initial_sidebar_state="collapsed"
@@ -75,7 +75,7 @@ if not st.session_state["autenticado"]:
     with col_i:
         st.markdown("""
         <div style='text-align:center; margin-bottom: 2rem;'>
-          <div style='font-family:Syne,sans-serif; font-size:1.5rem; font-weight:800; color:#1a1a1a;'>Restaurante Sencillo</div>
+          <div style='font-family:Syne,sans-serif; font-size:1.5rem; font-weight:800; color:#1a1a1a;'>Restaurante</div>
           <div style='font-size:0.82rem; color:#9ca3af; margin-top:4px;'>Panel de operaciones · Acceso restringido</div>
         </div>
         """, unsafe_allow_html=True)
@@ -373,6 +373,25 @@ st.markdown("""
     background: #0f172a !important; color: #ffffff !important;
     border-color: #0f172a !important;
 }
+
+/* Pedidos: tira compacta de stats para el panel lateral angosto (reemplaza las
+   5 metric-cards grandes, que partían el texto en vertical). */
+.ped-stats { display: flex; flex-wrap: wrap; gap: 8px; }
+.ped-stat {
+    flex: 1 1 64px; background: #ffffff; border: 1px solid #e5e7eb;
+    border-radius: 10px; padding: 8px 6px; text-align: center;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+}
+.ped-stat-n {
+    display: block; font-family: 'Syne', sans-serif; font-weight: 800;
+    font-size: clamp(0.9rem, 1.8vw, 1.3rem); line-height: 1.1;
+    color: #1a1a1a; white-space: nowrap;
+}
+.ped-stat-l {
+    display: block; font-size: 0.62rem; color: #9ca3af;
+    text-transform: uppercase; letter-spacing: 0.5px; margin-top: 3px;
+    white-space: nowrap;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -397,34 +416,41 @@ def _nav_item(label: str, view: str):
         st.rerun()
 
 
+# Resumen ya no es una vista propia: vive como pestaña dentro de Caja. Si una sesión
+# traía 'resumen' como vista activa, la reapuntamos a Caja.
+if st.session_state["current_view"] == "resumen":
+    st.session_state["current_view"] = "caja"
+
 # ── Layout raíz: navegación · contenido · pedidos en vivo ───────────────────────
-col_nav, col_content, col_pedidos = st.columns([1, 3, 2], gap="large")
+# Pedidos (panel derecho, siempre abierto) algo más ancho que el contenido para que
+# las tarjetas de pedido respiren; la navegación, angosta.
+col_nav, col_content, col_pedidos = st.columns([1, 2.4, 2.6], gap="large")
 
 with col_nav:
     with st.container(border=True):
         st.markdown(
-            '<div class="nav-brand">Restaurante Sencillo</div>'
+            '<div class="nav-brand">Restaurante</div>'
             f'<div class="nav-brand-sub">{fecha_larga(datetime.now())}</div>',
             unsafe_allow_html=True,
         )
         st.divider()
-        # Gestión / cierre arriba.
-        _nav_item("💰 Caja", "caja")
-        _nav_item("📊 Resumen", "resumen")
-        st.divider()
-        # Operación del salón abajo.
         _nav_item("🖥️ Monitor", "monitor")
         _nav_item("🍔 Menú", "menu")
         _nav_item("🪑 Mesas", "mesas")
         _nav_item("➕ Nuevo pedido", "nuevo")
+        _nav_item("💰 Caja", "caja")
 
 # ── Contenido de la vista activa ────────────────────────────────────────────────
 with col_content:
     view = st.session_state["current_view"]
     if view == "caja":
-        caja.render()
-    elif view == "resumen":
-        resumen.render()
+        # Caja + Resumen unificados en una sola entrada con dos pestañas. Cada
+        # render() es la vista existente sin tocar; solo se envuelven en st.tabs.
+        tab_caja, tab_resumen = st.tabs(["💰 Caja", "📊 Resumen"])
+        with tab_caja:
+            caja.render()
+        with tab_resumen:
+            resumen.render()
     elif view == "monitor":
         monitor_mesas.render()
     elif view == "menu":

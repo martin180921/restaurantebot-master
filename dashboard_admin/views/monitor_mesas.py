@@ -338,12 +338,7 @@ def _detalle_pedido(row, idx: int):
           <div class="order-items">{items}</div>
           <div class="order-fecha">{fecha}</div>
         </div>
-        <div style="text-align:right;">
-          {pedidos.badge_html(estado)}
-          <div class="order-total" style="margin-top:8px;">${fmt_money(saldo)}</div>
-          {abono_html}
-          {chip}
-        </div>
+        <div style="text-align:right;">{pedidos.badge_html(estado)}<div class="order-total" style="margin-top:8px;">${fmt_money(saldo)}</div>{abono_html}{chip}</div>
       </div>
     </div>
     """, unsafe_allow_html=True)

@@ -465,8 +465,9 @@ def render_pedidos(dataframe: pd.DataFrame, tab_key: str = "all", mesa_nombres=N
         chip_espera = (f'<div style="font-size:0.72rem; color:{color_urg}; font-weight:700; '
                        f'margin-top:6px; white-space:nowrap;">⏱ {mins} min</div>') if color_urg else ""
 
-        # Fix 2: info col wider, actions col narrower and self-contained
-        col_info, col_acciones = st.columns([4, 1])
+        # Fix 2: info + actions. Wider actions col ([3,2]) so en el panel lateral
+        # angosto los botones no se desbordan de la tarjeta.
+        col_info, col_acciones = st.columns([3, 2])
         with col_info:
             st.markdown(f"""
             <div class="order-card"{borde}>
@@ -477,11 +478,7 @@ def render_pedidos(dataframe: pd.DataFrame, tab_key: str = "all", mesa_nombres=N
                   <div class="order-items">{items}</div>
                   <div class="order-fecha">{fecha}</div>
                 </div>
-                <div style="text-align:right;">
-                  {badge_html(estado)}
-                  <div class="order-total" style="margin-top:8px;">${fmt_money(total_p)}</div>
-                  {chip_espera}
-                </div>
+                <div style="text-align:right;">{badge_html(estado)}<div class="order-total" style="margin-top:8px;">${fmt_money(total_p)}</div>{chip_espera}</div>
               </div>
             </div>
             """, unsafe_allow_html=True)
@@ -630,18 +627,24 @@ def _tablero_en_vivo():
     ]
     ventas_hoy = int(hoy_df.apply(cobrado_pedido, axis=1).sum()) if not hoy_df.empty else 0
 
-    c1, c2, c3, c4, c5 = st.columns(5)
-    with c1:
-        st.markdown(f'<div class="metric-card"><div class="metric-value">{total}</div><div class="metric-label">Total pedidos</div></div>', unsafe_allow_html=True)
-    with c2:
-        st.markdown(f'<div class="metric-card"><div class="metric-value metric-accent">{pend}</div><div class="metric-label">Pendientes</div></div>', unsafe_allow_html=True)
-    with c3:
-        st.markdown(f'<div class="metric-card"><div class="metric-value metric-blue">{en_prep}</div><div class="metric-label">En preparación</div></div>', unsafe_allow_html=True)
-    with c4:
-        st.markdown(f'<div class="metric-card"><div class="metric-value metric-green">{listos}</div><div class="metric-label">Listos</div></div>', unsafe_allow_html=True)
-    with c5:
-        # Fix 5: reduced clamp max to 1.6rem to handle large numbers
-        st.markdown(f'<div class="metric-card"><div class="metric-value" style="font-size:clamp(0.85rem, 1.5vw, 1.6rem); white-space:nowrap;">${fmt_money(ventas_hoy)}</div><div class="metric-label">Ventas hoy</div></div>', unsafe_allow_html=True)
+    # Tira compacta de stats: el tablero vive ahora en un panel lateral angosto, así
+    # que las 5 metric-cards grandes partían el texto en vertical ("PEN/DIE/NTES").
+    # Una tira flex con números pequeños cabe sin romperse y prioriza la cola de
+    # cocina (pendientes · en prep · listos) + lo cobrado hoy. 'Total pedidos' se
+    # quitó por ser el dato menos accionable en vivo (sigue en la pestaña "Todos").
+    st.markdown(
+        '<div class="ped-stats">'
+        f'<div class="ped-stat"><span class="ped-stat-n metric-accent">{pend}</span>'
+        '<span class="ped-stat-l">Pendientes</span></div>'
+        f'<div class="ped-stat"><span class="ped-stat-n metric-blue">{en_prep}</span>'
+        '<span class="ped-stat-l">En prep.</span></div>'
+        f'<div class="ped-stat"><span class="ped-stat-n metric-green">{listos}</span>'
+        '<span class="ped-stat-l">Listos</span></div>'
+        f'<div class="ped-stat"><span class="ped-stat-n">${fmt_money(ventas_hoy)}</span>'
+        '<span class="ped-stat-l">Ventas hoy</span></div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
 
     st.markdown("<br>", unsafe_allow_html=True)
 
