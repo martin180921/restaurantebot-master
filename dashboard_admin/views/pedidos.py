@@ -538,8 +538,18 @@ def grupo_de_mesa(row, mesa_nombres: dict) -> str:
     return "Sin mesa"
 
 def render_por_mesa(df: pd.DataFrame, mesa_nombres: dict):
-    """Agrupa y renderiza los pedidos ACTIVOS por mesa."""
-    activos = df[df["estado"].isin(ESTADOS_ACTIVOS)].copy()
+    """Agrupa y renderiza los pedidos ACTIVOS por mesa.
+
+    'Activo' aquí = en cocina (pendiente/en preparación/listo) y SIN pagar, igual
+    que en el Monitor: cobrar libera la mesa, así que un pedido ya pagado no debe
+    seguir apareciendo en esta vista por mesa aunque su estado de cocina no se haya
+    avanzado a 'entregado'. (Antes filtraba solo por estado e ignoraba 'pagado', por
+    lo que tras 'Cobrar mesa' la mesa quedaba libre en el Monitor pero sus pedidos
+    seguían listados aquí.) 'pagado' puede faltar pre-migración → se trata como FALSE.
+    """
+    pagado = (df["pagado"].fillna(False).astype(bool) if "pagado" in df.columns
+              else pd.Series(False, index=df.index))
+    activos = df[df["estado"].isin(ESTADOS_ACTIVOS) & (~pagado)].copy()
     if activos.empty:
         st.markdown('<p style="color:#9ca3af; font-size:0.85rem; padding:1rem 0;">No hay pedidos activos en este momento.</p>', unsafe_allow_html=True)
         return
