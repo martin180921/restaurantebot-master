@@ -386,6 +386,14 @@ def dialog_cobrar(ids, titulo, total, uid):
     )
     es_efectivo = metodo == "💵 Efectivo"
 
+    # Transferencia: el tender de efectivo NO aplica. Limpiamos su estado para que un
+    # valor "insuficiente" previo no quede bloqueando el cobro ni reaparezca al volver
+    # a Efectivo; y la validación de abajo ignora el cálculo de cambio (solo exige
+    # abono > 0). Seguro: el widget 'recibe' solo se instancia en la rama de efectivo,
+    # así que aquí (transferencia) podemos limpiar su clave sin chocar con el widget.
+    if not es_efectivo:
+        st.session_state.pop(f"recibe_{uid}", None)
+
     # Monto a abonar: por defecto el total (cobro completo). Reducirlo = abono
     # parcial. min_value=0 bloquea negativos; max_value=total impide sobre-cobrar.
     abono = int(st.number_input(
@@ -432,8 +440,11 @@ def dialog_cobrar(ids, titulo, total, uid):
 
     c1, c2 = st.columns(2)
     with c1:
+        # Transferencia se confirma solo con abono > 0 (sin cálculo de cambio); en
+        # efectivo además exige que el tender alcance (no efectivo_corto).
         if st.button("✓ Confirmar pago", key=f"confirm_cobrar_{uid}", type="primary",
-                     use_container_width=True, disabled=(abono <= 0 or efectivo_corto)):
+                     use_container_width=True,
+                     disabled=(abono <= 0 or (es_efectivo and efectivo_corto))):
             registrar_pago(ids, abono, "efectivo" if es_efectivo else "transferencia")
             if abono >= total:
                 flash(f"Pago completo · {titulo} · ${fmt_money(total)}", "💵")
@@ -537,19 +548,33 @@ def grupo_de_mesa(row, mesa_nombres: dict) -> str:
         return cliente
     return "Sin mesa"
 
+def _con_saldo_mask(df: pd.DataFrame) -> pd.Series:
+    """Serie booleana de pedidos con SALDO PENDIENTE (> 0): excluye los pagados
+    (pagado=TRUE) y los de saldo cero (total − total_pagado <= 0). Equivale a
+    saldo_pedido(row) > 0 pero vectorizado. Defensiva ante columnas faltantes
+    pre-migración (se tratan como FALSE / 0).
+
+    Es la definición de 'activo' que comparten el tablero por estado, sus cuentas y
+    la vista por mesa: un pedido cobrado (completo o de saldo cero) NO debe seguir en
+    el tablero activo, igual que en el Monitor (cobrar = pedido resuelto)."""
+    idx = df.index
+    pagado = (df["pagado"].fillna(False).astype(bool) if "pagado" in df.columns
+              else pd.Series(False, index=idx))
+    total = (pd.to_numeric(df["total"], errors="coerce").fillna(0)
+             if "total" in df.columns else pd.Series(0, index=idx))
+    abonado = (pd.to_numeric(df["total_pagado"], errors="coerce").fillna(0)
+               if "total_pagado" in df.columns else pd.Series(0, index=idx))
+    return (~pagado) & ((total - abonado) > 0)
+
+
 def render_por_mesa(df: pd.DataFrame, mesa_nombres: dict):
     """Agrupa y renderiza los pedidos ACTIVOS por mesa.
 
-    'Activo' aquí = en cocina (pendiente/en preparación/listo) y SIN pagar, igual
-    que en el Monitor: cobrar libera la mesa, así que un pedido ya pagado no debe
-    seguir apareciendo en esta vista por mesa aunque su estado de cocina no se haya
-    avanzado a 'entregado'. (Antes filtraba solo por estado e ignoraba 'pagado', por
-    lo que tras 'Cobrar mesa' la mesa quedaba libre en el Monitor pero sus pedidos
-    seguían listados aquí.) 'pagado' puede faltar pre-migración → se trata como FALSE.
-    """
-    pagado = (df["pagado"].fillna(False).astype(bool) if "pagado" in df.columns
-              else pd.Series(False, index=df.index))
-    activos = df[df["estado"].isin(ESTADOS_ACTIVOS) & (~pagado)].copy()
+    'Activo' aquí = en cocina (pendiente/en preparación/listo) y CON saldo pendiente,
+    igual que en el Monitor: cobrar libera la mesa, así que un pedido ya saldado no
+    debe seguir apareciendo aunque su estado de cocina no se haya avanzado a
+    'entregado'. Ver _con_saldo_mask (excluye pagado=TRUE o saldo <= 0)."""
+    activos = df[df["estado"].isin(ESTADOS_ACTIVOS) & _con_saldo_mask(df)].copy()
     if activos.empty:
         st.markdown('<p style="color:#9ca3af; font-size:0.85rem; padding:1rem 0;">No hay pedidos activos en este momento.</p>', unsafe_allow_html=True)
         return
@@ -621,13 +646,11 @@ def _tablero_en_vivo():
         </script>
         """, height=0)
 
-    # 'pagado' cierra el pedido para el tablero activo, igual que en el Monitor:
-    # cobrar = pedido resuelto. Las cuentas y pestañas de cocina (pendientes/en
-    # prep/listos) excluyen los ya pagados; 'Todos' los conserva como catálogo.
-    # 'pagado' puede faltar pre-migración → se trata como FALSE.
-    pagado = (df["pagado"].fillna(False).astype(bool) if "pagado" in df.columns
-              else pd.Series(False, index=df.index))
-    activo = ~pagado
+    # 'activo' = pedido con saldo pendiente (no pagado y total − total_pagado > 0),
+    # la misma definición que usa el Monitor: cobrar = pedido resuelto. Las cuentas y
+    # pestañas de cocina (pendientes/en prep/listos) excluyen los ya saldados; 'Todos'
+    # los conserva como catálogo. Ver _con_saldo_mask.
+    activo = _con_saldo_mask(df)
 
     total      = len(df)
     pend       = len(df[(df["estado"] == "pendiente")      & activo])

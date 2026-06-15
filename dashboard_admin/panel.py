@@ -186,7 +186,7 @@ html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
     border: 1px solid #d1d5db !important; background: #ffffff !important;
     color: #374151 !important; padding: 6px 12px !important;
     transition: all 0.15s !important; height: auto !important;
-    width: 100% !important;
+    width: 100% !important; min-width: 0 !important;
 }
 .stButton > button:hover {
     background: #f3f4f6 !important; color: #111827 !important; border-color: #9ca3af !important;
@@ -422,9 +422,8 @@ if st.session_state["current_view"] == "resumen":
     st.session_state["current_view"] = "caja"
 
 # ── Layout raíz: navegación · contenido · pedidos en vivo ───────────────────────
-# Pedidos (panel derecho, siempre abierto) algo más ancho que el contenido para que
-# las tarjetas de pedido respiren; la navegación, angosta.
-col_nav, col_content, col_pedidos = st.columns([1, 2.4, 2.6], gap="large")
+# Sidebar angosta, área de contenido ancha y Pedidos como panel lateral compacto.
+col_nav, col_content, col_pedidos = st.columns([0.7, 3.3, 2.0], gap="medium")
 
 with col_nav:
     with st.container(border=True):
