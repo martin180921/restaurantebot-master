@@ -621,10 +621,18 @@ def _tablero_en_vivo():
         </script>
         """, height=0)
 
+    # 'pagado' cierra el pedido para el tablero activo, igual que en el Monitor:
+    # cobrar = pedido resuelto. Las cuentas y pestañas de cocina (pendientes/en
+    # prep/listos) excluyen los ya pagados; 'Todos' los conserva como catálogo.
+    # 'pagado' puede faltar pre-migración → se trata como FALSE.
+    pagado = (df["pagado"].fillna(False).astype(bool) if "pagado" in df.columns
+              else pd.Series(False, index=df.index))
+    activo = ~pagado
+
     total      = len(df)
-    pend       = len(df[df["estado"] == "pendiente"])
-    en_prep    = len(df[df["estado"] == "en preparacion"])
-    listos     = len(df[df["estado"] == "listo"])
+    pend       = len(df[(df["estado"] == "pendiente")      & activo])
+    en_prep    = len(df[(df["estado"] == "en preparacion") & activo])
+    listos     = len(df[(df["estado"] == "listo")          & activo])
     entregados = len(df[df["estado"] == "entregado"])
     cancelados = len(df[df["estado"] == "cancelado"]) if "cancelado" in df["estado"].values else 0
     # Ventas = dinero realmente cobrado, no solo entregado. Suma lo COBRADO de cada
@@ -685,11 +693,11 @@ def _tablero_en_vivo():
         with tab_todos:
             render_pedidos(df, "todos", mesa_nombres=mesa_nombres)
         with tab_pend:
-            render_pedidos(df[df["estado"] == "pendiente"].copy(), "pend", mesa_nombres=mesa_nombres)
+            render_pedidos(df[(df["estado"] == "pendiente") & activo].copy(), "pend", mesa_nombres=mesa_nombres)
         with tab_prep:
-            render_pedidos(df[df["estado"] == "en preparacion"].copy(), "prep", mesa_nombres=mesa_nombres)
+            render_pedidos(df[(df["estado"] == "en preparacion") & activo].copy(), "prep", mesa_nombres=mesa_nombres)
         with tab_listo:
-            render_pedidos(df[df["estado"] == "listo"].copy(), "listo", mesa_nombres=mesa_nombres)
+            render_pedidos(df[(df["estado"] == "listo") & activo].copy(), "listo", mesa_nombres=mesa_nombres)
         with tab_entregado:
             render_pedidos(df[df["estado"] == "entregado"].copy(), "entregado", mesa_nombres=mesa_nombres)
         with tab_cancelado:
