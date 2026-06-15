@@ -5,7 +5,7 @@ import html
 import pandas as pd
 from datetime import date
 
-from db import engine, cargar_menu, fmt_money
+from db import engine, cargar_menu, fmt_money, flash
 
 
 # ── DB: menú ───────────────────────────────────────────────────────────────────
@@ -16,6 +16,7 @@ def agregar_plato(nombre: str, precio: int):
             "INSERT INTO menu (nombre, precio, activo, orden) VALUES (:n, :p, TRUE, :o)"
         ), {"n": nombre.strip(), "p": precio, "o": max_orden + 1})
     cargar_menu.clear()  # P1: invalida la caché del menú
+    flash("Plato agregado", "✅")
 
 def actualizar_plato(plato_id: int, nombre: str, precio: int):
     with engine.begin() as conn:
@@ -23,6 +24,7 @@ def actualizar_plato(plato_id: int, nombre: str, precio: int):
             "UPDATE menu SET nombre = :n, precio = :p WHERE id = :id"
         ), {"n": nombre.strip(), "p": precio, "id": plato_id})
     cargar_menu.clear()  # P1
+    flash("Plato actualizado", "✅")
 
 def toggle_plato(plato_id: int, activo_actual: bool):
     with engine.begin() as conn:
@@ -30,11 +32,14 @@ def toggle_plato(plato_id: int, activo_actual: bool):
             "UPDATE menu SET activo = :a WHERE id = :id"
         ), {"a": not activo_actual, "id": plato_id})
     cargar_menu.clear()  # P1
+    flash("Plato activado" if not activo_actual else "Plato desactivado",
+          "▶️" if not activo_actual else "⏸️")
 
 def eliminar_plato(plato_id: int):
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM menu WHERE id = :id"), {"id": plato_id})
     cargar_menu.clear()  # P1
+    flash("Plato eliminado", "🗑️")
 
 # F6: "86 / agotado hoy" — se marca con la fecha de hoy y vuelve a estar
 # disponible solo (automáticamente) al cambiar el día.
@@ -43,12 +48,32 @@ def marcar_agotado(plato_id: int):
         conn.execute(text("UPDATE menu SET agotado_hasta = CURRENT_DATE WHERE id = :id"),
                      {"id": plato_id})
     cargar_menu.clear()
+    flash("Marcado agotado por hoy", "🚫")
 
 def quitar_agotado(plato_id: int):
     with engine.begin() as conn:
         conn.execute(text("UPDATE menu SET agotado_hasta = NULL WHERE id = :id"),
                      {"id": plato_id})
     cargar_menu.clear()
+    flash("Disponible de nuevo", "♻️")
+
+
+# ── Modal: eliminar plato (Fase 3) ──────────────────────────────────────────────
+@st.dialog("Eliminar plato")
+def _dialog_eliminar_plato(pid: int, nombre: str):
+    st.markdown(
+        f"¿Eliminar **{html.escape(str(nombre))}** permanentemente?  \n"
+        "Esta acción no se puede deshacer."
+    )
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("🗑 Sí, eliminar", key=f"confirm_eliminar_{pid}", type="primary",
+                     use_container_width=True):
+            eliminar_plato(pid)   # flashea toast
+            st.rerun()
+    with c2:
+        if st.button("Volver", key=f"volver_eliminar_{pid}", use_container_width=True):
+            st.rerun()
 
 def _agotado_hoy(valor) -> bool:
     """True si agotado_hasta cubre el día de hoy."""
@@ -117,42 +142,34 @@ def render():
                     with b1:
                         toggle_label = "⏸" if activo else "▶"
                         toggle_help  = "Desactivar" if activo else "Activar"
-                        if st.button(toggle_label, key=f"toggle_{pid}_{idx}", help=toggle_help):
+                        if st.button(toggle_label, key=f"toggle_{pid}_{idx}", help=toggle_help,
+                                     use_container_width=True):
                             toggle_plato(pid, activo)
                             st.rerun()
                     with b2:
                         # F6: 86 = agotar hoy; ♻ = volver a habilitar
                         if agotado:
-                            if st.button("♻", key=f"unago_{pid}_{idx}", help="Disponible de nuevo"):
+                            if st.button("♻", key=f"unago_{pid}_{idx}", help="Disponible de nuevo",
+                                         use_container_width=True):
                                 quitar_agotado(pid)
                                 st.rerun()
                         else:
-                            if st.button("86", key=f"ago_{pid}_{idx}", help="Agotado hoy (vuelve mañana)"):
+                            if st.button("86", key=f"ago_{pid}_{idx}", help="Agotado hoy (vuelve mañana)",
+                                         use_container_width=True):
                                 marcar_agotado(pid)
                                 st.rerun()
                     with b3:
-                        if st.button("✏️", key=f"edit_{pid}_{idx}", help="Editar"):
+                        if st.button("✏️", key=f"edit_{pid}_{idx}", help="Editar",
+                                     use_container_width=True):
                             st.session_state["editar_id"]     = pid
                             st.session_state["editar_nombre"] = nombre
                             st.session_state["editar_precio"] = precio
                             st.rerun()
                     with b4:
-                        if st.button("🗑", key=f"del_{pid}_{idx}", help="Eliminar"):
-                            st.session_state["confirmar_del"] = pid
-                            st.rerun()
-
-                if st.session_state.get("confirmar_del") == pid:
-                    st.warning(f"¿Eliminar **{nombre}** permanentemente?")
-                    cc1, cc2 = st.columns(2)
-                    with cc1:
-                        if st.button("Sí, eliminar", key=f"si_del_{pid}", type="primary"):
-                            eliminar_plato(pid)
-                            st.session_state.pop("confirmar_del", None)
-                            st.rerun()
-                    with cc2:
-                        if st.button("Cancelar", key=f"no_del_{pid}"):
-                            st.session_state.pop("confirmar_del", None)
-                            st.rerun()
+                        # Fase 3: modal centrado en vez de aviso inline.
+                        if st.button("🗑", key=f"eliminar_{pid}_{idx}", help="Eliminar",
+                                     use_container_width=True):
+                            _dialog_eliminar_plato(pid, nombre)
 
     with col_form:
         editando = "editar_id" in st.session_state
@@ -167,7 +184,8 @@ def render():
 
         b_guardar, b_cancelar = st.columns(2)
         with b_guardar:
-            if st.button("💾 Guardar", type="primary", key="btn_guardar"):
+            if st.button("💾 Guardar", type="primary", key="btn_guardar",
+                         use_container_width=True):
                 if not nombre_input.strip():
                     st.error("El nombre no puede estar vacío.")
                 elif precio_input <= 0:
@@ -178,15 +196,13 @@ def render():
                         st.session_state.pop("editar_id", None)
                         st.session_state.pop("editar_nombre", None)
                         st.session_state.pop("editar_precio", None)
-                        st.success("Plato actualizado ✓")
                     else:
                         agregar_plato(nombre_input, precio_input)
-                        st.success("Plato agregado ✓")
-                    st.rerun()
+                    st.rerun()  # el toast lo emite db.flash tras el rerun
 
         with b_cancelar:
             if editando:
-                if st.button("✕ Cancelar", key="btn_cancelar"):
+                if st.button("✕ Cancelar", key="btn_cancelar", use_container_width=True):
                     st.session_state.pop("editar_id", None)
                     st.session_state.pop("editar_nombre", None)
                     st.session_state.pop("editar_precio", None)

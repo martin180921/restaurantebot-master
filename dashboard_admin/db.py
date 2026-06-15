@@ -49,6 +49,21 @@ except Exception:
     pass  # tablas aún sin crear (deploy nuevo): el bot las creará con las columnas
 
 
+# ── Toasts no bloqueantes (compartidos por todas las vistas) ────────────────────
+# st.toast NO sobrevive a un st.rerun() (el rerun descarta los deltas del run en
+# curso) y casi toda acción del panel termina en st.rerun(). Por eso encolamos el
+# toast en session_state y lo emitimos al inicio del run siguiente con
+# drain_toasts() — lo llama panel.py antes de pintar la vista, y nuevo_pedido en
+# su fragment (que se relanza con scope="fragment", sin re-ejecutar panel.py).
+# Así el aviso flota sin desplazar el layout hacia abajo.
+def flash(mensaje: str, icono: str = "✅") -> None:
+    st.session_state.setdefault("_toasts", []).append((mensaje, icono))
+
+def drain_toasts() -> None:
+    for mensaje, icono in st.session_state.pop("_toasts", []):
+        st.toast(mensaje, icon=icono)
+
+
 # ── Formato de moneda LATAM $XX.XXX (C6) ────────────────────────────────────────
 def fmt_money(valor) -> str:
     """Formatea un monto entero con punto de miles: 35000 → '35.000'.

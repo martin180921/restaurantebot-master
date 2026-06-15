@@ -4,7 +4,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 import html
 
-from db import engine
+from db import engine, flash
 
 
 # ── Esquema defensivo ──────────────────────────────────────────────────────────
@@ -51,20 +51,24 @@ def crear_mesa(nombre: str):
     with engine.begin() as conn:
         conn.execute(text("INSERT INTO mesas (nombre) VALUES (:n)"), {"n": nombre.strip()})
     cargar_mesas.clear()  # P1
+    flash("Mesa creada", "✅")
 
 def renombrar_mesa(mesa_id: int, nombre: str):
     with engine.begin() as conn:
         conn.execute(text("UPDATE mesas SET nombre = :n WHERE id = :id"),
                      {"n": nombre.strip(), "id": mesa_id})
     cargar_mesas.clear()  # P1
+    flash("Mesa actualizada", "✅")
 
 def toggle_mesa(mesa_id: int, activa_actual: bool):
     with engine.begin() as conn:
         conn.execute(text("UPDATE mesas SET activa = :a WHERE id = :id"),
                      {"a": not activa_actual, "id": mesa_id})
     cargar_mesas.clear()  # P1
+    flash("Mesa activada" if not activa_actual else "Mesa desactivada",
+          "▶️" if not activa_actual else "⏸️")
 
-def eliminar_mesa(mesa_id: int) -> str:
+def eliminar_mesa(mesa_id: int, nombre: str = "") -> str:
     """Borra la mesa; si tiene pedidos asociados (historial) la archiva en su lugar.
 
     Devuelve 'deleted' o 'archived'. El borrado real falla con IntegrityError si
@@ -80,7 +84,30 @@ def eliminar_mesa(mesa_id: int) -> str:
             conn.execute(text("UPDATE mesas SET activa = FALSE WHERE id = :id"), {"id": mesa_id})
         resultado = "archived"
     cargar_mesas.clear()  # P1
+    etq = nombre or "Mesa"
+    if resultado == "archived":
+        flash(f"{etq} se archivó (tenía historial)", "📦")
+    else:
+        flash(f"{etq} eliminada", "🗑️")
     return resultado
+
+
+# ── Modal: eliminar mesa (Fase 3) ───────────────────────────────────────────────
+@st.dialog("Eliminar mesa")
+def _dialog_eliminar_mesa(mid: int, nombre: str):
+    st.markdown(
+        f"¿Eliminar **{html.escape(str(nombre))}**?  \n"
+        "Si tiene pedidos en su historial, se archivará (inactiva) para conservarlo."
+    )
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("🗑 Sí, eliminar", key=f"confirm_eliminar_mesa_{mid}", type="primary",
+                     use_container_width=True):
+            eliminar_mesa(mid, nombre)   # flashea toast (eliminada / archivada)
+            st.rerun()
+    with c2:
+        if st.button("Volver", key=f"volver_eliminar_mesa_{mid}", use_container_width=True):
+            st.rerun()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -138,33 +165,21 @@ def render():
                     with b1:
                         toggle_label = "⏸" if activa else "▶"
                         toggle_help  = "Desactivar" if activa else "Activar"
-                        if st.button(toggle_label, key=f"mesa_toggle_{mid}_{idx}", help=toggle_help):
+                        if st.button(toggle_label, key=f"mesa_toggle_{mid}_{idx}", help=toggle_help,
+                                     use_container_width=True):
                             toggle_mesa(mid, activa)
                             st.rerun()
                     with b2:
-                        if st.button("✏️", key=f"mesa_edit_{mid}_{idx}", help="Renombrar"):
+                        if st.button("✏️", key=f"mesa_edit_{mid}_{idx}", help="Renombrar",
+                                     use_container_width=True):
                             st.session_state["editar_mesa_id"]     = mid
                             st.session_state["editar_mesa_nombre"] = nombre
                             st.rerun()
                     with b3:
-                        if st.button("🗑", key=f"mesa_del_{mid}_{idx}", help="Eliminar"):
-                            st.session_state["confirmar_del_mesa"] = mid
-                            st.rerun()
-
-                if st.session_state.get("confirmar_del_mesa") == mid:
-                    st.warning(f"¿Eliminar **{nombre}**? Si tiene pedidos en su historial, se archivará en lugar de borrarse.")
-                    cc1, cc2 = st.columns(2)
-                    with cc1:
-                        if st.button("Sí, eliminar", key=f"mesa_si_del_{mid}", type="primary"):
-                            resultado = eliminar_mesa(mid)
-                            st.session_state.pop("confirmar_del_mesa", None)
-                            if resultado == "archived":
-                                st.info(f"**{nombre}** tenía pedidos asociados, así que se archivó (inactiva) para conservar el historial.")
-                            st.rerun()
-                    with cc2:
-                        if st.button("Cancelar", key=f"mesa_no_del_{mid}"):
-                            st.session_state.pop("confirmar_del_mesa", None)
-                            st.rerun()
+                        # Fase 3: modal centrado en vez de aviso inline.
+                        if st.button("🗑", key=f"eliminar_mesa_{mid}_{idx}", help="Eliminar",
+                                     use_container_width=True):
+                            _dialog_eliminar_mesa(mid, nombre)
 
     with col_form:
         editando = "editar_mesa_id" in st.session_state
@@ -177,7 +192,8 @@ def render():
 
         b_guardar, b_cancelar = st.columns(2)
         with b_guardar:
-            if st.button("💾 Guardar", type="primary", key="btn_guardar_mesa"):
+            if st.button("💾 Guardar", type="primary", key="btn_guardar_mesa",
+                         use_container_width=True):
                 if not nombre_input.strip():
                     st.error("El nombre no puede estar vacío.")
                 else:
@@ -185,14 +201,12 @@ def render():
                         renombrar_mesa(st.session_state["editar_mesa_id"], nombre_input)
                         st.session_state.pop("editar_mesa_id", None)
                         st.session_state.pop("editar_mesa_nombre", None)
-                        st.success("Mesa actualizada ✓")
                     else:
                         crear_mesa(nombre_input)
-                        st.success("Mesa creada ✓")
-                    st.rerun()
+                    st.rerun()  # el toast lo emite db.flash tras el rerun
         with b_cancelar:
             if editando:
-                if st.button("✕ Cancelar", key="btn_cancelar_mesa"):
+                if st.button("✕ Cancelar", key="btn_cancelar_mesa", use_container_width=True):
                     st.session_state.pop("editar_mesa_id", None)
                     st.session_state.pop("editar_mesa_nombre", None)
                     st.rerun()

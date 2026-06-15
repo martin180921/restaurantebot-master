@@ -28,6 +28,16 @@ AMBAR = "#d97706"   # ocupada (en servicio, sin urgencia)
 AZUL  = "#2563eb"   # por cobrar (todo entregado, solo falta el pago)
 ROJO  = "#dc2626"   # atención (algo listo por entregar o espera larga)
 
+# Fase 3: tinte de fondo COMPLETO por estado para las tarjetas-mesa del panel
+# izquierdo (antes solo un punto/borde de color). (fondo, fondo_hover, texto):
+# fondos claros + texto oscuro de la misma familia → contraste AA en Light Mode.
+CARD_TINT = {
+    VERDE: ("#dcfce7", "#bbf7d0", "#14532d"),  # Libre       → verde claro
+    AMBAR: ("#ffedd5", "#fed7aa", "#7c2d12"),  # Ocupada     → naranja claro
+    AZUL:  ("#dbeafe", "#bfdbfe", "#1e3a8a"),  # Por cobrar  → azul claro
+    ROJO:  ("#fee2e2", "#fecaca", "#7f1d1d"),  # Atención    → rojo claro
+}
+
 
 # ── DB: cobrar (marcar pagado) ──────────────────────────────────────────────────
 # 'pagado' es una dimensión aparte del estado de cocina: cobrar NO toca el flujo
@@ -43,6 +53,27 @@ def cobrar_pedidos(ids):
     )
     with engine.begin() as conn:
         conn.execute(stmt, {"ids": ids})
+
+
+# ── Modal: cobrar y cerrar mesa (Fase 3) ────────────────────────────────────────
+# Pop-up centrado en vez del aviso inline que empujaba el layout hacia abajo.
+@st.dialog("Cobrar y cerrar mesa")
+def _dialog_cobrar_mesa(mid: int, nombre: str, ids: list):
+    n = len(ids)
+    st.markdown(
+        f"¿**Cobrar y cerrar {html.escape(str(nombre))}**?  \n"
+        f"Sus **{n} pedido(s)** se marcarán como pagados y la mesa quedará libre."
+    )
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("💵 Sí, cobrar mesa", key=f"confirm_cobrar_mesa_{mid}",
+                     type="primary", use_container_width=True):
+            cobrar_pedidos(ids)
+            pedidos.flash(f"{nombre}: {n} pedido(s) cobrados", "💵")
+            st.rerun()
+    with c2:
+        if st.button("Volver", key=f"volver_cobrar_{mid}", use_container_width=True):
+            st.rerun()
 
 
 # ── Resumen del salón ───────────────────────────────────────────────────────────
@@ -163,13 +194,25 @@ def render():
     </style>
     """, unsafe_allow_html=True)
 
-    # CSS dinámico: borde por estado + resaltado de la mesa seleccionada.
-    dyn = [f".st-key-mesabtn_{mid} button {{ border-left-color: {color} !important; }}"
-           for mid, color in color_por_mesa.items()]
+    # CSS dinámico: fondo COMPLETO por estado + resaltado de la mesa seleccionada.
+    # Mismo nivel de especificidad que la regla base (declarado después → gana).
+    dyn = []
+    for mid, color in color_por_mesa.items():
+        bg, bg_h, txt = CARD_TINT[color]
+        dyn.append(
+            f".st-key-mesabtn_{mid} button {{ background:{bg} !important; "
+            f"border-left-color:{color} !important; color:{txt} !important; }}"
+            f".st-key-mesabtn_{mid} button p {{ color:{txt} !important; }}"
+            f".st-key-mesabtn_{mid} button:hover {{ background:{bg_h} !important; "
+            f"border-color:{color} !important; color:{txt} !important; }}"
+        )
     if sel is not None:
-        dyn.append(f".st-key-mesabtn_{sel} button {{ background:#1a1a1a !important; color:#ffffff !important; border-color:#1a1a1a !important; }}")
-        dyn.append(f".st-key-mesabtn_{sel} button:hover {{ background:#262626 !important; color:#ffffff !important; }}")
-        dyn.append(f".st-key-mesabtn_{sel} button p {{ color:#ffffff !important; }}")
+        # Selección: anillo oscuro + negrita; CONSERVA el tinte de estado y el
+        # acento lateral (no se toca background ni border-left-color).
+        dyn.append(
+            f".st-key-mesabtn_{sel} button {{ box-shadow:0 0 0 2px #111827 !important; "
+            f"font-weight:800 !important; }}"
+        )
     st.markdown(f"<style>{''.join(dyn)}</style>", unsafe_allow_html=True)
 
     # ── Layout maestro-detalle ──────────────────────────────────────────────────
@@ -260,30 +303,18 @@ def _detalle_mesa(mid: int, nombre: str, sub: pd.DataFrame, color: str,
     </div>
     """, unsafe_allow_html=True)
 
-    # Acciones de mesa.
+    # Acciones de mesa. Fase 3: el cobro abre un modal centrado (no aviso inline).
     a1, a2 = st.columns([2, 1])
     with a1:
         if not sub.empty:
-            if st.button("💵 Cobrar y cerrar mesa", key=f"mon_cobrar_mesa_{mid}", type="primary"):
-                st.session_state["mon_confirm_cobrar_mesa"] = mid
-                st.rerun()
+            if st.button("💵 Cobrar y cerrar mesa", key=f"mon_cobrar_mesa_{mid}",
+                         type="primary", use_container_width=True):
+                _dialog_cobrar_mesa(mid, nombre, sub["id"].tolist())
     with a2:
-        if st.button("✕ Deseleccionar", key=f"mon_deselect_{mid}"):
+        if st.button("✕ Deseleccionar", key=f"mon_deselect_{mid}",
+                     use_container_width=True):
             st.session_state.pop("mesa_activa", None)
             st.rerun()
-
-    if st.session_state.get("mon_confirm_cobrar_mesa") == mid:
-        st.warning(f"¿Cobrar y cerrar **{nombre}**? Sus {len(sub)} pedido(s) se marcarán como pagados y la mesa quedará libre.")
-        cc1, cc2 = st.columns(2)
-        with cc1:
-            if st.button("Sí, cobrar mesa", key=f"mon_confirm_cobrar_si_{mid}", type="primary"):
-                cobrar_pedidos(sub["id"].tolist())
-                st.session_state.pop("mon_confirm_cobrar_mesa", None)
-                st.rerun()
-        with cc2:
-            if st.button("Cancelar", key=f"mon_confirm_cobrar_no_{mid}"):
-                st.session_state.pop("mon_confirm_cobrar_mesa", None)
-                st.rerun()
 
     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -335,32 +366,20 @@ def _detalle_pedido(row, idx: int):
     b1, b2, b3, b4 = st.columns(4)
     with b1:
         btn_label = pedidos.ESTADO_LABEL_BTN.get(estado)
-        if btn_label and st.button(btn_label, key=f"avanzar_{uid}", type="primary"):
-            pedidos.avanzar_estado(pid, estado)  # hace st.rerun()
+        if btn_label and st.button(btn_label, key=f"avanzar_{uid}", type="primary",
+                                   use_container_width=True):
+            pedidos.avanzar_estado(pid, estado)  # flashea toast + st.rerun()
     with b2:
-        if st.button("🖨 Ticket", key=f"ticket_{uid}"):
+        if st.button("🖨 Ticket", key=f"ticket_{uid}", use_container_width=True):
             st.session_state["print_ticket_id"] = pid
             st.rerun()
     with b3:
-        if st.button("💵 Cobrar", key=f"cobrar_{uid}", help="Marcar este pedido como pagado"):
+        if st.button("💵 Cobrar", key=f"cobrar_{uid}", use_container_width=True,
+                     help="Marcar este pedido como pagado"):
             cobrar_pedidos([pid])
+            pedidos.flash(f"Pedido #{pid} cobrado", "💵")
             st.rerun()
     with b4:
-        if st.button("✕ Cancelar", key=f"cancelar_{uid}"):
-            st.session_state["mon_confirmar_cancel"] = pid
-            st.rerun()
-
-    # Confirmación de cancelación (ancho completo, debajo de la tarjeta).
-    if st.session_state.get("mon_confirmar_cancel") == pid:
-        st.warning(f"¿Cancelar el pedido #{pid}?")
-        motivo = st.text_input("Motivo (opcional)", key=f"motivo_{uid}",
-                               placeholder="Ej: cliente se retiró, error de cocina…")
-        cc1, cc2 = st.columns(2)
-        with cc1:
-            if st.button("Sí, cancelar", key=f"confirm_cancel_{uid}", type="primary"):
-                st.session_state.pop("mon_confirmar_cancel", None)
-                pedidos.cancelar_pedido(pid, motivo)  # hace st.rerun()
-        with cc2:
-            if st.button("Volver", key=f"volver_cancel_{uid}"):
-                st.session_state.pop("mon_confirmar_cancel", None)
-                st.rerun()
+        # Fase 3: modal centrado en vez de aviso inline (compartido con el tablero).
+        if st.button("✕ Cancelar", key=f"cancelar_{uid}", use_container_width=True):
+            pedidos.dialog_cancelar(pid, uid)

@@ -8,7 +8,7 @@ import json
 import html
 from datetime import datetime
 
-from db import engine, fmt_money, fecha_corta
+from db import engine, fmt_money, fecha_corta, flash, drain_toasts
 
 # ── Constantes ─────────────────────────────────────────────────────────────────
 ESTADOS = ["pendiente", "en preparacion", "listo", "entregado"]
@@ -31,6 +31,12 @@ ESTADO_LABEL_BTN = {
 ESTADOS_ACTIVOS = ["pendiente", "en preparacion", "listo"]
 
 
+# ── Toasts no bloqueantes (Fase 1) ──────────────────────────────────────────────
+# flash()/drain_toasts() viven en db.py (compartidos por todas las vistas). Se
+# reexportan aquí para no romper las llamadas existentes (pedidos.flash /
+# pedidos.drain_toasts) desde panel.py y monitor_mesas.py.
+
+
 # ── DB: pedidos ────────────────────────────────────────────────────────────────
 def cargar_pedidos():
     with engine.connect() as conn:
@@ -46,6 +52,7 @@ def avanzar_estado(pedido_id: int, estado_actual: str):
             text("UPDATE pedidos SET estado = :estado WHERE id = :id"),
             {"estado": siguiente, "id": pedido_id}
         )
+    flash(f"Pedido #{pedido_id} → {siguiente}", "✅")
     st.rerun()
 
 def revertir_estado(pedido_id: int, estado_actual: str):
@@ -58,6 +65,7 @@ def revertir_estado(pedido_id: int, estado_actual: str):
             text("UPDATE pedidos SET estado = :estado WHERE id = :id"),
             {"estado": anterior, "id": pedido_id}
         )
+    flash(f"Pedido #{pedido_id} → {anterior}", "↩️")
     st.rerun()
 
 def cancelar_pedido(pedido_id: int, motivo: str = ""):
@@ -66,6 +74,7 @@ def cancelar_pedido(pedido_id: int, motivo: str = ""):
             text("UPDATE pedidos SET estado = 'cancelado', motivo_cancelacion = :m WHERE id = :id"),
             {"m": (motivo or "").strip() or None, "id": pedido_id}
         )
+    flash(f"Pedido #{pedido_id} cancelado", "🗑️")
     st.rerun()
 
 
@@ -260,6 +269,30 @@ def _maybe_print_ticket(df: pd.DataFrame) -> None:
     _emit_print(ticket_html, int(tid))
 
 
+# ── Modal de cancelación (Fase 3) ───────────────────────────────────────────────
+# @st.dialog abre un pop-up centrado en lugar del aviso inline que empujaba el
+# layout. Se comparte entre el tablero y el monitor de mesas (claves por 'uid').
+@st.dialog("Cancelar pedido")
+def dialog_cancelar(pid: int, uid: str):
+    pid = int(pid)
+    st.markdown(
+        f"¿Seguro que quieres **cancelar el pedido #{pid}**?  \n"
+        "Esta acción no se puede deshacer."
+    )
+    motivo = st.text_input(
+        "Motivo (opcional)", key=f"motivo_{uid}",
+        placeholder="Ej: cliente se retiró, error de cocina…",
+    )
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("✕ Sí, cancelar", key=f"confirm_cancel_{uid}", type="primary",
+                     use_container_width=True):
+            cancelar_pedido(pid, motivo)   # flashea toast + st.rerun()
+    with c2:
+        if st.button("Volver", key=f"volver_cancel_{uid}", use_container_width=True):
+            st.rerun()
+
+
 def render_pedidos(dataframe: pd.DataFrame, tab_key: str = "all", mesa_nombres=None):
     if dataframe.empty:
         st.markdown('<p style="color:#9ca3af; font-size:0.85rem; padding:1rem 0;">Sin pedidos en esta categoría.</p>', unsafe_allow_html=True)
@@ -304,40 +337,24 @@ def render_pedidos(dataframe: pd.DataFrame, tab_key: str = "all", mesa_nombres=N
             # Fix 2: stack buttons vertically, full width, no height spacer
             btn_label = ESTADO_LABEL_BTN.get(estado)
             if btn_label:
-                if st.button(btn_label, key=f"avanzar_{uid}", type="primary"):
+                if st.button(btn_label, key=f"avanzar_{uid}", type="primary",
+                             use_container_width=True):
                     avanzar_estado(pid, estado)
 
             # P3: botón nativo; la impresión usa UN solo iframe bajo demanda
             # (_maybe_print_ticket en render()), no un iframe por tarjeta.
-            if st.button("🖨 Ticket", key=f"ticket_{uid}"):
+            if st.button("🖨 Ticket", key=f"ticket_{uid}", use_container_width=True):
                 st.session_state["print_ticket_id"] = int(pid)
                 st.rerun()
 
             if estado in ESTADOS and ESTADOS.index(estado) > 0 and estado != "entregado":
-                if st.button("↩ Revertir", key=f"revertir_{uid}"):
+                if st.button("↩ Revertir", key=f"revertir_{uid}", use_container_width=True):
                     revertir_estado(pid, estado)
             # F1: cancelar disponible para cualquier pedido activo (antes solo pendiente)
+            # Fase 3: abre un modal centrado en vez de un aviso inline.
             if estado in ESTADOS_ACTIVOS:
-                if st.button("✕ Cancelar", key=f"cancelar_{uid}"):
-                    st.session_state["confirmar_cancel"] = pid
-                    st.rerun()
-
-        # F1: confirmación con motivo opcional (ancho completo, debajo de la tarjeta)
-        if st.session_state.get("confirmar_cancel") == pid:
-            st.warning(f"¿Cancelar el pedido #{pid}?")
-            motivo = st.text_input(
-                "Motivo (opcional)", key=f"motivo_{uid}",
-                placeholder="Ej: cliente se retiró, error de cocina…",
-            )
-            cc1, cc2 = st.columns(2)
-            with cc1:
-                if st.button("Sí, cancelar", key=f"confirm_cancel_{uid}", type="primary"):
-                    st.session_state.pop("confirmar_cancel", None)
-                    cancelar_pedido(pid, motivo)
-            with cc2:
-                if st.button("Volver", key=f"volver_cancel_{uid}"):
-                    st.session_state.pop("confirmar_cancel", None)
-                    st.rerun()
+                if st.button("✕ Cancelar", key=f"cancelar_{uid}", use_container_width=True):
+                    dialog_cancelar(pid, uid)
 
 
 # ── Agrupación por mesa (Req 3) ────────────────────────────────────────────────

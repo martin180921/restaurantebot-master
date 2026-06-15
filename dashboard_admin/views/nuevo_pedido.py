@@ -6,7 +6,7 @@ import json
 import html
 from datetime import date
 
-from db import engine, cargar_menu, cargar_mesas_activas, fmt_money
+from db import engine, cargar_menu, cargar_mesas_activas, fmt_money, flash, drain_toasts
 
 
 # ── DB: crear pedido manual ────────────────────────────────────────────────────
@@ -23,6 +23,7 @@ def crear_pedido_manual(mesa_id: int, mesa_nombre: str, items: list, total: int)
             "total":   total,
             "mesa_id": mesa_id,
         })
+    flash(f"Pedido para {mesa_nombre} creado", "✅")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -36,6 +37,10 @@ def render():
 
 @st.fragment
 def _form_fragment():
+    # El confirmar/limpiar relanza con scope="fragment", así que panel.py no se
+    # re-ejecuta: drenamos aquí los toasts encolados (db.flash) para que aparezcan.
+    drain_toasts()
+
     df_menu = cargar_menu()
     # F6: oculta platos agotados hoy (agotado_hasta >= hoy), además de inactivos.
     hoy = pd.Timestamp(date.today())
@@ -83,7 +88,7 @@ def _form_fragment():
                 with col_qty:
                     c_menos, c_num, c_mas = st.columns([1, 1, 1])
                     with c_menos:
-                        if st.button("−", key=f"menos_{pid}"):
+                        if st.button("−", key=f"menos_{pid}", use_container_width=True):
                             if qty > 0:
                                 st.session_state["carrito_manual"][pid] = qty - 1
                                 if st.session_state["carrito_manual"][pid] == 0:
@@ -92,7 +97,7 @@ def _form_fragment():
                     with c_num:
                         st.markdown(f'<div style="text-align:center; padding:4px 0; font-size:0.9rem; color:#1a1a1a; font-weight:600;">{qty}</div>', unsafe_allow_html=True)
                     with c_mas:
-                        if st.button("+", key=f"mas_{pid}"):
+                        if st.button("+", key=f"mas_{pid}", use_container_width=True):
                             st.session_state["carrito_manual"][pid] = qty + 1
                             st.rerun(scope="fragment")
 
@@ -129,14 +134,15 @@ def _form_fragment():
             <div style="font-size:0.78rem; color:#9ca3af; margin-bottom:1rem;">{html.escape(str(mesa_labels[mesa_id]))}</div>
             """, unsafe_allow_html=True)
 
-            if st.button("✓ Confirmar pedido", type="primary", key="btn_confirmar_manual"):
+            if st.button("✓ Confirmar pedido", type="primary", key="btn_confirmar_manual",
+                         use_container_width=True):
                 crear_pedido_manual(mesa_id, mesa_labels[mesa_id], items_pedido, total_pedido)
                 st.session_state["carrito_manual"] = {}
-                st.success(f"Pedido para {mesa_labels[mesa_id]} creado ✓")
-                st.rerun(scope="fragment")
+                st.rerun(scope="fragment")  # el toast lo emite db.flash al re-drenar
 
         if carrito:
             st.markdown("<br>", unsafe_allow_html=True)
-            if st.button("🗑 Limpiar", key="btn_limpiar"):
+            if st.button("🗑 Limpiar", key="btn_limpiar", use_container_width=True):
                 st.session_state["carrito_manual"] = {}
+                flash("Carrito vaciado", "🧹")
                 st.rerun(scope="fragment")

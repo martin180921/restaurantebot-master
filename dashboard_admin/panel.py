@@ -47,7 +47,9 @@ if not st.session_state["autenticado"]:
     @import url('https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=DM+Sans:wght@400;500&display=swap');
     html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
     .stApp { background: #f7f7f5; color: #1a1a1a; }
-    #MainMenu, footer, header { visibility: hidden; }
+    header[data-testid="stHeader"], [data-testid="stToolbar"],
+    [data-testid="stDecoration"], [data-testid="stStatusWidget"],
+    [data-testid="stMainMenu"], #MainMenu, footer { display: none !important; }
     .stTextInput > div > div > input {
         background: #ffffff !important; border-color: #d1d5db !important;
         color: #1a1a1a !important; border-radius: 8px !important;
@@ -186,22 +188,69 @@ html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
     background: #f3f4f6 !important; color: #111827 !important; border-color: #9ca3af !important;
 }
 /* Primary button full width, larger target */
-div[data-testid="column"] .stButton > button[kind="primary"] {
+div[data-testid="stColumn"] .stButton > button[kind="primary"] {
     background: #1a1a1a !important; color: #ffffff !important;
     border-color: #1a1a1a !important; font-weight: 700 !important;
     font-size: 0.85rem !important; padding: 10px 12px !important;
     width: 100% !important;
 }
 
-/* F1: botón cancelar en rojo, vía clase st-key-<key> (Streamlit >= 1.39).
-   Antes se usaba un wrapper .btn-cancelar que no envolvía al botón en el DOM
-   (cada st.markdown vive en su propio contenedor) y además añadía hueco. */
-[class*="st-key-cancelar_"] button {
-    border-color: #fecaca !important; color: #dc2626 !important;
-    background: #fef2f2 !important;
+/* ── Fase 2: colores semánticos de botones de acción (estrategia st-key) ───────
+   El personal opera por COLOR, no leyendo texto. Se afina por clave de widget
+   (st-key-<key>, Streamlit >= 1.39). Las variantes ancladas en
+   `div[data-testid="stColumn"] … .stButton > button` igualan la especificidad de
+   la regla de botón primario (negra) de arriba y, al declararse DESPUÉS, le ganan
+   por orden — así el color semántico prevalece sobre el negro en los primary. La
+   clase st-key-<key> vive en el stElementContainer (ancestro del .stButton), por
+   eso el descendiente `.stButton > button` resuelve bien.
+   Nota: Streamlit usa data-testid="stColumn" (no "column") desde 1.39+. */
+
+/* Verde vibrante → avanzar estado / cobrar / guardar / confirmar (positivas). */
+[class*="st-key-avanzar_"] button, [class*="st-key-cobrar_"] button,
+[class*="st-key-mon_cobrar_mesa_"] button, [class*="st-key-confirm_cobrar_"] button,
+[class*="st-key-btn_guardar"] button, [class*="st-key-btn_confirmar"] button,
+div[data-testid="stColumn"] [class*="st-key-avanzar_"] .stButton > button,
+div[data-testid="stColumn"] [class*="st-key-mon_cobrar_mesa_"] .stButton > button,
+div[data-testid="stColumn"] [class*="st-key-confirm_cobrar_"] .stButton > button,
+div[data-testid="stColumn"] [class*="st-key-btn_guardar"] .stButton > button,
+div[data-testid="stColumn"] [class*="st-key-btn_confirmar"] .stButton > button {
+    background: #16a34a !important; border-color: #16a34a !important;
+    color: #ffffff !important; font-weight: 700 !important;
 }
-[class*="st-key-cancelar_"] button:hover {
-    background: #fee2e2 !important; border-color: #f87171 !important; color: #b91c1c !important;
+[class*="st-key-avanzar_"] button:hover, [class*="st-key-cobrar_"] button:hover,
+[class*="st-key-mon_cobrar_mesa_"] button:hover, [class*="st-key-confirm_cobrar_"] button:hover,
+[class*="st-key-btn_guardar"] button:hover, [class*="st-key-btn_confirmar"] button:hover,
+div[data-testid="stColumn"] [class*="st-key-avanzar_"] .stButton > button:hover,
+div[data-testid="stColumn"] [class*="st-key-mon_cobrar_mesa_"] .stButton > button:hover,
+div[data-testid="stColumn"] [class*="st-key-confirm_cobrar_"] .stButton > button:hover,
+div[data-testid="stColumn"] [class*="st-key-btn_guardar"] .stButton > button:hover,
+div[data-testid="stColumn"] [class*="st-key-btn_confirmar"] .stButton > button:hover {
+    background: #15803d !important; border-color: #15803d !important; color: #ffffff !important;
+}
+
+/* Rojo oscuro → cancelar / eliminar (acciones destructivas). */
+[class*="st-key-cancelar_"] button, [class*="st-key-confirm_cancel_"] button,
+[class*="st-key-eliminar_"] button, [class*="st-key-confirm_eliminar_"] button,
+div[data-testid="stColumn"] [class*="st-key-confirm_cancel_"] .stButton > button,
+div[data-testid="stColumn"] [class*="st-key-confirm_eliminar_"] .stButton > button {
+    background: #b91c1c !important; border-color: #b91c1c !important;
+    color: #ffffff !important; font-weight: 700 !important;
+}
+[class*="st-key-cancelar_"] button:hover, [class*="st-key-confirm_cancel_"] button:hover,
+[class*="st-key-eliminar_"] button:hover, [class*="st-key-confirm_eliminar_"] button:hover,
+div[data-testid="stColumn"] [class*="st-key-confirm_cancel_"] .stButton > button:hover,
+div[data-testid="stColumn"] [class*="st-key-confirm_eliminar_"] .stButton > button:hover {
+    background: #991b1b !important; border-color: #991b1b !important; color: #ffffff !important;
+}
+
+/* Gris neutro → imprimir ticket. */
+[class*="st-key-ticket_"] button,
+div[data-testid="stColumn"] [class*="st-key-ticket_"] .stButton > button {
+    background: #6b7280 !important; border-color: #6b7280 !important; color: #ffffff !important;
+}
+[class*="st-key-ticket_"] button:hover,
+div[data-testid="stColumn"] [class*="st-key-ticket_"] .stButton > button:hover {
+    background: #4b5563 !important; border-color: #4b5563 !important; color: #ffffff !important;
 }
 
 /* Navigation as pill buttons */
@@ -249,7 +298,13 @@ div[data-testid="stRadio"] > div > label:has(input:checked) {
 }
 
 hr { border-color: #e5e7eb !important; }
-#MainMenu, footer, header { visibility: hidden; }
+
+/* Fase 1: lienzo limpio — ocultar por completo la cromática de Streamlit
+   (cabecera superior, menú hamburguesa, barra de estado, decoración y pie).
+   display:none (no visibility:hidden) para que NO reserven espacio vertical. */
+header[data-testid="stHeader"], [data-testid="stToolbar"],
+[data-testid="stDecoration"], [data-testid="stStatusWidget"],
+[data-testid="stMainMenu"], #MainMenu, footer { display: none !important; }
 
 /* Req 1: tighter spacing to reclaim vertical space on mobile/tablet */
 .block-container { padding: 0.75rem 1rem 1rem 1rem !important; }
@@ -258,8 +313,8 @@ hr { border-color: #e5e7eb !important; }
 
 /* F1/UX: botones de acción apilados (columna de acciones del tablero) más juntos.
    El gran hueco venía del margen por contenedor de cada botón. */
-div[data-testid="column"] .element-container:has(.stButton) { margin-bottom: 0 !important; }
-div[data-testid="column"] .stButton > button { margin: 1px 0 !important; }
+div[data-testid="stColumn"] .element-container:has(.stButton) { margin-bottom: 0 !important; }
+div[data-testid="stColumn"] .stButton > button { margin: 1px 0 !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -286,6 +341,11 @@ seccion = st.radio(
     label_visibility="collapsed"
 )
 st.markdown("<br>", unsafe_allow_html=True)
+
+# Fase 1: toasts encolados por una acción del run anterior (st.toast no sobrevive
+# a st.rerun(), así que se guardan en session_state y se emiten aquí, ya en el
+# run siguiente, antes de pintar la vista). Ver pedidos.flash()/drain_toasts().
+pedidos.drain_toasts()
 
 # ── Despacho a cada vista ──────────────────────────────────────────────────────
 if seccion == "📋 Pedidos":
