@@ -1,12 +1,16 @@
-"""Enrutador principal del panel: login, estilos globales y navegación.
+"""Enrutador principal del panel: login, estilos globales y navegación lateral.
 
-Cada pestaña vive en su propio módulo dentro de views/ para poder trabajarlas
-de forma independiente:
-    - views/pedidos.py        → tablero, alertas de audio y tickets
+El layout raíz divide la pantalla en tres: un recuadro de navegación vertical a la
+izquierda, el contenido de la vista activa en el centro, y el tablero de Pedidos
+SIEMPRE abierto a la derecha (con su propio fragmento en vivo). Cada vista vive en
+su propio módulo dentro de views/ para poder trabajarlas de forma independiente:
+    - views/pedidos.py        → tablero en vivo (panel derecho), audio y tickets
     - views/monitor_mesas.py  → monitor maestro-detalle del salón
     - views/nuevo_pedido.py   → creación manual de pedidos
     - views/menu.py           → CRUD del menú
     - views/mesas.py          → gestión de mesas
+    - views/resumen.py        → cierre de caja y ventas por día
+    - views/caja.py           → arqueo de caja (apertura/cierre de turno)
 """
 import streamlit as st
 from dotenv import load_dotenv
@@ -23,7 +27,7 @@ PANEL_PASSWORD = os.getenv("PANEL_PASSWORD", "")
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="RestauranteBOT · Panel",
+    page_title="Restaurante Sencillo · Panel",
     page_icon="🍽️",
     layout="wide",
     initial_sidebar_state="collapsed"
@@ -71,7 +75,7 @@ if not st.session_state["autenticado"]:
     with col_i:
         st.markdown("""
         <div style='text-align:center; margin-bottom: 2rem;'>
-          <div style='font-family:Syne,sans-serif; font-size:1.5rem; font-weight:800; color:#1a1a1a;'>🍽️ RestauranteBOT</div>
+          <div style='font-family:Syne,sans-serif; font-size:1.5rem; font-weight:800; color:#1a1a1a;'>Restaurante Sencillo</div>
           <div style='font-size:0.82rem; color:#9ca3af; margin-top:4px;'>Panel de operaciones · Acceso restringido</div>
         </div>
         """, unsafe_allow_html=True)
@@ -321,44 +325,124 @@ div[data-testid="stColumn"] .stButton > button { margin: 1px 0 !important; }
 # ══════════════════════════════════════════════════════════════════════════════
 # UI
 # ══════════════════════════════════════════════════════════════════════════════
-st.markdown(f"""
-<div class="panel-header">
-  <div>
-    <div class="panel-title">🍽️ RestauranteBOT</div>
-    <div class="panel-subtitle">Panel de operaciones · {fecha_larga(datetime.now())}</div>
-  </div>
-  <div style="font-size:0.8rem; color:#9ca3af;">
-    <span class="live-dot"></span>En vivo
-  </div>
-</div>
-""", unsafe_allow_html=True)
 
-# Fix 3: Navigation as pills
-seccion = st.radio(
-    "Navegación",
-    ["📋 Pedidos", "🖥️ Monitor", "➕ Nuevo pedido", "🍽️ Menú", "🪑 Mesas", "📊 Resumen", "💰 Caja"],
-    horizontal=True,
-    label_visibility="collapsed"
-)
-st.markdown("<br>", unsafe_allow_html=True)
+# ── Estilos de la navegación lateral (recuadro izquierdo) ───────────────────────
+# Se inyectan DESPUÉS del bloque global para ganarle por orden de cascada a la
+# regla base de botón (.stButton > button). El estado activo/inactivo se distingue
+# por la CLAVE del widget (st-key-nav_active / st-key-nav_inactive_*), la misma
+# estrategia st-key que usan los botones semánticos del resto del panel.
+st.markdown("""
+<style>
+.nav-brand {
+    font-family: 'Syne', sans-serif; font-size: 1.15rem; font-weight: 800;
+    color: #1e293b; letter-spacing: -0.3px; line-height: 1.2;
+}
+.nav-brand-sub {
+    font-size: 0.7rem; color: #94a3b8; margin-top: 4px;
+    text-transform: uppercase; letter-spacing: 1px;
+}
+
+/* Ítems de navegación: tipografía y forma comunes (activo + inactivo) */
+[class*="st-key-nav_inactive"] button, .st-key-nav_active button {
+    text-align: left !important; justify-content: flex-start !important;
+    border-radius: 8px !important; padding: 9px 14px !important;
+    font-size: 0.86rem !important; font-weight: 500 !important;
+    box-shadow: none !important; min-height: 0 !important;
+    transition: background 0.18s ease, color 0.18s ease, border-color 0.18s ease !important;
+}
+[class*="st-key-nav_inactive"] button p, .st-key-nav_active button p {
+    text-align: left !important; margin: 0 !important;
+}
+
+/* Inactivo: plano, transparente, sin borde — como un ítem de menú de texto */
+[class*="st-key-nav_inactive"] button {
+    background: transparent !important; color: #334155 !important;
+    border: 1px solid transparent !important;
+}
+[class*="st-key-nav_inactive"] button:hover {
+    background: #f1f5f9 !important; color: #1e293b !important;
+    border-color: transparent !important;
+}
+
+/* Activo: tono corporativo oscuro (slate), texto blanco, borde nítido */
+.st-key-nav_active button {
+    background: #1e293b !important; color: #ffffff !important;
+    font-weight: 600 !important; border: 1px solid #1e293b !important;
+}
+.st-key-nav_active button:hover {
+    background: #0f172a !important; color: #ffffff !important;
+    border-color: #0f172a !important;
+}
+</style>
+""", unsafe_allow_html=True)
 
 # Fase 1: toasts encolados por una acción del run anterior (st.toast no sobrevive
 # a st.rerun(), así que se guardan en session_state y se emiten aquí, ya en el
 # run siguiente, antes de pintar la vista). Ver pedidos.flash()/drain_toasts().
 pedidos.drain_toasts()
 
-# ── Despacho a cada vista ──────────────────────────────────────────────────────
-if seccion == "📋 Pedidos":
+# Vista activa por defecto: el monitor del salón.
+if "current_view" not in st.session_state:
+    st.session_state["current_view"] = "monitor"
+
+
+def _nav_item(label: str, view: str):
+    """Botón de navegación vertical. El seleccionado usa la clave 'nav_active'
+    (clase .st-key-nav_active); los demás 'nav_inactive_<view>'. El CSS de arriba
+    pinta cada estado por esa clave. Al pulsarlo cambia current_view y re-ejecuta."""
+    activo = st.session_state["current_view"] == view
+    key = "nav_active" if activo else f"nav_inactive_{view}"
+    if st.button(label, key=key, use_container_width=True):
+        st.session_state["current_view"] = view
+        st.rerun()
+
+
+# ── Layout raíz: navegación · contenido · pedidos en vivo ───────────────────────
+col_nav, col_content, col_pedidos = st.columns([1, 3, 2], gap="large")
+
+with col_nav:
+    with st.container(border=True):
+        st.markdown(
+            '<div class="nav-brand">Restaurante Sencillo</div>'
+            f'<div class="nav-brand-sub">{fecha_larga(datetime.now())}</div>',
+            unsafe_allow_html=True,
+        )
+        st.divider()
+        # Gestión / cierre arriba.
+        _nav_item("💰 Caja", "caja")
+        _nav_item("📊 Resumen", "resumen")
+        st.divider()
+        # Operación del salón abajo.
+        _nav_item("🖥️ Monitor", "monitor")
+        _nav_item("🍔 Menú", "menu")
+        _nav_item("🪑 Mesas", "mesas")
+        _nav_item("➕ Nuevo pedido", "nuevo")
+
+# ── Contenido de la vista activa ────────────────────────────────────────────────
+with col_content:
+    view = st.session_state["current_view"]
+    if view == "caja":
+        caja.render()
+    elif view == "resumen":
+        resumen.render()
+    elif view == "monitor":
+        monitor_mesas.render()
+    elif view == "menu":
+        menu.render()
+    elif view == "mesas":
+        mesas.render()
+    elif view == "nuevo":
+        nuevo_pedido.render()
+
+# ── Pedidos: panel derecho SIEMPRE abierto (su propio fragmento en vivo) ─────────
+with col_pedidos:
+    st.markdown(
+        '<div style="display:flex; align-items:center; justify-content:space-between; '
+        'padding-bottom:0.5rem; margin-bottom:0.75rem; border-bottom:1px solid #e5e7eb;">'
+        '<div style="font-family:Syne,sans-serif; font-size:1rem; font-weight:700; '
+        'color:#1a1a1a;">📋 Pedidos</div>'
+        '<div style="font-size:0.75rem; color:#9ca3af;"><span class="live-dot"></span>En vivo</div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
     pedidos.render()
-elif seccion == "🖥️ Monitor":
-    monitor_mesas.render()
-elif seccion == "➕ Nuevo pedido":
-    nuevo_pedido.render()
-elif seccion == "🍽️ Menú":
-    menu.render()
-elif seccion == "🪑 Mesas":
-    mesas.render()
-elif seccion == "📊 Resumen":
-    resumen.render()
-elif seccion == "💰 Caja":
-    caja.render()
