@@ -14,7 +14,7 @@ def cargar_pedidos_dia(dia: date):
     with engine.connect() as conn:
         rows = conn.execute(text("""
             SELECT id, numero_cliente, items, total, estado, fecha,
-                   mesa_id, motivo_cancelacion
+                   mesa_id, motivo_cancelacion, pagado
             FROM pedidos
             WHERE fecha::date = :dia
             ORDER BY fecha
@@ -55,24 +55,33 @@ def render():
         st.markdown('<p style="color:#9ca3af; font-size:0.9rem; padding:1rem 0;">No hay pedidos registrados en esta fecha.</p>', unsafe_allow_html=True)
         return
 
-    df         = pd.DataFrame(pedidos)
-    validos    = df[df["estado"] != "cancelado"]
+    df = pd.DataFrame(pedidos)
+    # Cierre de caja = dinero realmente cobrado. 'ventas' (y todo lo que deriva de
+    # ella: ticket, más vendidos, por hora) considera solo pedidos cobrados
+    # (pagado=TRUE) y no cancelados. 'pagado' puede faltar pre-migración → FALSE.
+    pagado_col = (df["pagado"].fillna(False).astype(bool) if "pagado" in df.columns
+                  else pd.Series(False, index=df.index))
+    pagados    = df[pagado_col & (df["estado"] != "cancelado")]
+    pendientes = df[~pagado_col & (df["estado"] != "cancelado")]   # entregado/activo sin cobrar
     cancelados = df[df["estado"] == "cancelado"]
 
-    ventas = int(validos["total"].sum()) if not validos.empty else 0
-    n_ped  = len(validos)
-    n_canc = len(cancelados)
-    ticket = ventas / n_ped if n_ped else 0
+    ventas       = int(pagados["total"].sum()) if not pagados.empty else 0
+    por_cobrar   = int(pendientes["total"].sum()) if not pendientes.empty else 0
+    n_ped        = len(pagados)
+    n_canc       = len(cancelados)
+    ticket       = ventas / n_ped if n_ped else 0
 
     # ── Métricas (cierre de caja) ──────────────────────────────────────────────
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
-        st.markdown(f'<div class="metric-card"><div class="metric-value metric-green" style="font-size:clamp(0.9rem,1.6vw,2rem); white-space:nowrap;">${fmt_money(ventas)}</div><div class="metric-label">Ventas</div></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="metric-card"><div class="metric-value metric-green" style="font-size:clamp(0.9rem,1.6vw,2rem); white-space:nowrap;">${fmt_money(ventas)}</div><div class="metric-label">Cobrado</div></div>', unsafe_allow_html=True)
     with c2:
-        st.markdown(f'<div class="metric-card"><div class="metric-value">{n_ped}</div><div class="metric-label">Pedidos</div></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="metric-card"><div class="metric-value">{n_ped}</div><div class="metric-label">Pedidos cobrados</div></div>', unsafe_allow_html=True)
     with c3:
         st.markdown(f'<div class="metric-card"><div class="metric-value metric-blue" style="font-size:clamp(0.9rem,1.6vw,2rem); white-space:nowrap;">${fmt_money(ticket)}</div><div class="metric-label">Ticket promedio</div></div>', unsafe_allow_html=True)
     with c4:
+        st.markdown(f'<div class="metric-card"><div class="metric-value metric-accent" style="font-size:clamp(0.9rem,1.6vw,2rem); white-space:nowrap;">${fmt_money(por_cobrar)}</div><div class="metric-label">Por cobrar</div></div>', unsafe_allow_html=True)
+    with c5:
         st.markdown(f'<div class="metric-card"><div class="metric-value" style="color:#dc2626">{n_canc}</div><div class="metric-label">Cancelados</div></div>', unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
@@ -83,7 +92,7 @@ def render():
     with col_items:
         st.markdown('<div class="section-title">Más vendidos</div>', unsafe_allow_html=True)
         agg = {}
-        for _, r in validos.iterrows():
+        for _, r in pagados.iterrows():
             for it in _parse_items(r["items"]):
                 if not isinstance(it, dict):
                     continue
@@ -104,9 +113,9 @@ def render():
 
     # ── Ventas por hora ────────────────────────────────────────────────────────
     with col_horas:
-        st.markdown('<div class="section-title">Ventas por hora</div>', unsafe_allow_html=True)
-        if not validos.empty:
-            horas = validos.copy()
+        st.markdown('<div class="section-title">Cobrado por hora</div>', unsafe_allow_html=True)
+        if not pagados.empty:
+            horas = pagados.copy()
             horas["hora"] = pd.to_datetime(horas["fecha"]).dt.hour
             serie = horas.groupby("hora")["total"].sum()
             serie = serie.reindex(range(int(serie.index.min()), int(serie.index.max()) + 1), fill_value=0)
@@ -118,12 +127,17 @@ def render():
     st.markdown("<br>", unsafe_allow_html=True)
 
     # ── Exportar CSV (para el dueño / contabilidad) ────────────────────────────
+    # Exporta TODOS los pedidos del día (cobrados, por cobrar y cancelados) con su
+    # estado de pago, para que contabilidad tenga el registro completo.
     export = df.copy()
     export["items"] = export["items"].apply(_items_texto)
+    if "pagado" in export.columns:
+        export["pagado"] = export["pagado"].fillna(False).astype(bool).map({True: "Sí", False: "No"})
     export = export.rename(columns={
         "id": "Pedido", "numero_cliente": "Cliente", "items": "Items",
         "total": "Total", "estado": "Estado", "fecha": "Fecha",
         "mesa_id": "Mesa", "motivo_cancelacion": "Motivo cancelación",
+        "pagado": "Pagado",
     })
     csv = export.to_csv(index=False).encode("utf-8-sig")  # BOM → Excel lee acentos
     st.download_button(
