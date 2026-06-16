@@ -162,6 +162,94 @@ def init_db():
             )
         """))
 
+        # ════════════════════════════════════════════════════════════════════
+        # OVERHAUL DEL MENÚ (aditivo): secciones (Plato del Día / Especiales /
+        # A la carta / Bebidas), opciones del Plato del Día, ajustes de precios y
+        # recargo de entrega, base de clientes y metadatos de entrega en pedidos.
+        # NADA se elimina: el menú y los pedidos existentes siguen funcionando
+        # (categoria default 'a_la_carta', tipo_entrega NULL = pedido de mesa).
+        # ════════════════════════════════════════════════════════════════════
+
+        # Componentes del Plato del Día. Cada fila es una opción toggleable mapeada
+        # a un grupo (entrada/principio/proteina/acompanamiento). Las sopas son
+        # filas 'entrada' que el restaurante activa/desactiva por día y se listan
+        # como pares de Fruta/Huevo. Reusa el patrón "86" (agotado_hasta).
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS menu_componentes (
+                id            SERIAL PRIMARY KEY,
+                grupo         VARCHAR(20)  NOT NULL,
+                nombre        VARCHAR(100) NOT NULL,
+                activo        BOOLEAN      NOT NULL DEFAULT TRUE,
+                orden         INTEGER      NOT NULL DEFAULT 0,
+                agotado_hasta DATE
+            )
+        """))
+        # Semilla SOLO en la primera inicialización (tabla vacía): así no se
+        # "resucitan" opciones que el restaurante haya borrado en redeploys.
+        if conn.execute(text("SELECT COUNT(*) FROM menu_componentes")).scalar() == 0:
+            conn.execute(text("""
+                INSERT INTO menu_componentes (grupo, nombre, orden) VALUES
+                ('entrada', 'Fruta', 1), ('entrada', 'Huevo', 2), ('entrada', 'Sopa del día', 3),
+                ('principio', 'Frijol', 1), ('principio', 'Lenteja', 2),
+                ('proteina', 'Res', 1), ('proteina', 'Cerdo', 2), ('proteina', 'Pechuga', 3),
+                ('acompanamiento', 'Arroz', 1), ('acompanamiento', 'Maduro', 2),
+                ('acompanamiento', 'Papa', 3), ('acompanamiento', 'Ensalada', 4)
+            """))
+
+        # Categoría + descripción del catálogo 'menu': especiales (con resumen de
+        # lo que incluyen), a la carta y bebidas. Las filas existentes quedan como
+        # 'a_la_carta' sin tocar su precio ni su estado.
+        conn.execute(text(
+            "ALTER TABLE menu ADD COLUMN IF NOT EXISTS categoria VARCHAR(20) NOT NULL DEFAULT 'a_la_carta'"
+        ))
+        conn.execute(text("ALTER TABLE menu ADD COLUMN IF NOT EXISTS descripcion TEXT"))
+
+        # Ajustes clave/valor: precios planos (Plato del Día y Especiales), recargo
+        # de entrega (Domicilio/Para Llevar) y nº de acompañamientos a elegir.
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS ajustes (
+                clave VARCHAR(50) PRIMARY KEY,
+                valor TEXT        NOT NULL
+            )
+        """))
+        conn.execute(text("""
+            INSERT INTO ajustes (clave, valor) VALUES
+            ('plato_dia_precio',  '18000'),
+            ('especiales_precio', '25000'),
+            ('fee_entrega',       '4000'),
+            ('acompanamientos_n', '3')
+            ON CONFLICT (clave) DO NOTHING
+        """))
+
+        # Base de clientes: la alimenta la app pública (tel como identidad).
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS clientes (
+                telefono    VARCHAR(40) PRIMARY KEY,
+                nombre      VARCHAR(120),
+                direccion   TEXT,
+                creado      TIMESTAMP NOT NULL DEFAULT NOW(),
+                actualizado TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """))
+
+        # Metadatos de entrega en 'pedidos' (web: domicilio/para_llevar; los de
+        # mesa dejan tipo_entrega NULL). 'fee' es el recargo plano de entrega;
+        # 'paga_con' el efectivo con el que paga el cliente (para el cambio).
+        for _col, _ddl in [
+            ("tipo_entrega",     "VARCHAR(15)"),
+            ("cliente_nombre",   "VARCHAR(120)"),
+            ("cliente_telefono", "VARCHAR(40)"),
+            ("direccion",        "TEXT"),
+            ("metodo_pago",      "VARCHAR(20)"),
+            ("paga_con",         "INTEGER"),
+            ("fee",              "INTEGER NOT NULL DEFAULT 0"),
+            ("nota_general",     "TEXT"),
+        ]:
+            conn.execute(text(f"ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS {_col} {_ddl}"))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_pedidos_tipo_entrega ON pedidos (tipo_entrega)"
+        ))
+
         conn.commit()
 
 init_db()
@@ -207,9 +295,9 @@ def mensaje_bienvenida(numero: str) -> str:
     link = f"{APP_CLIENTE_URL}/?tel={urllib.parse.quote(tel)}"
     return (
         "¡Hola! 👋 Bienvenido a *RestauranteBOT*.\n\n"
-        "📲 Haz tu pedido desde nuestra carta digital:\n"
+        "📲 Haz tu pedido a domicilio o para llevar desde nuestra carta digital:\n"
         f"{link}\n\n"
-        "Elige tu mesa, arma tu pedido y la cocina lo recibirá al instante. "
+        "Elige cómo lo quieres, arma tu pedido y nosotros nos encargamos. "
         "¡Gracias!"
     )
 

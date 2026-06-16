@@ -79,11 +79,18 @@ def _estado_mesa(sub: pd.DataFrame):
 # SECCIÓN: MONITOR DE MESAS
 # ══════════════════════════════════════════════════════════════════════════════
 def render():
-    # Monitor en vivo: SOLO este fragmento se re-ejecuta en el intervalo (no toda la
-    # app ni panel.py) → menos parpadeo y carga que el antiguo st_autorefresh. La mesa
-    # seleccionada vive en session_state, así que se conserva entre refrescos; las
-    # acciones siguen usando st.rerun() (scope app) para refrescar todo.
-    _monitor_en_vivo()
+    # Dos vistas aisladas: el salón (mesas) y los pedidos web (Domicilio / Para
+    # Llevar). Los pedidos web no ocupan mesa, así que NUNCA aparecen en el salón;
+    # esta pestaña los reúne para preparar y despachar sin mezclarlos con el comedor.
+    tab_salon, tab_web = st.tabs(["🪑 Salón", "🛵 Pedidos web"])
+    with tab_salon:
+        # Monitor en vivo: SOLO este fragmento se re-ejecuta en el intervalo (no toda
+        # la app ni panel.py) → menos parpadeo. La mesa seleccionada vive en
+        # session_state, así que se conserva entre refrescos; las acciones usan
+        # st.rerun() (scope app) para refrescar todo.
+        _monitor_en_vivo()
+    with tab_web:
+        _web_en_vivo()
 
 
 @st.fragment(run_every="30s")
@@ -360,5 +367,158 @@ def _detalle_pedido(row, idx: int):
             pedidos.dialog_cobrar([pid], f"Pedido #{pid}", saldo, uid)
     with b4:
         # Fase 3: modal centrado en vez de aviso inline (compartido con el tablero).
+        if st.button("✕ Cancelar", key=f"cancelar_{uid}", use_container_width=True):
+            pedidos.dialog_cancelar(pid, uid)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SECCIÓN: PEDIDOS WEB (Domicilio / Para Llevar) — vista de despacho aislada
+# ══════════════════════════════════════════════════════════════════════════════
+# Los pedidos de la app pública llevan tipo_entrega = 'domicilio' | 'para_llevar' y
+# no tienen mesa, así que no aparecen en el salón. Aquí la cocina los ve juntos con
+# todo lo necesario para prepararlos y despacharlos: contacto, dirección (domicilio),
+# método de pago + cambio, recargo de envío y las mismas acciones del tablero.
+TIPO_BADGE = {
+    "domicilio":   ("🛵 Domicilio",   "#dbeafe", "#1e3a8a"),
+    "para_llevar": ("🛍️ Para llevar", "#ffedd5", "#7c2d12"),
+}
+
+
+def _txt(valor) -> str:
+    """str segura para celdas que pueden venir None/NaN."""
+    if valor is None:
+        return ""
+    try:
+        if pd.isna(valor):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    return str(valor)
+
+
+@st.fragment(run_every="30s")
+def _web_en_vivo():
+    st.markdown('<div class="section-title">🛵 Pedidos web · Domicilio y Para Llevar</div>',
+                unsafe_allow_html=True)
+
+    df = pedidos.cargar_pedidos()
+    pedidos._maybe_print_ticket(df)  # impresión bajo demanda (un solo iframe)
+
+    if "tipo_entrega" not in df.columns:
+        st.markdown('<p style="color:#9ca3af; font-size:0.85rem;">Aún no hay pedidos web.</p>',
+                    unsafe_allow_html=True)
+        return
+
+    web = df[df["tipo_entrega"].isin(["domicilio", "para_llevar"])].copy()
+    activos = (web[web["estado"].isin(pedidos.ESTADOS_ACTIVOS)].copy()
+               if not web.empty else web)
+
+    n_act    = len(activos)
+    n_dom    = int((activos["tipo_entrega"] == "domicilio").sum()) if not activos.empty else 0
+    n_lle    = int((activos["tipo_entrega"] == "para_llevar").sum()) if not activos.empty else 0
+    n_listos = int((activos["estado"] == "listo").sum()) if not activos.empty else 0
+
+    m1, m2, m3, m4 = st.columns(4)
+    with m1:
+        st.markdown(f'<div class="metric-card"><div class="metric-value">{n_act}</div><div class="metric-label">En curso</div></div>', unsafe_allow_html=True)
+    with m2:
+        st.markdown(f'<div class="metric-card"><div class="metric-value metric-blue">{n_dom}</div><div class="metric-label">Domicilio</div></div>', unsafe_allow_html=True)
+    with m3:
+        st.markdown(f'<div class="metric-card"><div class="metric-value metric-accent">{n_lle}</div><div class="metric-label">Para llevar</div></div>', unsafe_allow_html=True)
+    with m4:
+        st.markdown(f'<div class="metric-card"><div class="metric-value metric-green">{n_listos}</div><div class="metric-label">Listos</div></div>', unsafe_allow_html=True)
+
+    st.markdown('<p style="color:#9ca3af; font-size:0.78rem; margin-top:6px;">No ocupan mesa. '
+                'Prepáralos y despáchalos desde aquí.</p>', unsafe_allow_html=True)
+
+    if activos.empty:
+        st.markdown('<p style="color:#9ca3af; font-size:0.9rem; padding:1.5rem 0; text-align:center;">'
+                    'No hay pedidos web en curso.</p>', unsafe_allow_html=True)
+        return
+
+    activos = activos.sort_values("fecha")  # más antiguo primero (urgencia de despacho)
+    for idx, (_, row) in enumerate(activos.iterrows()):
+        _web_card(row, idx)
+
+
+def _web_card(row, idx: int):
+    pid      = int(row["id"])
+    estado   = row.get("estado", "pendiente")
+    tipo     = str(row.get("tipo_entrega") or "")
+    etiqueta, bg, fg = TIPO_BADGE.get(tipo, ("Web", "#e5e7eb", "#374151"))
+    nombre   = _txt(row.get("cliente_nombre")) or _txt(row.get("numero_cliente")) or "Cliente"
+    tel      = _txt(row.get("cliente_telefono"))
+    direccion = _txt(row.get("direccion"))
+    items    = pedidos.formatear_items(row.get("items", []))
+    total    = int(row.get("total", 0) or 0)
+    fee      = int(row.get("fee", 0) or 0)
+    metodo   = _txt(row.get("metodo_pago"))
+    paga_con = int(row.get("paga_con", 0) or 0)
+    nota     = _txt(row.get("nota_general"))
+    fecha    = pedidos.formatear_fecha(row.get("fecha"))
+    saldo    = saldo_pedido(row)
+    uid      = f"web_{pid}_{idx}"
+
+    mins      = pedidos.minutos_espera(row.get("fecha"))
+    color_urg = pedidos.urgencia(mins, estado)
+    chip = (f'<div style="font-size:0.72rem; color:{color_urg}; font-weight:700; margin-top:6px;">⏱ {mins} min</div>'
+            if color_urg else "")
+    borde = f' style="border-left:4px solid {color_urg};"' if color_urg else ""
+
+    contacto = f'👤 {html.escape(nombre)}'
+    if tel:
+        contacto += f' · 📞 {html.escape(tel)}'
+    dir_html = (f'<div class="order-items">📍 {html.escape(direccion)}</div>'
+                if tipo == "domicilio" and direccion else "")
+    if metodo == "efectivo":
+        cambio = max(0, paga_con - total)
+        pago_html = (f'💵 Efectivo · paga con ${fmt_money(paga_con)} · cambio ${fmt_money(cambio)}'
+                     if paga_con > 0 else '💵 Efectivo')
+    elif metodo == "transferencia":
+        pago_html = '💳 Transferencia'
+    else:
+        pago_html = ''
+    nota_html = (f'<div style="font-size:0.76rem; color:#b45309; margin-top:4px;">📝 {html.escape(nota)}</div>'
+                 if nota else "")
+    fee_html = (f'<div style="font-size:0.72rem; color:#9ca3af;">incl. envío ${fmt_money(fee)}</div>'
+                if fee else "")
+
+    st.markdown(f"""
+    <div class="order-card"{borde}>
+      <div style="display:flex; justify-content:space-between; align-items:flex-start;">
+        <div>
+          <span class="badge" style="background:{bg}; color:{fg}; border:1px solid {bg};">{etiqueta}</span>
+          <div class="order-id" style="margin-top:6px;">Pedido #{pid}</div>
+          <div class="order-num">{contacto}</div>
+          {dir_html}
+          <div class="order-items">{items}</div>
+          <div style="font-size:0.78rem; color:#6b7280; margin-top:4px;">{pago_html}</div>
+          {nota_html}
+          <div class="order-fecha">{fecha}</div>
+        </div>
+        <div style="text-align:right;">
+          {pedidos.badge_html(estado)}
+          <div class="order-total" style="margin-top:8px;">${fmt_money(total)}</div>
+          {fee_html}{chip}
+        </div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    b1, b2, b3, b4 = st.columns(4)
+    with b1:
+        btn_label = pedidos.ESTADO_LABEL_BTN.get(estado)
+        if btn_label and st.button(btn_label, key=f"avanzar_{uid}", type="primary",
+                                   use_container_width=True):
+            pedidos.avanzar_estado(pid, estado)  # flashea toast + st.rerun()
+    with b2:
+        if st.button("🖨 Ticket", key=f"ticket_{uid}", use_container_width=True):
+            st.session_state["print_ticket_id"] = pid
+            st.rerun()
+    with b3:
+        if st.button("💵 Cobrar", key=f"cobrar_{uid}", use_container_width=True,
+                     disabled=saldo <= 0):
+            pedidos.dialog_cobrar([pid], f"Pedido #{pid}", saldo, uid)
+    with b4:
         if st.button("✕ Cancelar", key=f"cancelar_{uid}", use_container_width=True):
             pedidos.dialog_cancelar(pid, uid)

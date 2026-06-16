@@ -1,6 +1,7 @@
 """Conexión compartida a la base de datos y lecturas comunes entre vistas."""
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
+from datetime import date
 import streamlit as st
 import pandas as pd
 import os
@@ -115,6 +116,65 @@ def _ensure_schema():
         conn.execute(text(
             "CREATE INDEX IF NOT EXISTS idx_print_jobs_tenant_estado "
             "ON print_jobs (restaurante_id, estado)"
+        ))
+
+        # ── OVERHAUL DEL MENÚ (aditivo, defensivo) ───────────────────────────
+        # El bot es el dueño canónico del esquema y siembra los datos; aquí solo
+        # garantizamos que las tablas/columnas EXISTAN para que el panel lea sin
+        # romperse si arranca antes del redeploy del bot. NO sembramos componentes
+        # (los siembra el bot) para no recrear opciones que el restaurante borró.
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS menu_componentes (
+                id            SERIAL PRIMARY KEY,
+                grupo         VARCHAR(20)  NOT NULL,
+                nombre        VARCHAR(100) NOT NULL,
+                activo        BOOLEAN      NOT NULL DEFAULT TRUE,
+                orden         INTEGER      NOT NULL DEFAULT 0,
+                agotado_hasta DATE
+            )
+        """))
+        conn.execute(text(
+            "ALTER TABLE menu ADD COLUMN IF NOT EXISTS categoria VARCHAR(20) NOT NULL DEFAULT 'a_la_carta'"
+        ))
+        conn.execute(text("ALTER TABLE menu ADD COLUMN IF NOT EXISTS descripcion TEXT"))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS ajustes (
+                clave VARCHAR(50) PRIMARY KEY,
+                valor TEXT        NOT NULL
+            )
+        """))
+        # Ajustes: sí sembramos defaults (ON CONFLICT DO NOTHING, sin resurrección)
+        # para que precios/recargo tengan valor aunque el panel arranque primero.
+        conn.execute(text("""
+            INSERT INTO ajustes (clave, valor) VALUES
+            ('plato_dia_precio',  '18000'),
+            ('especiales_precio', '25000'),
+            ('fee_entrega',       '4000'),
+            ('acompanamientos_n', '3')
+            ON CONFLICT (clave) DO NOTHING
+        """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS clientes (
+                telefono    VARCHAR(40) PRIMARY KEY,
+                nombre      VARCHAR(120),
+                direccion   TEXT,
+                creado      TIMESTAMP NOT NULL DEFAULT NOW(),
+                actualizado TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """))
+        for _col, _ddl in [
+            ("tipo_entrega",     "VARCHAR(15)"),
+            ("cliente_nombre",   "VARCHAR(120)"),
+            ("cliente_telefono", "VARCHAR(40)"),
+            ("direccion",        "TEXT"),
+            ("metodo_pago",      "VARCHAR(20)"),
+            ("paga_con",         "INTEGER"),
+            ("fee",              "INTEGER NOT NULL DEFAULT 0"),
+            ("nota_general",     "TEXT"),
+        ]:
+            conn.execute(text(f"ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS {_col} {_ddl}"))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_pedidos_tipo_entrega ON pedidos (tipo_entrega)"
         ))
 
 try:
@@ -233,3 +293,135 @@ def cargar_mesas_activas():
             "SELECT id, nombre FROM mesas WHERE activa = TRUE ORDER BY id"
         )).mappings().all()
     return [dict(r) for r in rows]
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# OVERHAUL DEL MENÚ — lecturas compartidas (componentes, catálogo, ajustes, clientes)
+# Las usan views/menu.py (admin), views/nuevo_pedido.py (POS) y views/monitor_mesas.
+# La app pública (app_cliente) tiene su propia conexión y replica lo que necesita.
+# ════════════════════════════════════════════════════════════════════════════════
+
+# Grupos de opciones del Plato del Día, en el orden de los pasos de selección.
+GRUPOS_COMPONENTE = ["entrada", "principio", "proteina", "acompanamiento"]
+GRUPO_LABEL = {
+    "entrada":        "Entrada",
+    "principio":      "Principio",
+    "proteina":       "Carnes o Proteína",
+    "acompanamiento": "Acompañamientos",
+}
+
+
+@st.cache_data(ttl=60)
+def cargar_componentes():
+    """DataFrame de TODOS los componentes del Plato del Día (admin). menu.py llama
+    cargar_componentes.clear() tras cada escritura para reflejar los cambios al vuelo."""
+    with engine.connect() as conn:
+        res = conn.execute(text(
+            "SELECT id, grupo, nombre, activo, orden, agotado_hasta "
+            "FROM menu_componentes ORDER BY grupo, orden, id"
+        ))
+        return pd.DataFrame(res.fetchall(), columns=res.keys())
+
+
+def disponibles(df):
+    """Filtra un DataFrame de menú/componentes a lo ofrecible HOY: activo = TRUE y
+    no agotado hoy (agotado_hasta NULL o < hoy). Misma regla en menú, componentes y
+    carta del cliente (centraliza el filtro que vivía suelto en nuevo_pedido)."""
+    if df is None or df.empty:
+        return df
+    hoy = pd.Timestamp(date.today())
+    ag = pd.to_datetime(df["agotado_hasta"], errors="coerce")
+    return df[(df["activo"] == True) & (ag.isna() | (ag < hoy))]
+
+
+def componentes_activos_por_grupo() -> dict:
+    """{grupo: [{id, nombre}]} con SOLO los componentes ofrecibles hoy, en orden.
+    Lo consume el configurador del Plato del Día (POS y app cliente)."""
+    out = {g: [] for g in GRUPOS_COMPONENTE}
+    df = cargar_componentes()
+    if df.empty:
+        return out
+    for _, r in disponibles(df).iterrows():
+        out.setdefault(r["grupo"], []).append({"id": int(r["id"]), "nombre": str(r["nombre"])})
+    return out
+
+
+@st.cache_data(ttl=60)
+def cargar_catalogo():
+    """Catálogo 'menu' con categoría y descripción (especiales / a la carta /
+    bebidas). Incluye todas las filas; el filtrado por categoría y disponibilidad lo
+    hace cada vista. menu.py llama cargar_catalogo.clear() tras cada escritura."""
+    with engine.connect() as conn:
+        res = conn.execute(text(
+            "SELECT id, nombre, precio, activo, orden, agotado_hasta, categoria, descripcion "
+            "FROM menu ORDER BY categoria, orden, id"
+        ))
+        return pd.DataFrame(res.fetchall(), columns=res.keys())
+
+
+# ── Ajustes: precios planos y recargo de entrega ────────────────────────────────
+@st.cache_data(ttl=60)
+def cargar_ajustes() -> dict:
+    """{clave: valor} de la tabla 'ajustes'. menu.py llama cargar_ajustes.clear()
+    tras guardar precios/recargo."""
+    with engine.connect() as conn:
+        rows = conn.execute(text("SELECT clave, valor FROM ajustes")).mappings().all()
+    return {r["clave"]: r["valor"] for r in rows}
+
+
+def ajuste_int(clave: str, default: int = 0) -> int:
+    """Lee un ajuste como entero (tolerante a vacío/None/no numérico)."""
+    try:
+        return int(float(cargar_ajustes().get(clave, default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def precio_plato_dia() -> int:
+    return ajuste_int("plato_dia_precio", 0)
+
+
+def precio_especiales() -> int:
+    return ajuste_int("especiales_precio", 0)
+
+
+def fee_entrega() -> int:
+    return ajuste_int("fee_entrega", 0)
+
+
+def num_acompanamientos() -> int:
+    return max(1, ajuste_int("acompanamientos_n", 3))
+
+
+# ── Base de clientes (la alimenta la app pública) ───────────────────────────────
+def buscar_cliente(telefono: str):
+    """{telefono, nombre, direccion} del cliente, o None. Para pre-rellenar el
+    formulario de identidad en pedidos repetidos."""
+    tel = (telefono or "").strip()[:40]
+    if not tel:
+        return None
+    with engine.connect() as conn:
+        row = conn.execute(text(
+            "SELECT telefono, nombre, direccion FROM clientes WHERE telefono = :t"
+        ), {"t": tel}).mappings().first()
+    return dict(row) if row else None
+
+
+def upsert_cliente(telefono: str, nombre: str = None, direccion: str = None) -> None:
+    """Crea/actualiza el cliente por teléfono. Conserva nombre/dirección previos si
+    llegan vacíos (COALESCE con EXCLUDED). Tolerante: nunca rompe el flujo del pedido."""
+    tel = (telefono or "").strip()[:40]
+    if not tel:
+        return
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("""
+                INSERT INTO clientes (telefono, nombre, direccion)
+                VALUES (:t, :n, :d)
+                ON CONFLICT (telefono) DO UPDATE SET
+                    nombre      = COALESCE(EXCLUDED.nombre, clientes.nombre),
+                    direccion   = COALESCE(EXCLUDED.direccion, clientes.direccion),
+                    actualizado = NOW()
+            """), {"t": tel, "n": (nombre or None), "d": (direccion or None)})
+    except Exception:
+        pass

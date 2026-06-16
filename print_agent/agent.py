@@ -29,6 +29,16 @@ ANCHO = 48
 # Pulso de apertura del cajón SAT (raw ESC p 0 25 150). Va al INICIO del buffer.
 PULSO_CAJON = b"\x1b\x70\x00\x19\x96"
 
+# Cabeceras de categoría del ticket. Mismo contrato que el panel (utils/items.py);
+# se duplica aquí a propósito: el agente es un proceso aislado que solo comparte la
+# forma del payload de print_jobs, no el código Streamlit.
+CAT_LABEL = {
+    "plato_dia": "PLATO DEL DIA",
+    "especial":  "ESPECIALES",
+    "item":      "A LA CARTA",
+    "bebida":    "BEBIDAS",
+}
+
 
 def cargar_config(requeridas=("DATABASE_URL", "RESTAURANTE_ID", "PRINTER_CONNECTION")) -> dict:
     if not os.path.exists(CONFIG_PATH):
@@ -86,6 +96,33 @@ def linea_precio(etiqueta: str, monto, ancho: int = ANCHO) -> str:
     return f"{etiqueta}{' ' * espacio}{derecha}"
 
 
+def _imprimir_items(printer, items, grande: bool = False) -> None:
+    """Imprime los ítems AGRUPADOS por categoría ([PLATO DEL DIA], [BEBIDAS], …) con
+    sus componentes indentados debajo (Entrada / Principio / Proteína / Acompañamientos
+    / Nota). Retro-compatible: un item sin 'tipo' se imprime como 'N x nombre' sin
+    cabecera ni desglose. 'grande' usa doble alto en el nombre (comanda de cocina)."""
+    tipo_actual = None
+    for it in items:
+        nombre = str(it.get("nombre", "?"))
+        cant = int(it.get("cantidad", 1) or 1)
+        tipo = it.get("tipo")
+        comps = it.get("componentes") or []
+        # Cabecera de categoría al cambiar de tipo (solo si el item lo trae).
+        if tipo and tipo != tipo_actual:
+            printer.set(align="left", bold=True, double_height=False, double_width=False)
+            printer.text(f"[{CAT_LABEL.get(str(tipo).lower(), str(tipo).upper())}]\n")
+            tipo_actual = tipo
+        printer.set(align="left", bold=True, double_height=grande, double_width=False)
+        printer.text(f"{cant} x {nombre}\n")
+        printer.set(bold=False, double_height=False)
+        for par in comps:
+            try:
+                etiqueta, valor = par[0], par[1]
+            except (IndexError, TypeError, KeyError):
+                continue
+            printer.text(f"   * {etiqueta}: {valor}\n")
+
+
 def imprimir_recibo(printer, payload: dict) -> None:
     """Compone y envía el ticket de 80mm. El cajón (si aplica) se abre primero."""
     # 1) Cajón SAT al inicio del buffer, ANTES de cualquier texto, si el cobro fue
@@ -102,14 +139,8 @@ def imprimir_recibo(printer, payload: dict) -> None:
     printer.text(datetime.now().strftime("%d/%m/%Y  %H:%M") + "\n")
     printer.text("-" * ANCHO + "\n")
 
-    # 3) Ítems (nombre en negrita, cantidad a la izquierda).
-    printer.set(align="left")
-    for it in payload.get("items", []):
-        nombre = str(it.get("nombre", "?"))
-        cant = int(it.get("cantidad", 1) or 1)
-        printer.set(bold=True)
-        printer.text(f"{cant:>2} x {nombre}\n")
-        printer.set(bold=False)
+    # 3) Ítems agrupados por categoría con sus componentes indentados.
+    _imprimir_items(printer, payload.get("items", []), grande=False)
     printer.text("-" * ANCHO + "\n")
 
     # 4) Totales y desglose de pago.
@@ -146,13 +177,8 @@ def imprimir_comanda(printer, payload: dict) -> None:
     printer.text(f"{payload.get('mesa') or '—'}\n")
     printer.text(datetime.now().strftime("%d/%m/%Y  %H:%M") + "\n")
     printer.text("-" * ANCHO + "\n")
-    # Ítems grandes (doble alto) para leerse de lejos en la cocina.
-    printer.set(align="left", bold=True, double_height=True)
-    for it in payload.get("items", []):
-        nombre = str(it.get("nombre", "?"))
-        cant = int(it.get("cantidad", 1) or 1)
-        printer.text(f"{cant} x {nombre}\n")
-    printer.set(bold=False, double_height=False)
+    # Ítems grandes (doble alto) para leerse de lejos; componentes en tamaño normal.
+    _imprimir_items(printer, payload.get("items", []), grande=True)
     printer.text("-" * ANCHO + "\n")
     printer.cut()
 
@@ -162,11 +188,14 @@ def _payload_demo() -> dict:
     """Payload de muestra con la MISMA forma que enqueue_recibo del panel. Efectivo
     con cambio y abrir_cajon=True, para validar de un tiro impresora + cajón."""
     return {
-        "mesa": "Mesa 5 (PRUEBA)",
+        "mesa": "Domicilio · Ana (PRUEBA)",
         "items": [
-            {"nombre": "Pizza Margarita", "cantidad": 2},
-            {"nombre": "Coca-Cola 350ml", "cantidad": 3},
-            {"nombre": "Tiramisu", "cantidad": 1},
+            {"tipo": "plato_dia", "nombre": "Plato del Día", "cantidad": 1,
+             "componentes": [["Entrada", "Sopa de Lentejas"], ["Principio", "Frijol"],
+                             ["Proteína", "Res"], ["Acompañamientos", "2x Arroz, 1x Maduro"],
+                             ["Nota", "Sin ensalada"]]},
+            {"tipo": "especial", "nombre": "Bisteck a caballo", "cantidad": 1, "componentes": []},
+            {"tipo": "bebida", "nombre": "Coca-Cola 350ml", "cantidad": 3, "componentes": []},
         ],
         "total": 78000,
         "pagado": 78000,
@@ -232,11 +261,14 @@ def _payload_demo_comanda() -> dict:
     """Comanda de muestra (misma forma que enqueue_comanda): sin precios ni cajón."""
     return {
         "pedido_id": 0,
-        "mesa": "Mesa 5 (PRUEBA)",
+        "mesa": "Domicilio · Ana (PRUEBA)",
         "items": [
-            {"nombre": "Pizza Margarita", "cantidad": 2},
-            {"nombre": "Coca-Cola 350ml", "cantidad": 3},
-            {"nombre": "Tiramisu", "cantidad": 1},
+            {"tipo": "plato_dia", "nombre": "Plato del Día", "cantidad": 1,
+             "componentes": [["Entrada", "Sopa de Lentejas"], ["Principio", "Frijol"],
+                             ["Proteína", "Res"], ["Acompañamientos", "2x Arroz, 1x Maduro"],
+                             ["Nota", "Sin ensalada"]]},
+            {"tipo": "especial", "nombre": "Bisteck a caballo", "cantidad": 1, "componentes": []},
+            {"tipo": "bebida", "nombre": "Coca-Cola 350ml", "cantidad": 3, "componentes": []},
         ],
         "abrir_cajon": False,
     }
