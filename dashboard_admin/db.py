@@ -56,8 +56,9 @@ def _ensure_schema():
                 fecha      TIMESTAMP   NOT NULL DEFAULT NOW()
             )
         """))
-        # turnos_caja: arqueo de caja (apertura con fondo, cierre con conteo).
-        # Canónico en el bot; defensivo aquí para operar pre-redeploy.
+        # turnos_caja: arqueo de caja v1 (apertura con fondo, cierre con conteo).
+        # Reemplazada por cierres_caja (abajo); la dejamos definida de forma defensiva
+        # para no perder datos de turnos ya cerrados en despliegues previos.
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS turnos_caja (
                 id               SERIAL PRIMARY KEY,
@@ -66,6 +67,24 @@ def _ensure_schema():
                 fondo_inicial    INTEGER   NOT NULL DEFAULT 0,
                 efectivo_contado INTEGER,
                 nota             TEXT
+            )
+        """))
+        # cierres_caja: arqueo de turno v2 (cierre de caja). Apertura con base en
+        # efectivo, y al cerrar se congela lo esperado vs. lo contado (efectivo y
+        # transferencias verificadas en banco) más la diferencia de caja. Como mucho
+        # un turno con estado='abierto' a la vez. Canónico en el bot; defensivo aquí.
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS cierres_caja (
+                id                     SERIAL      PRIMARY KEY,
+                fecha_apertura         TIMESTAMP   DEFAULT CURRENT_TIMESTAMP,
+                fecha_cierre           TIMESTAMP,
+                monto_apertura         INTEGER     NOT NULL,
+                efectivo_esperado      INTEGER     NOT NULL DEFAULT 0,
+                transferencia_esperada INTEGER     NOT NULL DEFAULT 0,
+                efectivo_real          INTEGER,
+                transferencia_real     INTEGER,
+                diferencia             INTEGER     DEFAULT 0,
+                estado                 VARCHAR(10) NOT NULL DEFAULT 'abierto'
             )
         """))
 
