@@ -142,6 +142,26 @@ CREATE TABLE IF NOT EXISTS print_jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_print_jobs_tenant_estado ON print_jobs (restaurante_id, estado);
 
+-- ── Upgrade de tablas preexistentes (idempotente) ───────────────────────────
+-- Si menu/pedidos YA existían (base de datos en uso), los CREATE de arriba no los
+-- tocan, así que estos ALTER garantizan las columnas nuevas sin perder datos —
+-- el mismo efecto que init_db()/_ensure_schema() al arrancar los servicios.
+ALTER TABLE menu    ADD COLUMN IF NOT EXISTS agotado_hasta DATE;
+ALTER TABLE menu    ADD COLUMN IF NOT EXISTS categoria VARCHAR(20) NOT NULL DEFAULT 'a_la_carta';
+ALTER TABLE menu    ADD COLUMN IF NOT EXISTS descripcion TEXT;
+ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS mesa_id INTEGER REFERENCES mesas(id);
+ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS motivo_cancelacion TEXT;
+ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS pagado BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS total_pagado INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS tipo_entrega VARCHAR(15);
+ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS cliente_nombre VARCHAR(120);
+ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS cliente_telefono VARCHAR(40);
+ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS direccion TEXT;
+ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS metodo_pago VARCHAR(20);
+ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS paga_con INTEGER;
+ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS fee INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS nota_general TEXT;
+
 -- ── Seeds (idempotentes) ────────────────────────────────────────────────────
 INSERT INTO ajustes (clave, valor) VALUES
     ('plato_dia_precio',  '18000'),
