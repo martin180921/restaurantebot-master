@@ -26,6 +26,8 @@ python agent.py --dry-run   # imprime un recibo de muestra como TEXTO en consola
 python agent.py --test      # imprime el recibo de muestra en la impresora REAL
                             # y dispara el cajón (no toca la BD) → valida el hardware
 python agent.py --list-printers  # (Windows) lista las impresoras para hallar printer_name
+python agent.py --status    # conteo de la cola por estado + últimos errores (solo lee BD)
+python agent.py --once      # procesa UN trabajo pendiente y sale (debug on-site)
 ```
 
 Empieza con `--dry-run` para ver el formato; luego `--test` con la impresora
@@ -69,6 +71,14 @@ este modo exige cambiar el driver a WinUSB con Zadig (la impresora deja de ser u
 ```json
 { "type": "network", "host": "192.168.1.50", "port": 9100 }
 ```
+
+## Tipos de ticket (`print_jobs.tipo`)
+
+- **`recibo`** — se encola al **cobrar** (pago completo o parcial). Lleva ítems,
+  totales, cambio y abre el cajón **solo si fue en efectivo**.
+- **`comanda`** — ticket de **cocina**, se encola cuando un pedido pasa a
+  *"en preparación"* (botón ▶ Iniciar preparación). Solo mesa/cliente + ítems en
+  grande, **sin precios ni cajón**.
 
 ## Estados de un trabajo
 

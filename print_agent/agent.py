@@ -137,6 +137,26 @@ def imprimir_recibo(printer, payload: dict) -> None:
     printer.cut()
 
 
+def imprimir_comanda(printer, payload: dict) -> None:
+    """Ticket de COCINA: mesa, hora e ítems en grande. Sin precios ni cajón — la
+    cocina solo necesita qué preparar y para quién."""
+    printer.set(align="center", bold=True, double_height=True, double_width=True)
+    printer.text("COMANDA\n")
+    printer.set(align="center", bold=False, double_height=False, double_width=False)
+    printer.text(f"{payload.get('mesa') or '—'}\n")
+    printer.text(datetime.now().strftime("%d/%m/%Y  %H:%M") + "\n")
+    printer.text("-" * ANCHO + "\n")
+    # Ítems grandes (doble alto) para leerse de lejos en la cocina.
+    printer.set(align="left", bold=True, double_height=True)
+    for it in payload.get("items", []):
+        nombre = str(it.get("nombre", "?"))
+        cant = int(it.get("cantidad", 1) or 1)
+        printer.text(f"{cant} x {nombre}\n")
+    printer.set(bold=False, double_height=False)
+    printer.text("-" * ANCHO + "\n")
+    printer.cut()
+
+
 # ── Modo prueba (sin BD) ─────────────────────────────────────────────────────────
 def _payload_demo() -> dict:
     """Payload de muestra con la MISMA forma que enqueue_recibo del panel. Efectivo
@@ -208,14 +228,75 @@ def modo_test(cfg: dict) -> int:
         return 1
 
 
+def _payload_demo_comanda() -> dict:
+    """Comanda de muestra (misma forma que enqueue_comanda): sin precios ni cajón."""
+    return {
+        "pedido_id": 0,
+        "mesa": "Mesa 5 (PRUEBA)",
+        "items": [
+            {"nombre": "Pizza Margarita", "cantidad": 2},
+            {"nombre": "Coca-Cola 350ml", "cantidad": 3},
+            {"nombre": "Tiramisu", "cantidad": 1},
+        ],
+        "abrir_cajon": False,
+    }
+
+
 def modo_dry_run() -> int:
-    """Renderiza el recibo de muestra como TEXTO en consola. No usa impresora ni BD."""
-    dummy = _DummyPrinter()
-    imprimir_recibo(dummy, _payload_demo())
-    print("┌" + "─" * ANCHO + "┐")
-    print(dummy.render(), end="")
-    print("└" + "─" * ANCHO + "┘")
+    """Renderiza recibo y comanda de muestra como TEXTO en consola (sin impresora ni BD)."""
+    for payload, render_fn in ((_payload_demo(), imprimir_recibo),
+                               (_payload_demo_comanda(), imprimir_comanda)):
+        dummy = _DummyPrinter()
+        render_fn(dummy, payload)
+        print("┌" + "─" * ANCHO + "┐")
+        print(dummy.render(), end="")
+        print("└" + "─" * ANCHO + "┘")
     return 0
+
+
+def modo_status(cfg: dict) -> int:
+    """Muestra el conteo de la cola por estado y los últimos errores. Solo lee la BD."""
+    import psycopg2
+    rid = int(cfg["RESTAURANTE_ID"])
+    try:
+        conn = psycopg2.connect(cfg["DATABASE_URL"])
+    except Exception as exc:
+        print(f"[status] no se pudo conectar a la BD: {exc}")
+        return 1
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT estado, COUNT(*) FROM print_jobs WHERE restaurante_id=%s "
+                        "GROUP BY estado ORDER BY estado", (rid,))
+            filas = cur.fetchall()
+            cur.execute("SELECT id, tipo, error_msg, creado_at FROM print_jobs "
+                        "WHERE restaurante_id=%s AND estado='error' ORDER BY id DESC LIMIT 5", (rid,))
+            errores = cur.fetchall()
+    finally:
+        conn.close()
+    print(f"Cola print_jobs · restaurante_id={rid}")
+    if not filas:
+        print("  (sin trabajos)")
+    for estado, n in filas:
+        print(f"  {estado:<12} {n}")
+    if errores:
+        print("Últimos errores:")
+        for id_, tipo, msg, creado in errores:
+            cuando = creado.strftime("%d/%m %H:%M") if creado else "—"
+            print(f"  #{id_} [{tipo}] {cuando} — {msg}")
+    return 0
+
+
+def modo_once(cfg: dict) -> int:
+    """Procesa UN trabajo pendiente y sale (debug on-site). Usa BD + impresora."""
+    conn = psycopg2.connect(cfg["DATABASE_URL"])
+    try:
+        trabajo = reclamar_trabajo(conn, int(cfg["RESTAURANTE_ID"]))
+        if not trabajo:
+            print("[once] no hay trabajos pendientes.")
+            return 0
+        return 0 if _imprimir_trabajo(conn, trabajo, cfg["PRINTER_CONNECTION"]) else 1
+    finally:
+        conn.close()
 
 
 def modo_list_printers() -> int:
@@ -260,7 +341,7 @@ def reclamar_trabajo(conn, restaurante_id: int):
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1
             )
-            RETURNING id, payload
+            RETURNING id, tipo, payload
             """,
             (restaurante_id,),
         )
@@ -286,6 +367,37 @@ def marcar_error(conn, job_id: int, mensaje: str) -> None:
             (mensaje[:1000], job_id),
         )
     conn.commit()
+
+
+def _imprimir_trabajo(conn, trabajo, printer_cfg) -> bool:
+    """Imprime un trabajo YA reclamado (recibo o comanda) y cierra su estado en la BD.
+    Errores de impresora → marca 'error' y devuelve False. Errores de BD al marcar
+    estado SUBEN al caller (para reconectar)."""
+    job_id = trabajo["id"]
+    tipo = (trabajo.get("tipo") or "recibo").lower()
+    payload = trabajo["payload"]
+    if isinstance(payload, str):  # por si el driver no deserializa el JSONB
+        payload = json.loads(payload)
+
+    print(f"[agent] imprimiendo job #{job_id} ({tipo}, cajon={payload.get('abrir_cajon')})")
+    try:
+        printer = abrir_impresora(printer_cfg)
+        if tipo == "comanda":
+            imprimir_comanda(printer, payload)
+        else:
+            imprimir_recibo(printer, payload)
+        try:
+            printer.close()
+        except Exception:
+            pass
+    except Exception as exc:
+        # Impresora desconectada / sin papel / etc. → flag 'error' + log.
+        print(f"[agent] job #{job_id} FALLÓ: {exc}")
+        marcar_error(conn, job_id, str(exc))
+        return False
+    marcar_impreso(conn, job_id)
+    print(f"[agent] job #{job_id} OK")
+    return True
 
 
 # ── Loop principal ───────────────────────────────────────────────────────────────
@@ -314,15 +426,24 @@ def main() -> None:
                         help="Muestra el recibo de muestra como texto en consola (sin impresora ni BD).")
     parser.add_argument("--list-printers", action="store_true",
                         help="Lista las impresoras de Windows (para hallar printer_name) y sale.")
+    parser.add_argument("--status", action="store_true",
+                        help="Muestra el conteo de la cola por estado y los últimos errores, y sale.")
+    parser.add_argument("--once", action="store_true",
+                        help="Procesa un único trabajo pendiente y sale (debug on-site).")
     args = parser.parse_args()
 
     if args.list_printers:
         sys.exit(modo_list_printers())
     if args.dry_run:
         sys.exit(modo_dry_run())
+    if args.status:
+        # Solo lee la cola: necesita BD + tenant, no la impresora.
+        sys.exit(modo_status(cargar_config(requeridas=("DATABASE_URL", "RESTAURANTE_ID"))))
     if args.test:
         # Solo necesitamos la sección de impresora para validar el hardware.
         sys.exit(modo_test(cargar_config(requeridas=("PRINTER_CONNECTION",))))
+    if args.once:
+        sys.exit(modo_once(cargar_config()))
 
     cfg = cargar_config()
     restaurante_id = int(cfg["RESTAURANTE_ID"])
@@ -349,29 +470,11 @@ def main() -> None:
             time.sleep(poll)
             continue
 
-        job_id = trabajo["id"]
-        payload = trabajo["payload"]
-        if isinstance(payload, str):  # por si el driver no deserializa el JSONB
-            payload = json.loads(payload)
-
-        print(f"[agent] imprimiendo job #{job_id} (cajon={payload.get('abrir_cajon')})")
         try:
-            printer = abrir_impresora(printer_cfg)
-            imprimir_recibo(printer, payload)
-            try:
-                printer.close()
-            except Exception:
-                pass
-            marcar_impreso(conn, job_id)
-            print(f"[agent] job #{job_id} OK")
-        except Exception as exc:
-            # Impresora desconectada / sin papel / etc. → flag 'error' + log.
-            print(f"[agent] job #{job_id} FALLÓ: {exc}")
-            try:
-                marcar_error(conn, job_id, str(exc))
-            except Exception as exc2:
-                print(f"[agent] no se pudo marcar error en BD: {exc2}")
-                conn = None
+            _imprimir_trabajo(conn, trabajo, printer_cfg)
+        except Exception as exc:  # fallo de BD al cerrar el estado → reconectar
+            print(f"[agent] error de BD al cerrar job: {exc}")
+            conn = None
 
     if conn and not conn.closed:
         conn.close()

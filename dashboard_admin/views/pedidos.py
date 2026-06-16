@@ -9,7 +9,7 @@ from datetime import datetime
 
 from db import (engine, fmt_money, fecha_corta, flash, drain_toasts,
                 saldo_pedido, cobrado_pedido)
-from utils.print_jobs import enqueue_recibo
+from utils.print_jobs import enqueue_recibo, enqueue_comanda
 
 # ── Constantes ─────────────────────────────────────────────────────────────────
 ESTADOS = ["pendiente", "en preparacion", "listo", "entregado"]
@@ -53,6 +53,9 @@ def avanzar_estado(pedido_id: int, estado_actual: str):
             text("UPDATE pedidos SET estado = :estado WHERE id = :id"),
             {"estado": siguiente, "id": pedido_id}
         )
+    # Arranca cocina (pendiente → en preparacion) → dispara la comanda al agente local.
+    if estado_actual == "pendiente":
+        enqueue_comanda(pedido_id)
     flash(f"Pedido #{pedido_id} → {siguiente}", "✅")
     st.rerun()
 

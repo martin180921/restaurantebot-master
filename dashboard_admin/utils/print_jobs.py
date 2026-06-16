@@ -78,3 +78,40 @@ def enqueue_recibo(ids, titulo: str, total: int, abono: int, metodo: str,
     except Exception:
         # El cobro ya está en la BD; un fallo de encolado no debe propagarse a la UI.
         pass
+
+
+def enqueue_comanda(pedido_id: int) -> None:
+    """Encola la comanda de cocina de un pedido (al pasar a 'en preparacion').
+
+    Sin precios ni cajón: la cocina solo ve mesa/cliente + ítems. Tolera fallos:
+    la impresión de cocina no debe romper el avance de estado del pedido.
+    """
+    try:
+        sql = text("""
+            SELECT p.numero_cliente, p.mesa_id, p.items, m.nombre AS mesa_nombre
+            FROM pedidos p LEFT JOIN mesas m ON m.id = p.mesa_id
+            WHERE p.id = :id
+        """)
+        with engine.connect() as conn:
+            row = conn.execute(sql, {"id": int(pedido_id)}).mappings().first()
+        if not row:
+            return
+        items = row["items"]
+        if isinstance(items, str):
+            try:
+                items = json.loads(items)
+            except (ValueError, TypeError):
+                items = []
+        items_norm = [
+            {"nombre": str(it.get("nombre", "?")), "cantidad": int(it.get("cantidad", 1) or 1)}
+            for it in (items or []) if isinstance(it, dict)
+        ]
+        payload = {
+            "pedido_id": int(pedido_id),
+            "mesa": row["mesa_nombre"] or row["numero_cliente"] or f"Pedido #{pedido_id}",
+            "items": items_norm,
+            "abrir_cajon": False,
+        }
+        enqueue_job(RESTAURANTE_ID, "comanda", payload)
+    except Exception:
+        pass
