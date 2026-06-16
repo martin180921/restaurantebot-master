@@ -9,6 +9,7 @@ from datetime import datetime
 
 from db import (engine, fmt_money, fecha_corta, flash, drain_toasts,
                 saldo_pedido, cobrado_pedido)
+from utils.print_jobs import enqueue_recibo
 
 # ── Constantes ─────────────────────────────────────────────────────────────────
 ESTADOS = ["pendiente", "en preparacion", "listo", "entregado"]
@@ -445,7 +446,12 @@ def dialog_cobrar(ids, titulo, total, uid):
         if st.button("✓ Confirmar pago", key=f"confirm_cobrar_{uid}", type="primary",
                      use_container_width=True,
                      disabled=(abono <= 0 or (es_efectivo and efectivo_corto))):
-            registrar_pago(ids, abono, "efectivo" if es_efectivo else "transferencia")
+            metodo_pago = "efectivo" if es_efectivo else "transferencia"
+            registrar_pago(ids, abono, metodo_pago)
+            # Cobro commiteado → encolamos el ticket. abrir_cajon lo decide el helper
+            # (solo en efectivo). 'recibe' solo existe en la rama de efectivo.
+            enqueue_recibo(ids, titulo, total, abono, metodo_pago,
+                           recibido=recibe if es_efectivo else None)
             if abono >= total:
                 flash(f"Pago completo · {titulo} · ${fmt_money(total)}", "💵")
             else:

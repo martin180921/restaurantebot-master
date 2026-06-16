@@ -27,6 +27,12 @@ def _normalizar_db_url(url):
 
 
 DATABASE_URL = _normalizar_db_url(os.getenv("DATABASE_URL"))
+
+# Identidad del inquilino (SaaS multi-tenant). Aún no hay tabla de restaurantes ni
+# login por tenant, así que de momento la tomamos del entorno (default 1 = single
+# tenant). Cuando exista auth por restaurante, esto saldrá de la sesión. El agente
+# local filtra por este mismo id en su config.json.
+RESTAURANTE_ID = int(os.getenv("RESTAURANTE_ID", "1"))
 # C5: pre_ping descarta conexiones muertas (Railway corta las inactivas) y
 # pool_recycle las renueva antes del timeout del servidor → sin 500s aleatorios.
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_recycle=1800)
@@ -87,6 +93,29 @@ def _ensure_schema():
                 estado                 VARCHAR(10) NOT NULL DEFAULT 'abierto'
             )
         """))
+        # print_jobs: cola de impresión multi-tenant. El panel (cloud/Railway) encola
+        # filas 'pendiente'; el Agente de Impresión Local de cada restaurante hace
+        # polling por (restaurante_id, estado) y las imprime en su Epson 80mm. 'payload'
+        # es JSONB con el ticket ya armado (ítems, totales, abrir_cajon, etc.).
+        # 'error_msg' (fuera de la spec original) guarda el último fallo del agente.
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS print_jobs (
+                id             SERIAL      PRIMARY KEY,
+                restaurante_id INTEGER     NOT NULL,
+                tipo           VARCHAR(20) NOT NULL,
+                payload        JSONB       NOT NULL,
+                estado         VARCHAR(15) NOT NULL DEFAULT 'pendiente',
+                intentos       INTEGER     NOT NULL DEFAULT 0,
+                error_msg      TEXT,
+                creado_at      TIMESTAMP   DEFAULT CURRENT_TIMESTAMP,
+                impreso_at     TIMESTAMP
+            )
+        """))
+        # Índice de polling del agente: WHERE restaurante_id = ? AND estado = 'pendiente'.
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_print_jobs_tenant_estado "
+            "ON print_jobs (restaurante_id, estado)"
+        ))
 
 try:
     _ensure_schema()

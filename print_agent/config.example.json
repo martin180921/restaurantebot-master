@@ -1,0 +1,12 @@
+{
+  "DATABASE_URL": "postgresql://USER:PASSWORD@HOST:PORT/DBNAME",
+  "RESTAURANTE_ID": 1,
+  "POLL_SECONDS": 2,
+  "PRINTER_CONNECTION": {
+    "type": "windows",
+    "printer_name": "EPSON TM-T20III Receipt",
+    "_comment_windows": "Recomendado en PC Windows: imprime por el spooler con el driver Epson ya instalado (sin Zadig). 'printer_name' debe ser EXACTO (ver 'Get-Printer'). Omitelo para usar la impresora predeterminada.",
+    "_comment_usb": "USB directo (Linux/RasPi, o Windows con driver WinUSB/Zadig): {\"type\":\"usb\",\"vendor_id\":\"0x04b8\",\"product_id\":\"0x0202\"}",
+    "_comment_network": "Red (Ethernet/Wi-Fi): {\"type\":\"network\",\"host\":\"192.168.1.50\",\"port\":9100}"
+  }
+}
