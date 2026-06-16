@@ -10,6 +10,7 @@ from datetime import datetime
 from db import (engine, fmt_money, fecha_corta, flash, drain_toasts,
                 saldo_pedido, cobrado_pedido)
 from utils.print_jobs import enqueue_recibo, enqueue_comanda
+from utils.items import formatear_items_html, lineas_por_categoria
 
 # ── Constantes ─────────────────────────────────────────────────────────────────
 ESTADOS = ["pendiente", "en preparacion", "listo", "entregado"]
@@ -159,21 +160,11 @@ def badge_html(estado: str) -> str:
     return f'<span class="badge {cls}">{label}</span>'
 
 def formatear_items(items_raw) -> str:
-    # C3: en la BD 'items' es TEXT con JSON; hay que parsearlo o el tablero
-    # mostraba la cadena cruda [{"nombre":...}] en vez de "Pizza x2".
-    if isinstance(items_raw, str):
-        try:
-            items_raw = json.loads(items_raw)
-        except (ValueError, TypeError):
-            return html.escape(items_raw)  # C2
-    if isinstance(items_raw, list):
-        # C2: escapamos nombres (pueden venir de entrada no confiable).
-        return ", ".join(
-            html.escape(f"{i.get('nombre','?')} x{i.get('cantidad',1)}")
-            if isinstance(i, dict) else html.escape(str(i))
-            for i in items_raw
-        )
-    return html.escape(str(items_raw))
+    # Modelo por secciones (utils.items): resume cada item en una línea, con el
+    # desglose del Plato del Día entre paréntesis, y agrega nota si la trae. Sigue
+    # parseando el TEXT-JSON de la BD (C3) y escapando los nombres (C2). Retro-
+    # compatible: los items legados sin 'tipo' se muestran como 'Nx Nombre'.
+    return formatear_items_html(items_raw)
 
 def formatear_fecha(fecha) -> str:
     if pd.isna(fecha):
@@ -223,24 +214,22 @@ def icono_cliente(row, mesa_nombres=None):
 # ── Ticket de cocina ───────────────────────────────────────────────────────────
 def generar_ticket_html(pid, cliente, items_raw, total_p, fecha, estado):
     """Genera el HTML del ticket termico para imprimir."""
-    if isinstance(items_raw, str):
-        try:
-            items_list = json.loads(items_raw)
-        except:
-            items_list = []
-    elif isinstance(items_raw, list):
-        items_list = items_raw
+    # Modelo por secciones (utils.items): agrupa por categoría con sus componentes
+    # indentados debajo. Retro-compatible: los items legados (sin 'tipo') caen en
+    # 'A LA CARTA' como líneas simples. C2: todo se escapa antes de inyectarse.
+    secciones = lineas_por_categoria(items_raw)
+    if secciones:
+        lineas_items = ""
+        for cat_label, items in secciones:
+            lineas_items += f'<div class="cat">[{html.escape(str(cat_label))}]</div>'
+            for it in items:
+                lineas_items += (f'<div class="it"><b>{int(it["cantidad"])}x</b> '
+                                 f'{html.escape(str(it["nombre"]))}</div>')
+                for et, val in it["componentes"]:
+                    lineas_items += (f'<div class="cmp">* {html.escape(str(et))}: '
+                                     f'{html.escape(str(val))}</div>')
     else:
-        items_list = []
-
-    lineas_items = ""
-    for item in items_list:
-        if isinstance(item, dict):
-            qty    = html.escape(str(item.get("cantidad", 1)))      # C2
-            nombre = html.escape(str(item.get("nombre", "?")))      # C2
-            lineas_items += f"<tr><td>{qty}x</td><td>{nombre}</td></tr>"
-        else:
-            lineas_items += f"<tr><td>1x</td><td>{html.escape(str(item))}</td></tr>"
+        lineas_items = '<div class="it">—</div>'
 
     # C2: cliente y estado se escapan antes de inyectarse en el ticket.
     cliente    = html.escape(str(cliente))
@@ -258,9 +247,10 @@ def generar_ticket_html(pid, cliente, items_raw, total_p, fecha, estado):
   .divider{{border-top:1px dashed #000;margin:8px 0;}}
   .label{{font-size:10px;text-transform:uppercase;color:#555;}}
   .value{{font-size:13px;font-weight:bold;}}
-  table{{width:100%;border-collapse:collapse;margin:6px 0;}}
-  td{{padding:2px 0;vertical-align:top;}}
-  td:first-child{{width:30px;font-weight:bold;}}
+  .cat{{font-size:10px;font-weight:bold;letter-spacing:1px;margin:8px 0 2px 0;border-bottom:1px solid #000;}}
+  .it{{font-size:13px;margin:2px 0;}}
+  .it b{{font-weight:bold;}}
+  .cmp{{font-size:11px;color:#222;padding-left:16px;}}
   .total-row{{font-size:16px;font-weight:bold;text-align:right;margin-top:8px;}}
   .footer{{text-align:center;margin-top:10px;font-size:11px;color:#444;}}
   .estado-badge{{display:inline-block;border:1px solid #000;padding:1px 8px;font-size:10px;margin-top:4px;}}
@@ -277,7 +267,7 @@ def generar_ticket_html(pid, cliente, items_raw, total_p, fecha, estado):
   <div class="estado-badge">{estado_str}</div>
   <div class="divider"></div>
   <div class="label">Items</div>
-  <table>{lineas_items}</table>
+  {lineas_items}
   <div class="divider"></div>
   <div class="total-row">TOTAL: ${total_fmt}</div>
   <div class="divider"></div>

@@ -9,6 +9,7 @@ import json
 from sqlalchemy import text
 
 from db import engine, RESTAURANTE_ID
+from utils.items import items_para_ticket, parse_items
 
 
 def enqueue_job(restaurante_id: int, tipo: str, payload: dict) -> int:
@@ -30,27 +31,21 @@ def enqueue_job(restaurante_id: int, tipo: str, payload: dict) -> int:
         }).scalar_one())
 
 
-def _items_de_pedidos(ids) -> list[dict]:
-    """[{nombre, cantidad}] agregados de los pedidos 'ids', para pintar el ticket."""
+def _items_payload(ids) -> list[dict]:
+    """Items (modelo por secciones) agregados de los pedidos 'ids' para el ticket.
+
+    Concatena los items de todos los pedidos y los normaliza con items_para_ticket:
+    los Plato del Día van individuales (cada uno con su desglose en 'componentes'),
+    los simples se agregan por nombre. Cada item conserva 'nombre'/'cantidad' para
+    que un agente antiguo siga imprimiéndolos aunque ignore las categorías.
+    """
     sql = text("SELECT items FROM pedidos WHERE id = ANY(:ids) ORDER BY id")
-    agregados: dict[str, int] = {}
+    concat: list[dict] = []
     with engine.connect() as conn:
         filas = conn.execute(sql, {"ids": [int(i) for i in ids]}).scalars().all()
     for raw in filas:
-        items = raw
-        if isinstance(items, str):
-            try:
-                items = json.loads(items)
-            except (ValueError, TypeError):
-                continue
-        if not isinstance(items, list):
-            continue
-        for it in items:
-            if isinstance(it, dict):
-                nombre = str(it.get("nombre", "?"))
-                cant = int(it.get("cantidad", 1) or 1)
-                agregados[nombre] = agregados.get(nombre, 0) + cant
-    return [{"nombre": n, "cantidad": c} for n, c in agregados.items()]
+        concat.extend(parse_items(raw))
+    return items_para_ticket(concat)
 
 
 def enqueue_recibo(ids, titulo: str, total: int, abono: int, metodo: str,
@@ -64,7 +59,7 @@ def enqueue_recibo(ids, titulo: str, total: int, abono: int, metodo: str,
         saldo = max(0, int(total) - int(abono))
         payload = {
             "mesa": titulo,
-            "items": _items_de_pedidos(ids),
+            "items": _items_payload(ids),
             "total": int(total),
             "pagado": int(abono),
             "saldo": saldo,
@@ -96,20 +91,10 @@ def enqueue_comanda(pedido_id: int) -> None:
             row = conn.execute(sql, {"id": int(pedido_id)}).mappings().first()
         if not row:
             return
-        items = row["items"]
-        if isinstance(items, str):
-            try:
-                items = json.loads(items)
-            except (ValueError, TypeError):
-                items = []
-        items_norm = [
-            {"nombre": str(it.get("nombre", "?")), "cantidad": int(it.get("cantidad", 1) or 1)}
-            for it in (items or []) if isinstance(it, dict)
-        ]
         payload = {
             "pedido_id": int(pedido_id),
             "mesa": row["mesa_nombre"] or row["numero_cliente"] or f"Pedido #{pedido_id}",
-            "items": items_norm,
+            "items": items_para_ticket(parse_items(row["items"])),
             "abrir_cajon": False,
         }
         enqueue_job(RESTAURANTE_ID, "comanda", payload)
