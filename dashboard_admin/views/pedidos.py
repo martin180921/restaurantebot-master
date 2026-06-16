@@ -525,6 +525,14 @@ def render_pedidos(dataframe: pd.DataFrame, tab_key: str = "all", mesa_nombres=N
                 st.session_state["print_ticket_id"] = int(pid)
                 st.rerun()
 
+            # Reimprimir comanda de cocina (atasco / ticket perdido): encola un job
+            # 'comanda' al agente local SIN cambiar el estado del pedido.
+            if estado in ESTADOS_ACTIVOS:
+                if st.button("🍳 Comanda", key=f"comanda_{uid}", use_container_width=True):
+                    enqueue_comanda(int(pid))
+                    flash(f"Comanda reenviada · Pedido #{int(pid)}", "🍳")
+                    st.rerun()
+
             if estado in ESTADOS and ESTADOS.index(estado) > 0 and estado != "entregado":
                 if st.button("↩ Revertir", key=f"revertir_{uid}", use_container_width=True):
                     revertir_estado(pid, estado)
