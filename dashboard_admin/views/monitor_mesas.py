@@ -16,6 +16,7 @@ import streamlit as st
 import pandas as pd
 import html
 
+import auth
 from db import fmt_money, cargar_mesas_activas, saldo_pedido
 from views import pedidos
 
@@ -291,7 +292,8 @@ def _detalle_mesa(mid: int, nombre: str, sub: pd.DataFrame, color: str,
     # abierta, un pago completo la libera.
     a1, a2 = st.columns([2, 1])
     with a1:
-        if not sub.empty:
+        # Cobrar es capacidad bloqueada para el mesero (monitor de solo visualización).
+        if not sub.empty and auth.can("cobrar"):
             if st.button("💵 Cobrar mesa", key=f"mon_cobrar_mesa_{mid}",
                          type="primary", use_container_width=True):
                 pedidos.dialog_cobrar(sub["id"].tolist(), nombre, saldo_activo, f"mesa_{mid}")
@@ -361,9 +363,10 @@ def _detalle_pedido(row, idx: int):
             st.session_state["print_ticket_id"] = pid
             st.rerun()
     with b3:
-        if st.button("💵 Cobrar", key=f"cobrar_{uid}", use_container_width=True,
-                     help="Cobrar este pedido (efectivo/transferencia, abono parcial)",
-                     disabled=saldo <= 0):
+        if auth.can("cobrar") and st.button(
+                "💵 Cobrar", key=f"cobrar_{uid}", use_container_width=True,
+                help="Cobrar este pedido (efectivo/transferencia, abono parcial)",
+                disabled=saldo <= 0):
             pedidos.dialog_cobrar([pid], f"Pedido #{pid}", saldo, uid)
     with b4:
         # Fase 3: modal centrado en vez de aviso inline (compartido con el tablero).
@@ -516,8 +519,9 @@ def _web_card(row, idx: int):
             st.session_state["print_ticket_id"] = pid
             st.rerun()
     with b3:
-        if st.button("💵 Cobrar", key=f"cobrar_{uid}", use_container_width=True,
-                     disabled=saldo <= 0):
+        if auth.can("cobrar") and st.button(
+                "💵 Cobrar", key=f"cobrar_{uid}", use_container_width=True,
+                disabled=saldo <= 0):
             pedidos.dialog_cobrar([pid], f"Pedido #{pid}", saldo, uid)
     with b4:
         if st.button("✕ Cancelar", key=f"cancelar_{uid}", use_container_width=True):

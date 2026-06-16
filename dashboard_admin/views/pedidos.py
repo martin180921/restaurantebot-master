@@ -7,6 +7,7 @@ import json
 import html
 from datetime import datetime
 
+import auth
 from db import (engine, fmt_money, fecha_corta, flash, drain_toasts,
                 saldo_pedido, cobrado_pedido)
 from utils.print_jobs import enqueue_recibo, enqueue_comanda
@@ -351,6 +352,11 @@ def dialog_cancelar(pid: int, uid: str):
 # o pedido; 'total' = saldo pendiente total (lo calcula la vista con db.saldo_pedido).
 @st.dialog("💵 Cobrar")
 def dialog_cobrar(ids, titulo, total, uid):
+    # Candado de capacidad (RBAC): el rol mesero NO cobra. La interfaz de cobro no
+    # debe instanciarse aunque se alcance este modal por una ruta inesperada.
+    if not auth.can("cobrar"):
+        st.error("🔒 No tienes permiso para cobrar.")
+        return
     ids = [int(i) for i in ids]
     total = max(0, int(total))
 
@@ -505,7 +511,7 @@ def render_pedidos(dataframe: pd.DataFrame, tab_key: str = "all", mesa_nombres=N
             # cubre también pedidos de WhatsApp/teléfono (sin mesa), que solo se
             # cobran desde aquí (el monitor solo lista pedidos de mesa).
             saldo = saldo_pedido(row)
-            if estado != "cancelado" and saldo > 0:
+            if auth.can("cobrar") and estado != "cancelado" and saldo > 0:
                 if st.button("💵 Cobrar", key=f"cobrar_{uid}", use_container_width=True):
                     dialog_cobrar([int(pid)], f"Pedido #{int(pid)}", saldo, uid)
 

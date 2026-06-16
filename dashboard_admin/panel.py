@@ -14,16 +14,13 @@ su propio módulo dentro de views/ para poder trabajarlas de forma independiente
 """
 import streamlit as st
 from dotenv import load_dotenv
-import hashlib
-import os
 from datetime import datetime
 
+import auth
 from views import pedidos, monitor_mesas, nuevo_pedido, menu, mesas, resumen, caja
 from db import fecha_larga
 
 load_dotenv()
-
-PANEL_PASSWORD = os.getenv("PANEL_PASSWORD", "")
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -33,14 +30,14 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# ── Login ──────────────────────────────────────────────────────────────────────
-# Auth persists via st.query_params so auto-refresh doesn't log out the user.
-def _auth_token():
-    return hashlib.sha256(PANEL_PASSWORD.encode()).hexdigest()[:16]
-
-params = st.query_params
-if params.get("auth") == _auth_token():
+# ── Login y resolución de rol (RBAC) ─────────────────────────────────────────────
+# La sesión se re-deriva del query param en CADA run (ver auth.py): rol + token, así
+# el auto-refresh / la recarga no desloguean ni pierden el rol. El token es por rol,
+# de modo que ?r= no se puede manipular para escalar privilegios sin la contraseña.
+_role = auth.resolve_role_from_params(st.query_params)
+if _role:
     st.session_state["autenticado"] = True
+    st.session_state["user_role"] = _role
 
 if "autenticado" not in st.session_state:
     st.session_state["autenticado"] = False
@@ -84,13 +81,21 @@ if not st.session_state["autenticado"]:
             label_visibility="collapsed", key="login_input"
         )
         if st.button("Entrar", key="btn_login"):
-            if password_input == PANEL_PASSWORD:
-                st.session_state["autenticado"] = True
-                st.query_params["auth"] = _auth_token()
+            rol = auth.role_from_credentials(password_input)
+            if rol:
+                auth.login(rol, password_input)
                 st.rerun()
             else:
                 st.error("Contraseña incorrecta")
     st.stop()
+
+# A partir de aquí la sesión está autenticada. Si por alguna razón quedó marcada como
+# autenticada sin rol (p. ej. una sesión del esquema de auth anterior tras un
+# redeploy en caliente), forzamos un re-login limpio en lugar de romper.
+role = st.session_state.get("user_role")
+if not role:
+    auth.logout()
+    st.rerun()
 
 # ── Auto-refresh (30s) — C1 + P2 + P4 ──────────────────────────────────────────
 # El refresco en vivo vive ahora dentro de cada vista como un st.fragment
@@ -400,56 +405,43 @@ st.markdown("""
 # run siguiente, antes de pintar la vista). Ver pedidos.flash()/drain_toasts().
 pedidos.drain_toasts()
 
-# Vista activa por defecto: el monitor del salón.
-if "current_view" not in st.session_state:
-    st.session_state["current_view"] = "monitor"
-
-
-def _nav_item(label: str, view: str):
-    """Botón de navegación vertical. El seleccionado usa la clave 'nav_active'
-    (clase .st-key-nav_active); los demás 'nav_inactive_<view>'. El CSS de arriba
-    pinta cada estado por esa clave. Al pulsarlo cambia current_view y re-ejecuta."""
-    activo = st.session_state["current_view"] == view
-    key = "nav_active" if activo else f"nav_inactive_{view}"
-    if st.button(label, key=key, use_container_width=True):
-        st.session_state["current_view"] = view
-        st.rerun()
-
-
 # Resumen ya no es una vista propia: vive como pestaña dentro de Caja. Si una sesión
 # traía 'resumen' como vista activa, la reapuntamos a Caja.
-if st.session_state["current_view"] == "resumen":
+if st.session_state.get("current_view") == "resumen":
     st.session_state["current_view"] = "caja"
 
-# ── Layout raíz: navegación · contenido · pedidos en vivo ───────────────────────
-# Sidebar angosta, área de contenido ancha y Pedidos como panel lateral compacto.
-col_nav, col_content, col_pedidos = st.columns([0.7, 3.3, 2.0], gap="medium")
+# Vista activa por defecto / saneada al rol: si la vista guardada no existe o el rol
+# no la permite (cambio de rol, parámetro forzado), caemos a la de aterrizaje del rol.
+_allowed = auth.allowed_views(role)
+if st.session_state.get("current_view") not in _allowed:
+    st.session_state["current_view"] = auth.DEFAULT_VIEW.get(role, _allowed[0])
 
-with col_nav:
-    with st.container(border=True):
-        st.markdown(
-            '<div class="nav-brand">Restaurante</div>'
-            f'<div class="nav-brand-sub">{fecha_larga(datetime.now())}</div>',
-            unsafe_allow_html=True,
-        )
-        st.divider()
-        _nav_item("🖥️ Monitor", "monitor")
-        _nav_item("🍔 Menú", "menu")
-        _nav_item("🪑 Mesas", "mesas")
-        _nav_item("➕ Nuevo pedido", "nuevo")
-        _nav_item("💰 Caja", "caja")
 
-# ── Contenido de la vista activa ────────────────────────────────────────────────
-with col_content:
-    view = st.session_state["current_view"]
+# ── Etiquetas de navegación (compartidas por ambos shells) ──────────────────────
+NAV_LABELS = {
+    "monitor": "🖥️ Monitor",
+    "menu":    "🍔 Menú",
+    "mesas":   "🪑 Mesas",
+    "nuevo":   "➕ Nuevo pedido",
+    "caja":    "💰 Caja",
+}
+
+
+def _dispatch(view: str):
+    """Pinta la vista activa. require_view() valida el permiso del rol (defensa en
+    profundidad) ANTES de renderizar nada."""
+    auth.require_view(view, role)
     if view == "caja":
-        # Caja + Resumen unificados en una sola entrada con dos pestañas. Cada
-        # render() es la vista existente sin tocar; solo se envuelven en st.tabs.
-        tab_caja, tab_resumen = st.tabs(["💰 Caja", "📊 Resumen"])
-        with tab_caja:
+        # Caja + Resumen. La pestaña Resumen (métricas de venta) SOLO se instancia si
+        # el rol puede ver ingresos; caja la pierde por completo (no se crea el tab).
+        if auth.can("see_revenue"):
+            tab_caja, tab_resumen = st.tabs(["💰 Caja", "📊 Resumen"])
+            with tab_caja:
+                caja.render()
+            with tab_resumen:
+                resumen.render()
+        else:
             caja.render()
-        with tab_resumen:
-            resumen.render()
     elif view == "monitor":
         monitor_mesas.render()
     elif view == "menu":
@@ -459,15 +451,106 @@ with col_content:
     elif view == "nuevo":
         nuevo_pedido.render()
 
-# ── Pedidos: panel derecho SIEMPRE abierto (su propio fragmento en vivo) ─────────
-with col_pedidos:
-    st.markdown(
-        '<div style="display:flex; align-items:center; justify-content:space-between; '
-        'padding-bottom:0.5rem; margin-bottom:0.75rem; border-bottom:1px solid #e5e7eb;">'
-        '<div style="font-family:Syne,sans-serif; font-size:1rem; font-weight:700; '
-        'color:#1a1a1a;">📋 Pedidos</div>'
-        '<div style="font-size:0.75rem; color:#9ca3af;"><span class="live-dot"></span>En vivo</div>'
-        '</div>',
-        unsafe_allow_html=True,
-    )
-    pedidos.render()
+
+def _nav_item(label: str, view: str):
+    """Botón de navegación vertical (shell escritorio). El seleccionado usa la clave
+    'nav_active'; los demás 'nav_inactive_<view>'. El CSS de arriba pinta cada estado
+    por esa clave. Al pulsarlo cambia current_view y re-ejecuta."""
+    activo = st.session_state["current_view"] == view
+    key = "nav_active" if activo else f"nav_inactive_{view}"
+    if st.button(label, key=key, use_container_width=True):
+        st.session_state["current_view"] = view
+        st.rerun()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SHELL MÓVIL (mesero) · una sola columna, navegación superior, sin panel derecho
+# ══════════════════════════════════════════════════════════════════════════════
+def _render_mobile_shell():
+    # Lienzo móvil: ancho completo, sin el panel de Pedidos de escritorio (es además
+    # una superficie de cobro). Navegación arriba con objetivos táctiles grandes.
+    st.markdown("""
+    <style>
+    .block-container { padding: 0.5rem 0.6rem 4rem 0.6rem !important; max-width: 100% !important; }
+    [class*="st-key-mnav_inactive"] button, .st-key-mnav_active button {
+        min-height: 52px !important; border-radius: 12px !important;
+        font-size: 0.9rem !important; font-weight: 600 !important; padding: 8px 6px !important;
+    }
+    [class*="st-key-mnav_inactive"] button {
+        background: #ffffff !important; color: #334155 !important; border: 1px solid #e5e7eb !important;
+    }
+    .st-key-mnav_active button {
+        background: #1e293b !important; color: #ffffff !important; border: 1px solid #1e293b !important;
+    }
+    .st-key-btn_logout_m button { background: transparent !important; border: none !important;
+        color: #9ca3af !important; font-size: 0.75rem !important; }
+    </style>
+    """, unsafe_allow_html=True)
+
+    top_l, top_r = st.columns([3, 1])
+    with top_l:
+        st.markdown('<div class="nav-brand">Restaurante</div>'
+                    '<div class="nav-brand-sub">Mesero</div>', unsafe_allow_html=True)
+    with top_r:
+        if st.button("Salir", key="btn_logout_m", use_container_width=True):
+            auth.logout()
+            st.rerun()
+
+    vistas = auth.allowed_views(role)
+    cols = st.columns(len(vistas))
+    for c, v in zip(cols, vistas):
+        with c:
+            activo = st.session_state["current_view"] == v
+            key = "mnav_active" if activo else f"mnav_inactive_{v}"
+            if st.button(NAV_LABELS[v], key=key, use_container_width=True):
+                st.session_state["current_view"] = v
+                st.rerun()
+
+    st.divider()
+    _dispatch(st.session_state["current_view"])
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SHELL ESCRITORIO (admin / caja) · navegación · contenido · pedidos en vivo
+# ══════════════════════════════════════════════════════════════════════════════
+def _render_desktop_shell():
+    col_nav, col_content, col_pedidos = st.columns([0.7, 3.3, 2.0], gap="medium")
+
+    with col_nav:
+        with st.container(border=True):
+            st.markdown(
+                '<div class="nav-brand">Restaurante</div>'
+                f'<div class="nav-brand-sub">{fecha_larga(datetime.now())}</div>',
+                unsafe_allow_html=True,
+            )
+            st.divider()
+            # La navegación se construye desde la matriz de acceso del rol.
+            for v in auth.allowed_views(role):
+                _nav_item(NAV_LABELS[v], v)
+            st.divider()
+            if st.button("Salir", key="btn_logout", use_container_width=True):
+                auth.logout()
+                st.rerun()
+
+    with col_content:
+        _dispatch(st.session_state["current_view"])
+
+    # ── Pedidos: panel derecho SIEMPRE abierto (su propio fragmento en vivo) ──────
+    with col_pedidos:
+        st.markdown(
+            '<div style="display:flex; align-items:center; justify-content:space-between; '
+            'padding-bottom:0.5rem; margin-bottom:0.75rem; border-bottom:1px solid #e5e7eb;">'
+            '<div style="font-family:Syne,sans-serif; font-size:1rem; font-weight:700; '
+            'color:#1a1a1a;">📋 Pedidos</div>'
+            '<div style="font-size:0.75rem; color:#9ca3af;"><span class="live-dot"></span>En vivo</div>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+        pedidos.render()
+
+
+# ── Branch raíz por rol (arregla el layout de 3 columnas en móvil) ───────────────
+if role == auth.MESERO:
+    _render_mobile_shell()
+else:
+    _render_desktop_shell()
