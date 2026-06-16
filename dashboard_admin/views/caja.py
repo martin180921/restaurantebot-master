@@ -12,6 +12,7 @@ import streamlit as st
 from sqlalchemy import text
 import html
 
+import auth
 from db import engine, fmt_money, flash
 
 
@@ -53,6 +54,9 @@ def ingresos_esperados(fecha_apertura) -> dict:
 
 def abrir_caja(monto_apertura: int) -> bool:
     """Abre un turno si no hay otro con estado='abierto' (guard atómico)."""
+    # Candado de capacidad (RBAC): solo admin/caja gestionan el arqueo.
+    if not auth.can("manage_caja"):
+        return False
     with engine.begin() as conn:
         existe = conn.execute(text(
             "SELECT 1 FROM cierres_caja WHERE estado = 'abierto' LIMIT 1"
@@ -68,6 +72,9 @@ def abrir_caja(monto_apertura: int) -> bool:
 def cerrar_caja(cierre_id: int, efectivo_esperado: int, transferencia_esperada: int,
                 efectivo_real: int, transferencia_real: int, diferencia: int):
     """Congela el arqueo y cierra el turno (estado='cerrado', fecha_cierre=NOW())."""
+    # Candado de capacidad (RBAC): solo admin/caja gestionan el arqueo.
+    if not auth.can("manage_caja"):
+        return
     with engine.begin() as conn:
         conn.execute(text(
             "UPDATE cierres_caja SET "
@@ -135,6 +142,11 @@ def _pill(bg: str, borde: str, color: str, texto: str):
 # SECCIÓN: CAJA · CIERRE DE TURNO
 # ══════════════════════════════════════════════════════════════════════════════
 def render():
+    # Guard de capacidad (defensa en profundidad): el router ya oculta Caja al mesero,
+    # pero validamos también aquí por si la vista quedó forzada por query param.
+    if not auth.can("manage_caja"):
+        st.error("🔒 Acceso denegado")
+        st.stop()
     # Botón slate (formal) para finalizar el turno, vía estilo por st-key.
     st.markdown(
         "<style>"

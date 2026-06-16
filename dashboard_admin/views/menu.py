@@ -20,8 +20,10 @@ import html
 import pandas as pd
 from datetime import date
 
+import auth
 from db import (engine, cargar_menu, cargar_componentes, cargar_catalogo,
-                cargar_ajustes, fmt_money, flash,
+                cargar_ajustes, fmt_money, flash, disponibles,
+                componentes_activos_por_grupo, precio_plato_dia, num_acompanamientos,
                 GRUPOS_COMPONENTE, GRUPO_LABEL, precio_especiales)
 
 
@@ -535,7 +537,74 @@ def _render_ajustes():
 # ══════════════════════════════════════════════════════════════════════════════
 # SECCIÓN: MENÚ
 # ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
+# VISTA DE SOLO LECTURA (mesero) — carta activa de hoy, sin edición
+# ══════════════════════════════════════════════════════════════════════════════
+def _render_readonly():
+    """Carta de SOLO consulta para el mesero: secciones, platos disponibles HOY y
+    precios. Sin pestañas de edición ni modales de crear/editar/eliminar/86."""
+    st.markdown('<div class="section-title">🍔 Carta (solo lectura)</div>',
+                unsafe_allow_html=True)
+
+    def _cards(rows):
+        for r in rows:
+            nombre = html.escape(_txt(r.get("nombre")))
+            desc = html.escape(_txt(r.get("descripcion")))
+            precio = int(r.get("precio", 0) or 0)
+            desc_html = f'<div class="menu-precio">{desc}</div>' if desc else ""
+            st.markdown(
+                f'<div class="menu-card"><div class="menu-nombre">{nombre}</div>'
+                f'{desc_html}'
+                f'<div class="menu-precio">${fmt_money(precio)}</div></div>',
+                unsafe_allow_html=True,
+            )
+
+    # 🍽️ Plato del Día (precio plano + componentes disponibles por grupo)
+    st.markdown(
+        f'<div style="background:#f9fafb; border:1px solid #e5e7eb; border-radius:10px; '
+        f'padding:0.7rem 1rem; font-size:0.85rem; color:#374151; margin:0.5rem 0 1rem 0;">'
+        f'🍽️ <b>Plato del Día</b> · ${fmt_money(precio_plato_dia())} · '
+        f'elige {num_acompanamientos()} acompañamientos</div>',
+        unsafe_allow_html=True,
+    )
+    por_grupo = componentes_activos_por_grupo()
+    for grupo in GRUPOS_COMPONENTE:
+        opciones = por_grupo.get(grupo, [])
+        if not opciones:
+            continue
+        nombres = " · ".join(html.escape(str(o["nombre"])) for o in opciones)
+        st.markdown(
+            f'<div style="margin-bottom:0.6rem;"><span style="font-weight:600; color:#1a1a1a;">'
+            f'{html.escape(GRUPO_LABEL.get(grupo, grupo))}:</span> '
+            f'<span style="color:#6b7280; font-size:0.88rem;">{nombres}</span></div>',
+            unsafe_allow_html=True,
+        )
+
+    cat = cargar_catalogo()
+    disp = disponibles(cat) if not cat.empty else cat
+
+    def _seccion(titulo: str, categoria: str):
+        rows = (disp[disp["categoria"] == categoria].to_dict("records")
+                if not disp.empty else [])
+        st.markdown(f'<div class="section-title">{titulo}</div>', unsafe_allow_html=True)
+        if rows:
+            _cards(rows)
+        else:
+            st.markdown('<p style="color:#9ca3af; font-size:0.85rem;">Sin platos activos.</p>',
+                        unsafe_allow_html=True)
+
+    _seccion("⭐ Especiales", "especial")
+    _seccion("📋 A la carta", "a_la_carta")
+    _seccion("🥤 Bebidas", "bebida")
+
+
 def render():
+    # RBAC: el mesero solo CONSULTA la carta. Bloquea todas las pestañas de edición,
+    # los modales (crear/editar/eliminar) y los toggles (activo / 86).
+    if not auth.can("edit_menu"):
+        _render_readonly()
+        return
+
     t1, t2, t3, t4, t5 = st.tabs([
         "🍽️ Plato del Día", "⭐ Especiales", "📋 A la carta", "🥤 Bebidas", "⚙️ Ajustes",
     ])

@@ -5,6 +5,7 @@ import pandas as pd
 import json
 from datetime import date
 
+import auth
 from db import engine, fmt_money, saldo_pedido, cobrado_pedido
 
 
@@ -62,6 +63,11 @@ def _items_texto(raw) -> str:
 # SECCIÓN: RESUMEN
 # ══════════════════════════════════════════════════════════════════════════════
 def render():
+    # Candado de ingresos (RBAC): caja y mesero NO ven métricas de venta. El router
+    # ni siquiera crea esta pestaña para esos roles; guard de defensa en profundidad.
+    if not auth.can("see_revenue"):
+        st.error("🔒 Acceso denegado")
+        st.stop()
     st.markdown('<div class="section-title">📊 Resumen del día</div>', unsafe_allow_html=True)
 
     dia = st.date_input("Día", value=date.today(), format="DD/MM/YYYY", key="resumen_dia")
