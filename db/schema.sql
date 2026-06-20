@@ -82,6 +82,7 @@ CREATE TABLE IF NOT EXISTS pedidos (
     fecha               TIMESTAMP    NOT NULL DEFAULT NOW(),
     mesa_id             INTEGER      REFERENCES mesas(id),
     motivo_cancelacion  TEXT,
+    cancelled_at        TIMESTAMP,
     pagado              BOOLEAN      NOT NULL DEFAULT FALSE,
     total_pagado        INTEGER      NOT NULL DEFAULT 0,
     tipo_entrega        VARCHAR(15),
@@ -151,6 +152,7 @@ ALTER TABLE menu    ADD COLUMN IF NOT EXISTS categoria VARCHAR(20) NOT NULL DEFA
 ALTER TABLE menu    ADD COLUMN IF NOT EXISTS descripcion TEXT;
 ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS mesa_id INTEGER REFERENCES mesas(id);
 ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS motivo_cancelacion TEXT;
+ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP;
 ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS pagado BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS total_pagado INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS tipo_entrega VARCHAR(15);

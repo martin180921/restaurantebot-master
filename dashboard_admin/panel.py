@@ -17,7 +17,8 @@ from dotenv import load_dotenv
 from datetime import datetime
 
 import auth
-from views import pedidos, monitor_mesas, nuevo_pedido, menu, mesas, resumen, caja
+from views import (pedidos, monitor_mesas, nuevo_pedido, menu, mesas, resumen,
+                   caja, cancelaciones)
 from db import fecha_larga
 
 load_dotenv()
@@ -435,11 +436,14 @@ def _dispatch(view: str):
         # Caja + Resumen. La pestaña Resumen (métricas de venta) SOLO se instancia si
         # el rol puede ver ingresos; caja la pierde por completo (no se crea el tab).
         if auth.can("see_revenue"):
-            tab_caja, tab_resumen = st.tabs(["💰 Caja", "📊 Resumen"])
+            tab_caja, tab_resumen, tab_cancel = st.tabs(
+                ["💰 Caja", "📊 Resumen", "🚫 Cancelaciones"])
             with tab_caja:
                 caja.render()
             with tab_resumen:
                 resumen.render()
+            with tab_cancel:
+                cancelaciones.render()
         else:
             caja.render()
     elif view == "monitor":

@@ -76,6 +76,51 @@ def _estado_mesa(sub: pd.DataFrame):
     return AMBAR, "Ocupada"
 
 
+# ── Modal: cambio de mesa (transferir cuenta a una mesa libre) ──────────────────
+# Pop-up centrado: elige una mesa LIBRE y mueve allí todos los pedidos activos de la
+# mesa de origen (FK atómica en pedidos.mover_mesa). Disponible para todo el personal
+# (incl. mesero): reubicar comensales es una tarea de salón, no de cobro. Solo se
+# ofrecen mesas libres como destino para no fusionar dos cuentas por accidente.
+@st.dialog("🔀 Cambiar de mesa")
+def _dialog_cambiar_mesa(origen_id: int, origen_nombre: str, ids, mesas_libres, uid: str):
+    origen_id = int(origen_id)
+    ids = [int(i) for i in ids]
+    st.markdown(
+        f"Mover los **{len(ids)} pedido(s) activo(s)** de "
+        f"**🪑 {html.escape(str(origen_nombre))}** a otra mesa."
+    )
+    if not ids:
+        st.info("Esta mesa no tiene pedidos activos que mover.")
+        if st.button("Cerrar", key=f"cm_cerrar_{uid}", use_container_width=True):
+            st.rerun()
+        return
+    if not mesas_libres:
+        st.warning("No hay mesas libres disponibles como destino.")
+        if st.button("Cerrar", key=f"cm_cerrar_{uid}", use_container_width=True):
+            st.rerun()
+        return
+
+    opciones = {f"🪑 {m['nombre']}": int(m["id"]) for m in mesas_libres}
+    destino_label = st.selectbox("Mesa destino (libre)", list(opciones.keys()),
+                                 key=f"cm_destino_{uid}")
+    st.caption("Solo se listan mesas libres para no fusionar dos cuentas por error.")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("🔀 Mover cuenta", key=f"cm_confirm_{uid}", type="primary",
+                     use_container_width=True):
+            destino_id = opciones[destino_label]
+            movidos = pedidos.mover_mesa(ids, destino_id)
+            st.session_state["mesa_activa"] = destino_id  # sigue al cliente a la nueva mesa
+            pedidos.flash(
+                f"{movidos} pedido(s) movido(s) · {origen_nombre} → {destino_label}", "🔀"
+            )
+            st.rerun()
+    with c2:
+        if st.button("Volver", key=f"cm_volver_{uid}", use_container_width=True):
+            st.rerun()
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # SECCIÓN: MONITOR DE MESAS
 # ══════════════════════════════════════════════════════════════════════════════
@@ -225,8 +270,16 @@ def _monitor_en_vivo():
             _placeholder()
         else:
             mesa = next((m for m in mesas if int(m["id"]) == sel), None)
+            # Mesas libres (verde) como destinos válidos del cambio de mesa, excluida
+            # la propia mesa seleccionada. Solo libres → nunca se fusionan dos cuentas.
+            mesas_libres = [
+                {"id": int(m["id"]), "nombre": str(m["nombre"])}
+                for m in mesas
+                if color_por_mesa[int(m["id"])] == VERDE and int(m["id"]) != sel
+            ]
             _detalle_mesa(sel, str(mesa["nombre"]) if mesa else f"Mesa {sel}",
-                          por_mesa[sel], color_por_mesa[sel], estado_por_mesa[sel], df)
+                          por_mesa[sel], color_por_mesa[sel], estado_por_mesa[sel],
+                          df, mesas_libres)
 
 
 # ── Detalle: placeholder (sin mesa) ─────────────────────────────────────────────
@@ -248,7 +301,7 @@ def _placeholder():
 
 # ── Detalle: ambiente de una mesa ───────────────────────────────────────────────
 def _detalle_mesa(mid: int, nombre: str, sub: pd.DataFrame, color: str,
-                  estado_txt: str, df_full: pd.DataFrame):
+                  estado_txt: str, df_full: pd.DataFrame, mesas_libres=None):
     # Saldo pendiente de la mesa = Σ (total − abonos) de sus pedidos activos.
     saldo_activo = int(sub.apply(saldo_pedido, axis=1).sum()) if not sub.empty else 0
 
@@ -290,7 +343,7 @@ def _detalle_mesa(mid: int, nombre: str, sub: pd.DataFrame, color: str,
     # cambio y abonos parciales). Cobra contra los ids visibles de 'sub' (así también
     # entran los pedidos heredados con mesa_id NULL); un abono parcial deja la mesa
     # abierta, un pago completo la libera.
-    a1, a2 = st.columns([2, 1])
+    a1, a2, a3 = st.columns([2, 2, 1])
     with a1:
         # Cobrar es capacidad bloqueada para el mesero (monitor de solo visualización).
         if not sub.empty and auth.can("cobrar"):
@@ -298,6 +351,15 @@ def _detalle_mesa(mid: int, nombre: str, sub: pd.DataFrame, color: str,
                          type="primary", use_container_width=True):
                 pedidos.dialog_cobrar(sub["id"].tolist(), nombre, saldo_activo, f"mesa_{mid}")
     with a2:
+        # Cambio de mesa: mueve la cuenta a una mesa libre. Disponible para todo el
+        # personal (reubicar comensales es tarea de salón). Solo si la mesa tiene
+        # pedidos activos que mover.
+        if not sub.empty:
+            if st.button("🔀 Cambiar de mesa", key=f"mon_cambiar_mesa_{mid}",
+                         use_container_width=True):
+                _dialog_cambiar_mesa(mid, nombre, sub["id"].tolist(),
+                                     mesas_libres or [], f"mesa_{mid}")
+    with a3:
         if st.button("✕ Deseleccionar", key=f"mon_deselect_{mid}",
                      use_container_width=True):
             st.session_state.pop("mesa_activa", None)
