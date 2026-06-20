@@ -71,6 +71,18 @@ def _ensure_schema():
         # (n.º de transacción). NULL en efectivo. Canónico en el bot; defensivo aquí.
         conn.execute(text("ALTER TABLE pagos ADD COLUMN IF NOT EXISTS submetodo VARCHAR(20)"))
         conn.execute(text("ALTER TABLE pagos ADD COLUMN IF NOT EXISTS comprobante VARCHAR(60)"))
+        # pago_lineas: libro auxiliar de "pagar por plato" — cuántas unidades de cada
+        # línea (índice en pedidos.items) ya están pagadas. 'total_pagado' sigue siendo
+        # la autoridad del saldo; esto solo recuerda QUÉ unidades se cobraron para el
+        # checklist. Invariante en modo por-plato: total_pagado == Σ(cantidad_pagada×precio).
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS pago_lineas (
+                pedido_id       INTEGER NOT NULL REFERENCES pedidos(id),
+                linea_idx       INTEGER NOT NULL,
+                cantidad_pagada INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (pedido_id, linea_idx)
+            )
+        """))
         # turnos_caja: arqueo de caja v1 (apertura con fondo, cierre con conteo).
         # Reemplazada por cierres_caja (abajo); la dejamos definida de forma defensiva
         # para no perder datos de turnos ya cerrados en despliegues previos.

@@ -107,6 +107,15 @@ CREATE TABLE IF NOT EXISTS pagos (
     fecha       TIMESTAMP   NOT NULL DEFAULT NOW()
 );
 
+-- "Pagar por plato": unidades pagadas por línea (índice en pedidos.items). 'total_pagado'
+-- es la autoridad del saldo; esto recuerda QUÉ unidades se cobraron para el checklist.
+CREATE TABLE IF NOT EXISTS pago_lineas (
+    pedido_id       INTEGER NOT NULL REFERENCES pedidos(id),
+    linea_idx       INTEGER NOT NULL,
+    cantidad_pagada INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (pedido_id, linea_idx)
+);
+
 -- Arqueo de caja v1 (heredado; coexiste con cierres_caja).
 CREATE TABLE IF NOT EXISTS turnos_caja (
     id               SERIAL PRIMARY KEY,

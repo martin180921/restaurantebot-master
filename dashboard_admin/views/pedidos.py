@@ -11,7 +11,8 @@ import auth
 from db import (engine, fmt_money, fecha_corta, flash, drain_toasts,
                 saldo_pedido, cobrado_pedido)
 from utils.print_jobs import enqueue_recibo, enqueue_comanda
-from utils.items import formatear_items_html, lineas_por_categoria
+from utils.items import (formatear_items_html, lineas_por_categoria,
+                         parse_items, etiqueta_item)
 
 # ── Constantes ─────────────────────────────────────────────────────────────────
 # Flujo de cocina simplificado: pendiente (recibido) → listo → entregado. Ya no hay
@@ -181,6 +182,106 @@ def registrar_pago(ids, monto, metodo="efectivo", submetodo=None, comprobante=No
             conn.execute(ins, {"pedido_id": u["id"], "monto": u["aplicado"], "metodo": metodo,
                                "submetodo": sub, "comprobante": comp})
     # El cobro cambió saldos/ocupación → invalida el tablero para reflejarlo al instante.
+    refrescar_pedidos()
+
+
+# ── DB: cobro POR PLATO (pagar unidades de líneas concretas) ────────────────────
+# 'total_pagado' sigue siendo la autoridad del saldo; pago_lineas es un libro auxiliar
+# que recuerda QUÉ unidades de cada línea (índice en pedidos.items) ya se cobraron, para
+# pintar el checklist de lo que falta. Invariante en modo por-plato:
+# total_pagado == Σ(cantidad_pagada × precio). Solo aplica a UN pedido a la vez.
+def _precio_unitario(item) -> int:
+    try:
+        return int(round(float(item.get("precio") or 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def lineas_pagables(pedido_id: int):
+    """[{idx, nombre, precio, cantidad, pagada, restante}] de un pedido: cada línea de
+    items con cuántas unidades quedan por cobrar (cantidad − pagada). Tolerante a fallos."""
+    pedido_id = int(pedido_id)
+    try:
+        with engine.connect() as conn:
+            raw = conn.execute(text("SELECT items FROM pedidos WHERE id = :id"),
+                               {"id": pedido_id}).scalar_one_or_none()
+            pagadas = {int(r["linea_idx"]): int(r["cantidad_pagada"]) for r in conn.execute(
+                text("SELECT linea_idx, cantidad_pagada FROM pago_lineas WHERE pedido_id = :id"),
+                {"id": pedido_id}).mappings().all()}
+    except Exception:
+        return []
+    out = []
+    for idx, it in enumerate(parse_items(raw)):
+        cantidad = int(it.get("cantidad", 1) or 1)
+        pagada = min(cantidad, pagadas.get(idx, 0))
+        out.append({"idx": idx, "nombre": etiqueta_item(it), "precio": _precio_unitario(it),
+                    "cantidad": cantidad, "pagada": pagada, "restante": max(0, cantidad - pagada)})
+    return out
+
+
+def valor_lineas_pagadas(pedido_id: int) -> int:
+    """Σ(cantidad_pagada × precio) de un pedido. Si total_pagado supera este valor, hubo
+    un abono por MONTO no atribuido a platos → el modo por-plato se oculta (evita
+    descuadrar los dos libros)."""
+    return sum(l["pagada"] * l["precio"] for l in lineas_pagables(pedido_id))
+
+
+def registrar_pago_items(pedido_id, seleccion, metodo="efectivo", submetodo=None, comprobante=None):
+    """Cobra unidades concretas de un pedido. 'seleccion' = {linea_idx: cantidad}. Cobra
+    el subtotal de lo elegido (acotado al saldo real), avanza total_pagado/pagado, anota
+    el abono en 'pagos' y suma las unidades en pago_lineas. Todo en UNA transacción."""
+    pedido_id = int(pedido_id)
+    seleccion = {int(k): int(v) for k, v in (seleccion or {}).items() if int(v) > 0}
+    metodo = metodo if metodo in ("efectivo", "transferencia") else "efectivo"
+    if metodo == "transferencia":
+        sub = (str(submetodo or "").strip().lower() or None)
+        sub = sub if sub in SUBMETODOS_TRANSF else None
+        comp = (str(comprobante or "").strip()[:60] or None)
+    else:
+        sub, comp = None, None
+    if not seleccion:
+        return
+    ins = text("INSERT INTO pagos (pedido_id, monto, metodo, submetodo, comprobante) "
+               "VALUES (:pedido_id, :monto, :metodo, :submetodo, :comprobante)")
+    ups = text("""
+        INSERT INTO pago_lineas (pedido_id, linea_idx, cantidad_pagada)
+        VALUES (:pid, :idx, :cant)
+        ON CONFLICT (pedido_id, linea_idx)
+        DO UPDATE SET cantidad_pagada = pago_lineas.cantidad_pagada + EXCLUDED.cantidad_pagada
+    """)
+    with engine.begin() as conn:
+        row = conn.execute(text(
+            "SELECT items, total, COALESCE(total_pagado, 0) AS total_pagado, pagado "
+            "FROM pedidos WHERE id = :id AND estado <> 'cancelado' FOR UPDATE"
+        ), {"id": pedido_id}).mappings().first()
+        if not row or row["pagado"]:
+            return
+        items = parse_items(row["items"])
+        # Unidades ya pagadas por línea (lock para no cobrar dos veces en concurrencia).
+        ya = {int(r["linea_idx"]): int(r["cantidad_pagada"]) for r in conn.execute(
+            text("SELECT linea_idx, cantidad_pagada FROM pago_lineas WHERE pedido_id = :id "
+                 "FOR UPDATE"), {"id": pedido_id}).mappings().all()}
+        # Subtotal de lo elegido, acotando cada línea a lo realmente pendiente.
+        subtotal, aplicar = 0, {}
+        for idx, cant in seleccion.items():
+            if idx < 0 or idx >= len(items):
+                continue
+            disp = max(0, int(items[idx].get("cantidad", 1) or 1) - ya.get(idx, 0))
+            usar = min(cant, disp)
+            if usar > 0:
+                aplicar[idx] = usar
+                subtotal += usar * _precio_unitario(items[idx])
+        saldo = max(0, int(row["total"]) - int(row["total_pagado"]))
+        cobro = min(subtotal, saldo)
+        if cobro <= 0 or not aplicar:
+            return
+        nuevo_pagado = int(row["total_pagado"]) + cobro
+        conn.execute(text("UPDATE pedidos SET total_pagado = :tp, pagado = :pg WHERE id = :id"),
+                     {"tp": nuevo_pagado, "pg": nuevo_pagado >= int(row["total"]), "id": pedido_id})
+        conn.execute(ins, {"pedido_id": pedido_id, "monto": cobro, "metodo": metodo,
+                           "submetodo": sub, "comprobante": comp})
+        for idx, usar in aplicar.items():
+            conn.execute(ups, {"pid": pedido_id, "idx": idx, "cant": usar})
     refrescar_pedidos()
 
 
@@ -476,13 +577,65 @@ def dialog_cobrar(ids, titulo, total, uid):
             placeholder="Referencia de la transacción (opcional)",
         ) or "").strip() or None
 
-    # Monto a abonar: por defecto el total (cobro completo). Reducirlo = abono
-    # parcial. min_value=0 bloquea negativos; max_value=total impide sobre-cobrar.
-    abono = int(st.number_input(
-        "Monto a abonar", min_value=0, max_value=total, value=total, step=1000,
-        format="%d", key=f"abono_{uid}",
-        help="Por defecto cobra el total. Reduce el monto para registrar un abono parcial.",
-    ) or 0)
+    # ── Modo de cobro: por MONTO o POR PLATO ────────────────────────────────────
+    # 'Por plato' cobra unidades concretas (ej: 1 de 2 Coca-Colas). Se ofrece solo con
+    # UN pedido y si el valor de las unidades pendientes cuadra con el saldo: si hubo un
+    # abono por monto suelto (o el total lleva recargo de envío), los dos libros no
+    # cuadrarían, así que se oculta para no descuadrar. Ver registrar_pago_items.
+    lineas = lineas_pagables(ids[0]) if len(ids) == 1 else []
+    precio_idx = {l["idx"]: l["precio"] for l in lineas}
+    valor_items = sum(l["restante"] * l["precio"] for l in lineas)
+    por_plato_ok = (len(ids) == 1 and any(l["restante"] > 0 for l in lineas)
+                    and valor_items == total)
+
+    por_plato = False
+    if por_plato_ok:
+        st.caption("Modo de cobro")
+        modo = st.radio("Modo de cobro", ["💵 Monto", "🍽️ Por plato"],
+                        horizontal=True, label_visibility="collapsed", key=f"modo_{uid}")
+        por_plato = modo == "🍽️ Por plato"
+
+    seleccion = {}
+    if por_plato:
+        st.markdown('<div style="font-size:0.82rem; color:#374151; margin:6px 0 2px;">'
+                    'Unidades a cobrar</div>', unsafe_allow_html=True)
+        for l in lineas:
+            col_n, col_q = st.columns([3, 1])
+            with col_n:
+                if l["restante"] <= 0:
+                    st.markdown(f'<div style="font-size:0.85rem; color:#9ca3af; padding:8px 0;">'
+                                f'✓ {html.escape(str(l["nombre"]))} · pagado</div>',
+                                unsafe_allow_html=True)
+                else:
+                    st.markdown(f'<div style="font-size:0.85rem; color:#1a1a1a; padding:4px 0;">'
+                                f'{html.escape(str(l["nombre"]))}<br>'
+                                f'<span style="font-size:0.76rem; color:#6b7280;">'
+                                f'${fmt_money(l["precio"])} c/u · quedan {l["restante"]}</span></div>',
+                                unsafe_allow_html=True)
+            with col_q:
+                if l["restante"] > 0:
+                    q = int(st.number_input("u", min_value=0, max_value=l["restante"], value=0,
+                                            step=1, key=f"pp_{uid}_{l['idx']}",
+                                            label_visibility="collapsed") or 0)
+                    if q > 0:
+                        seleccion[l["idx"]] = q
+        abono = sum(q * precio_idx.get(idx, 0) for idx, q in seleccion.items())
+        st.markdown(
+            '<div style="display:flex; justify-content:space-between; padding:8px 0 2px; '
+            'border-top:1px solid #e5e7eb; margin-top:6px;"><span style="font-weight:600; '
+            'color:#374151;">Subtotal seleccionado</span>'
+            f'<span style="font-family:\'Syne\',sans-serif; font-weight:800; color:#1a1a1a;">'
+            f'${fmt_money(abono)}</span></div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        # Monto a abonar: por defecto el total (cobro completo). Reducirlo = abono
+        # parcial. min_value=0 bloquea negativos; max_value=total impide sobre-cobrar.
+        abono = int(st.number_input(
+            "Monto a abonar", min_value=0, max_value=total, value=total, step=1000,
+            format="%d", key=f"abono_{uid}",
+            help="Por defecto cobra el total. Reduce el monto para registrar un abono parcial.",
+        ) or 0)
 
     # Efectivo: cuánto entrega el cliente → cambio = entregado − abono (nunca < 0).
     efectivo_corto = False
@@ -528,8 +681,14 @@ def dialog_cobrar(ids, titulo, total, uid):
                      use_container_width=True,
                      disabled=(abono <= 0 or (es_efectivo and efectivo_corto))):
             metodo_pago = "efectivo" if es_efectivo else "transferencia"
-            registrar_pago(ids, abono, metodo_pago,
-                           submetodo=submetodo_val, comprobante=comprobante_val)
+            if por_plato:
+                # Cobra las unidades elegidas (también suma a pago_lineas). El subtotal
+                # ya es 'abono' (= valor de lo seleccionado).
+                registrar_pago_items(ids[0], seleccion, metodo_pago,
+                                     submetodo=submetodo_val, comprobante=comprobante_val)
+            else:
+                registrar_pago(ids, abono, metodo_pago,
+                               submetodo=submetodo_val, comprobante=comprobante_val)
             # Cobro commiteado → encolamos el ticket. abrir_cajon lo decide el helper
             # (solo en efectivo). 'recibe' solo existe en la rama de efectivo.
             enqueue_recibo(ids, titulo, total, abono, metodo_pago,
