@@ -462,7 +462,7 @@ def _detalle_pedido(row, idx: int):
     </div>
     """, unsafe_allow_html=True)
 
-    b1, b2, b3, b4 = st.columns(4)
+    b1, b2, b3, b4, b5 = st.columns(5)
     with b1:
         btn_label = pedidos.ESTADO_LABEL_BTN.get(estado)
         if btn_label and st.button(btn_label, key=f"avanzar_{uid}", type="primary",
@@ -479,6 +479,15 @@ def _detalle_pedido(row, idx: int):
                 disabled=saldo <= 0):
             pedidos.dialog_cobrar([pid], f"Pedido #{pid}", saldo, uid)
     with b4:
+        # Reimprimir la comanda de cocina (atasco / ticket perdido) sin cambiar de estado.
+        # Solo aplica a pedidos en cocina (ESTADOS_ACTIVOS).
+        if estado in pedidos.ESTADOS_ACTIVOS and st.button(
+                "🍳 Comanda", key=f"comanda_{uid}", use_container_width=True,
+                help="Reimprimir la comanda de cocina"):
+            pedidos.enqueue_comanda(pid)
+            pedidos.flash(f"Comanda reenviada · Pedido #{pid}", "🍳")
+            st.rerun()
+    with b5:
         # Fase 3: modal centrado en vez de aviso inline (compartido con el tablero).
         if st.button("✕ Cancelar", key=f"cancelar_{uid}", use_container_width=True):
             pedidos.dialog_cancelar(pid, uid)
@@ -618,7 +627,7 @@ def _web_card(row, idx: int):
     </div>
     """, unsafe_allow_html=True)
 
-    b1, b2, b3, b4 = st.columns(4)
+    b1, b2, b3, b4, b5 = st.columns(5)
     with b1:
         btn_label = pedidos.ESTADO_LABEL_BTN.get(estado)
         if btn_label and st.button(btn_label, key=f"avanzar_{uid}", type="primary",
@@ -634,5 +643,13 @@ def _web_card(row, idx: int):
                 disabled=saldo <= 0):
             pedidos.dialog_cobrar([pid], f"Pedido #{pid}", saldo, uid)
     with b4:
+        # Reimprimir la comanda de cocina del pedido web (atasco / ticket perdido).
+        if estado in pedidos.ESTADOS_ACTIVOS and st.button(
+                "🍳 Comanda", key=f"comanda_{uid}", use_container_width=True,
+                help="Reimprimir la comanda de cocina"):
+            pedidos.enqueue_comanda(pid)
+            pedidos.flash(f"Comanda reenviada · Pedido #{pid}", "🍳")
+            st.rerun()
+    with b5:
         if st.button("✕ Cancelar", key=f"cancelar_{uid}", use_container_width=True):
             pedidos.dialog_cancelar(pid, uid)
