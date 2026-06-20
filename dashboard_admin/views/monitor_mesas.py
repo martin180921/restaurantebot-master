@@ -139,6 +139,22 @@ def _dialog_cambiar_mesa(origen_id: int, origen_nombre: str, ids, mesas_libres, 
 # SECCIÓN: MONITOR DE MESAS
 # ══════════════════════════════════════════════════════════════════════════════
 def render():
+    # Objetivo 3: tarjetas de pedido AMPLIADAS en el monitor para leerse de lejos en un
+    # entorno de ritmo alto. La clase 'mon-card' (añadida a las tarjetas del detalle y de
+    # pedidos web) sube tamaño de fuente, interlineado y padding SIN tocar el .order-card
+    # global del resto del panel.
+    st.markdown("""
+    <style>
+    .mon-card { padding: 1.5rem 1.8rem !important; border-radius: 18px !important; }
+    .mon-card .order-id    { font-size: 0.95rem !important; }
+    .mon-card .order-num   { font-size: 1.25rem !important; font-weight: 600 !important; }
+    .mon-card .order-items { font-size: 1.2rem !important; line-height: 1.55 !important; color: #1a1a1a !important; }
+    .mon-card .order-fecha { font-size: 0.9rem !important; }
+    .mon-card .order-total { font-size: 1.7rem !important; }
+    .mon-card .badge       { font-size: 0.95rem !important; padding: 5px 16px !important; }
+    </style>
+    """, unsafe_allow_html=True)
+
     # Dos vistas aisladas: el salón (mesas) y los pedidos web (Domicilio / Para
     # Llevar). Los pedidos web no ocupan mesa, así que NUNCA aparecen en el salón;
     # esta pestaña los reúne para preparar y despachar sin mezclarlos con el comedor.
@@ -434,7 +450,7 @@ def _detalle_pedido(row, idx: int):
                   if abonado > 0 else "")
 
     st.markdown(f"""
-    <div class="order-card"{borde}>
+    <div class="order-card mon-card"{borde}>
       <div style="display:flex; justify-content:space-between; align-items:flex-start;">
         <div>
           <div class="order-id">Pedido #{pid}</div>
@@ -581,7 +597,7 @@ def _web_card(row, idx: int):
                 if fee else "")
 
     st.markdown(f"""
-    <div class="order-card"{borde}>
+    <div class="order-card mon-card"{borde}>
       <div style="display:flex; justify-content:space-between; align-items:flex-start;">
         <div>
           <span class="badge" style="background:{bg}; color:{fg}; border:1px solid {bg};">{etiqueta}</span>

@@ -705,17 +705,19 @@ def dialog_cobrar(ids, titulo, total, uid):
 
 
 def render_pedidos(dataframe: pd.DataFrame, tab_key: str = "all", mesa_nombres=None):
+    # Panel derecho de SOLO LECTURA: el tablero es una vista en vivo ("qué está pasando").
+    # Las acciones (avanzar / cobrar / ticket / comanda / cancelar) viven en el Monitor de
+    # mesas y en Nuevo pedido, no aquí — por eso ya no se pintan botones por tarjeta.
     if dataframe.empty:
         st.markdown('<p style="color:#9ca3af; font-size:0.85rem; padding:1rem 0;">Sin pedidos en esta categoría.</p>', unsafe_allow_html=True)
         return
-    for idx, (_, row) in enumerate(dataframe.iterrows()):
+    for _, row in dataframe.iterrows():
         pid     = row["id"]
         estado  = row.get("estado", "pendiente")
         emoji, etiqueta = icono_cliente(row, mesa_nombres)   # U6
         items   = formatear_items(row.get("items", []))
         total_p = row.get("total", 0)
         fecha   = formatear_fecha(row.get("fecha"))
-        uid     = f"{tab_key}_{pid}_{idx}"
 
         # U2: acento de urgencia por tiempo de espera (solo pedidos activos)
         mins        = minutos_espera(row.get("fecha"))
@@ -724,62 +726,19 @@ def render_pedidos(dataframe: pd.DataFrame, tab_key: str = "all", mesa_nombres=N
         chip_espera = (f'<div style="font-size:0.72rem; color:{color_urg}; font-weight:700; '
                        f'margin-top:6px; white-space:nowrap;">⏱ {mins} min</div>') if color_urg else ""
 
-        # Fix 2: info + actions. Wider actions col ([3,2]) so en el panel lateral
-        # angosto los botones no se desbordan de la tarjeta.
-        col_info, col_acciones = st.columns([3, 2])
-        with col_info:
-            st.markdown(f"""
-            <div class="order-card"{borde}>
-              <div style="display:flex; justify-content:space-between; align-items:flex-start;">
-                <div>
-                  <div class="order-id">Pedido #{pid}</div>
-                  <div class="order-num">{emoji} {html.escape(str(etiqueta))}</div>
-                  <div class="order-items">{items}</div>
-                  <div class="order-fecha">{fecha}</div>
-                </div>
-                <div style="text-align:right;">{badge_html(estado)}<div class="order-total" style="margin-top:8px;">${fmt_money(total_p)}</div>{chip_espera}</div>
-              </div>
+        st.markdown(f"""
+        <div class="order-card"{borde}>
+          <div style="display:flex; justify-content:space-between; align-items:flex-start;">
+            <div>
+              <div class="order-id">Pedido #{pid}</div>
+              <div class="order-num">{emoji} {html.escape(str(etiqueta))}</div>
+              <div class="order-items">{items}</div>
+              <div class="order-fecha">{fecha}</div>
             </div>
-            """, unsafe_allow_html=True)
-        with col_acciones:
-            # Fix 2: stack buttons vertically, full width, no height spacer
-            btn_label = ESTADO_LABEL_BTN.get(estado)
-            if btn_label:
-                if st.button(btn_label, key=f"avanzar_{uid}", type="primary",
-                             use_container_width=True):
-                    avanzar_estado(pid, estado)
-
-            # Cobrar: abre el modal de pago (efectivo/transferencia + abonos
-            # parciales). Visible mientras el pedido tenga saldo y no esté cancelado;
-            # cubre también pedidos de WhatsApp/teléfono (sin mesa), que solo se
-            # cobran desde aquí (el monitor solo lista pedidos de mesa).
-            saldo = saldo_pedido(row)
-            if auth.can("cobrar") and estado != "cancelado" and saldo > 0:
-                if st.button("💵 Cobrar", key=f"cobrar_{uid}", use_container_width=True):
-                    dialog_cobrar([int(pid)], f"Pedido #{int(pid)}", saldo, uid)
-
-            # P3: botón nativo; la impresión usa UN solo iframe bajo demanda
-            # (_maybe_print_ticket en render()), no un iframe por tarjeta.
-            if st.button("🖨 Ticket", key=f"ticket_{uid}", use_container_width=True):
-                st.session_state["print_ticket_id"] = int(pid)
-                st.rerun()
-
-            # Reimprimir comanda de cocina (atasco / ticket perdido): encola un job
-            # 'comanda' al agente local SIN cambiar el estado del pedido.
-            if estado in ESTADOS_ACTIVOS:
-                if st.button("🍳 Comanda", key=f"comanda_{uid}", use_container_width=True):
-                    enqueue_comanda(int(pid))
-                    flash(f"Comanda reenviada · Pedido #{int(pid)}", "🍳")
-                    st.rerun()
-
-            if estado in ESTADOS and ESTADOS.index(estado) > 0 and estado != "entregado":
-                if st.button("↩ Revertir", key=f"revertir_{uid}", use_container_width=True):
-                    revertir_estado(pid, estado)
-            # F1: cancelar disponible para cualquier pedido activo (antes solo pendiente)
-            # Fase 3: abre un modal centrado en vez de un aviso inline.
-            if estado in ESTADOS_ACTIVOS:
-                if st.button("✕ Cancelar", key=f"cancelar_{uid}", use_container_width=True):
-                    dialog_cancelar(pid, uid)
+            <div style="text-align:right;">{badge_html(estado)}<div class="order-total" style="margin-top:8px;">${fmt_money(total_p)}</div>{chip_espera}</div>
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
 
 
 # ── Agrupación por mesa (Req 3) ────────────────────────────────────────────────
@@ -983,9 +942,8 @@ def _tablero_en_vivo():
             render_pedidos(df[df["estado"] == "cancelado"].copy(), "cancelado", mesa_nombres=mesa_nombres)
 
     st.markdown("<br>", unsafe_allow_html=True)
-    col_r1, col_r2 = st.columns([1, 4])
-    with col_r1:
-        if st.button("🔄 Actualizar ahora"):
-            st.rerun()
-    with col_r2:
-        st.markdown('<p style="color:#9ca3af; font-size:0.75rem; padding-top:8px;">Los cambios se guardan inmediatamente en la base de datos.</p>', unsafe_allow_html=True)
+    # Vista de solo lectura: sin botón de refresco manual (el fragmento se actualiza
+    # solo cada 30 s). Las acciones se gestionan desde el Monitor de mesas.
+    st.markdown('<p style="color:#9ca3af; font-size:0.75rem;">Vista en vivo · se actualiza '
+                'automáticamente. Gestiona los pedidos desde el 🖥️ Monitor.</p>',
+                unsafe_allow_html=True)

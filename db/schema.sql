@@ -116,6 +116,19 @@ CREATE TABLE IF NOT EXISTS pago_lineas (
     PRIMARY KEY (pedido_id, linea_idx)
 );
 
+-- PINs de turno efímeros del mesero (acceso solo-PIN, sin contraseña fija). Se generan
+-- en caja y se revocan a mano o al cerrar la caja. Solo se guarda el hash del PIN.
+CREATE TABLE IF NOT EXISTS claves_mesero (
+    id         SERIAL PRIMARY KEY,
+    etiqueta   VARCHAR(120),
+    clave_hash VARCHAR(64) NOT NULL,
+    activa     BOOLEAN     NOT NULL DEFAULT TRUE,
+    creada     TIMESTAMP   NOT NULL DEFAULT NOW(),
+    revocada   TIMESTAMP,
+    creada_por VARCHAR(20)
+);
+CREATE INDEX IF NOT EXISTS idx_claves_mesero_activa ON claves_mesero (activa);
+
 -- Arqueo de caja v1 (heredado; coexiste con cierres_caja).
 CREATE TABLE IF NOT EXISTS turnos_caja (
     id               SERIAL PRIMARY KEY,

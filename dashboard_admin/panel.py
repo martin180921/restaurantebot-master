@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 from datetime import datetime
 
 import auth
+import mesero_keys
 from views import (pedidos, monitor_mesas, nuevo_pedido, menu, mesas, resumen,
                    caja, cancelaciones)
 from db import fecha_larga
@@ -32,13 +33,15 @@ st.set_page_config(
 )
 
 # ── Login y resolución de rol (RBAC) ─────────────────────────────────────────────
-# La sesión se re-deriva del query param en CADA run (ver auth.py): rol + token, así
-# el auto-refresh / la recarga no desloguean ni pierden el rol. El token es por rol,
-# de modo que ?r= no se puede manipular para escalar privilegios sin la contraseña.
-_role = auth.resolve_role_from_params(st.query_params)
-if _role:
-    st.session_state["autenticado"] = True
-    st.session_state["user_role"] = _role
+# Sesión POR CONEXIÓN: la autenticación vive SOLO en st.session_state (ver auth.py). Ya
+# no se lee la URL — un enlace compartido o una pestaña nueva arrancan sin sesión y deben
+# autenticarse. Si una URL antigua aún trae ?r=&auth=, los limpiamos (ya se ignoran).
+for _k in ("r", "auth"):
+    if _k in st.query_params:
+        try:
+            del st.query_params[_k]
+        except KeyError:
+            pass
 
 if "autenticado" not in st.session_state:
     st.session_state["autenticado"] = False
@@ -78,16 +81,22 @@ if not st.session_state["autenticado"]:
         </div>
         """, unsafe_allow_html=True)
         password_input = st.text_input(
-            "Contraseña", type="password", placeholder="••••••••",
+            "Contraseña o PIN de turno", type="password", placeholder="••••••••",
             label_visibility="collapsed", key="login_input"
         )
         if st.button("Entrar", key="btn_login"):
+            # admin/caja por contraseña de entorno; el mesero por PIN de turno (efímero).
             rol = auth.role_from_credentials(password_input)
             if rol:
-                auth.login(rol, password_input)
+                auth.login(rol)
                 st.rerun()
             else:
-                st.error("Contraseña incorrecta")
+                key_id = mesero_keys.validar_clave(password_input)
+                if key_id:
+                    auth.login_mesero(key_id)
+                    st.rerun()
+                else:
+                    st.error("Contraseña o PIN incorrecto")
     st.stop()
 
 # A partir de aquí la sesión está autenticada. Si por alguna razón quedó marcada como
@@ -95,6 +104,13 @@ if not st.session_state["autenticado"]:
 # redeploy en caliente), forzamos un re-login limpio en lugar de romper.
 role = st.session_state.get("user_role")
 if not role:
+    auth.logout()
+    st.rerun()
+
+# Revalidación del PIN de mesero en CADA run: si su clave de turno fue revocada (a mano
+# o al cerrar la caja), lo deslogueamos en el acto (revocación inmediata). Otros roles
+# (admin/caja) no dependen de claves de turno.
+if role == auth.MESERO and not mesero_keys.clave_activa(st.session_state.get("mesero_key_id")):
     auth.logout()
     st.rerun()
 

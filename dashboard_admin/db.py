@@ -83,6 +83,23 @@ def _ensure_schema():
                 PRIMARY KEY (pedido_id, linea_idx)
             )
         """))
+        # claves_mesero: PINs de turno efímeros del mesero (acceso solo-PIN, sin
+        # contraseña fija). Se generan en caja, se revocan a mano o al cerrar la caja.
+        # Guardamos solo el hash; el PIN se muestra una sola vez al generarlo.
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS claves_mesero (
+                id         SERIAL PRIMARY KEY,
+                etiqueta   VARCHAR(120),
+                clave_hash VARCHAR(64) NOT NULL,
+                activa     BOOLEAN     NOT NULL DEFAULT TRUE,
+                creada     TIMESTAMP   NOT NULL DEFAULT NOW(),
+                revocada   TIMESTAMP,
+                creada_por VARCHAR(20)
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_claves_mesero_activa ON claves_mesero (activa)"
+        ))
         # turnos_caja: arqueo de caja v1 (apertura con fondo, cierre con conteo).
         # Reemplazada por cierres_caja (abajo); la dejamos definida de forma defensiva
         # para no perder datos de turnos ya cerrados en despliegues previos.
