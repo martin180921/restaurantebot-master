@@ -39,6 +39,13 @@ CAT_LABEL = {
     "bebida":    "BEBIDAS",
 }
 
+# Billeteras de transferencia (submetodo del payload → etiqueta legible en el ticket).
+SUBMETODO_LABEL = {
+    "nequi":     "Nequi",
+    "daviplata": "Daviplata",
+    "breb":      "Bre-B",
+}
+
 
 def cargar_config(requeridas=("DATABASE_URL", "RESTAURANTE_ID", "PRINTER_CONNECTION")) -> dict:
     if not os.path.exists(CONFIG_PATH):
@@ -146,9 +153,20 @@ def imprimir_recibo(printer, payload: dict) -> None:
     # 4) Totales y desglose de pago.
     printer.text(linea_precio("Total", payload.get("total", 0)) + "\n")
     printer.set(bold=True)
+    # En transferencia, anexa la billetera (Nequi/Daviplata/Bre-B) a la etiqueta del
+    # método: 'Pagado (Transferencia · Nequi)'. En efectivo queda 'Pagado (Efectivo)'.
     metodo = str(payload.get("metodo", "")).capitalize()
+    if payload.get("metodo") == "transferencia":
+        sub = SUBMETODO_LABEL.get(str(payload.get("submetodo") or "").lower())
+        if sub:
+            metodo = f"{metodo} · {sub}"
     printer.text(linea_precio(f"Pagado ({metodo})", payload.get("pagado", 0)) + "\n")
     printer.set(bold=False)
+
+    # Comprobante de la transferencia (n.º de transacción), si se registró.
+    comprobante = str(payload.get("comprobante") or "").strip()
+    if payload.get("metodo") == "transferencia" and comprobante:
+        printer.text(f"Comp. {comprobante}\n")
 
     if payload.get("metodo") == "efectivo" and payload.get("recibido") is not None:
         printer.text(linea_precio("Recibido", payload.get("recibido", 0)) + "\n")
@@ -204,6 +222,28 @@ def _payload_demo() -> dict:
         "recibido": 100000,
         "cambio": 22000,
         "abrir_cajon": True,
+        "pedido_ids": [0],
+    }
+
+
+def _payload_demo_transfer() -> dict:
+    """Recibo de muestra pagado por TRANSFERENCIA (Nequi) con comprobante, para
+    previsualizar la billetera y el n.º de transacción en el ticket. Sin cajón."""
+    return {
+        "mesa": "Mesa 4",
+        "items": [
+            {"tipo": "especial", "nombre": "Bandeja Paisa", "cantidad": 2, "componentes": []},
+            {"tipo": "bebida", "nombre": "Jugo de Mora", "cantidad": 2, "componentes": []},
+        ],
+        "total": 64000,
+        "pagado": 64000,
+        "saldo": 0,
+        "metodo": "transferencia",
+        "submetodo": "nequi",
+        "comprobante": "M1234567890",
+        "recibido": None,
+        "cambio": 0,
+        "abrir_cajon": False,
         "pedido_ids": [0],
     }
 
@@ -277,6 +317,7 @@ def _payload_demo_comanda() -> dict:
 def modo_dry_run() -> int:
     """Renderiza recibo y comanda de muestra como TEXTO en consola (sin impresora ni BD)."""
     for payload, render_fn in ((_payload_demo(), imprimir_recibo),
+                               (_payload_demo_transfer(), imprimir_recibo),
                                (_payload_demo_comanda(), imprimir_comanda)):
         dummy = _DummyPrinter()
         render_fn(dummy, payload)

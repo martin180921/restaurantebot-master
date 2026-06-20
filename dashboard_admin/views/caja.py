@@ -9,11 +9,13 @@ para contrastarlas con lo esperado, aunque NO entran a la caja física de efecti
 Hay como máximo un turno con estado='abierto' a la vez.
 """
 import streamlit as st
-from sqlalchemy import text
+from sqlalchemy import text, bindparam
+import json
 import html
 
 import auth
-from db import engine, fmt_money, flash
+from db import engine, fmt_money, flash, saldo_pedido
+from views import pedidos
 
 
 # ── DB ───────────────────────────────────────────────────────────────────────────
@@ -105,6 +107,192 @@ def cierres_recientes(n: int = 8):
         return []
 
 
+# ── DB: flujo de caja (movimientos de efectivo del cajón) ───────────────────────
+# Cada fila de movimientos_caja es un evento de efectivo que YA ocurrió (el dinero ya
+# salió o entró), así que el neto cuenta TODAS las filas del turno sin importar
+# 'estado'; 'estado' solo marca cuáles aún esperan su retorno (devolución / depósito).
+#   gasto           → efectivo SALE del cajón (−)
+#   reingreso_gasto → vuelve el cambio del gasto (+)
+#   base_repartidor → efectivo SALE como base de cambio del repartidor (−)
+#   retorno_base    → el repartidor devuelve el float sobrante al volver (+)
+# Los COBROS de los pedidos de domicilio NO entran aquí: se cobran al volver por el
+# libro 'pagos' (ventas en efectivo del arqueo), así no se cuentan dos veces.
+TIPOS_SALIDA  = ("gasto", "base_repartidor")
+TIPOS_ENTRADA = ("reingreso_gasto", "retorno_base")
+
+
+def _actor_rol() -> str:
+    return auth.current_role() or ""
+
+
+def registrar_gasto(cierre_id: int, monto: int, motivo: str, actor_nombre: str = None):
+    """Retiro de efectivo del cajón (gasto/imprevisto). Queda 'abierto' hasta que se
+    registre la devolución del cambio sobrante."""
+    if not auth.can("manage_caja"):
+        return
+    with engine.begin() as conn:
+        conn.execute(text(
+            "INSERT INTO movimientos_caja (cierre_id, tipo, monto, motivo, actor_rol, "
+            "actor_nombre, estado) VALUES (:c, 'gasto', :m, :mo, :ar, :an, 'abierto')"
+        ), {"c": int(cierre_id), "m": int(monto), "mo": (motivo or "").strip() or None,
+            "ar": _actor_rol(), "an": (actor_nombre or "").strip() or None})
+
+
+def registrar_reingreso(gasto_id: int, monto: int):
+    """Devuelve al cajón el cambio sobrante de un gasto y lo marca 'cerrado'. Atómico."""
+    if not auth.can("manage_caja"):
+        return
+    with engine.begin() as conn:
+        ref = conn.execute(text(
+            "SELECT cierre_id FROM movimientos_caja WHERE id = :id AND tipo = 'gasto' "
+            "AND estado = 'abierto' FOR UPDATE"
+        ), {"id": int(gasto_id)}).mappings().first()
+        if not ref:
+            return
+        if int(monto) > 0:
+            conn.execute(text(
+                "INSERT INTO movimientos_caja (cierre_id, tipo, monto, ref_id, actor_rol, "
+                "estado) VALUES (:c, 'reingreso_gasto', :m, :ref, :ar, 'cerrado')"
+            ), {"c": ref["cierre_id"], "m": int(monto), "ref": int(gasto_id), "ar": _actor_rol()})
+        conn.execute(text("UPDATE movimientos_caja SET estado = 'cerrado' WHERE id = :id"),
+                     {"id": int(gasto_id)})
+
+
+def registrar_base_repartidor(cierre_id: int, monto: int, nombre: str, pedidos_ids=None):
+    """Saca efectivo del cajón como base de cambio para un repartidor. 'pedidos_ids' son
+    los pedidos de domicilio que se lleva (se cobran al volver). Queda 'abierto' hasta
+    que el repartidor vuelve, se cobran sus pedidos y devuelve el float sobrante."""
+    if not auth.can("manage_caja"):
+        return
+    ids = [int(i) for i in (pedidos_ids or [])]
+    with engine.begin() as conn:
+        conn.execute(text(
+            "INSERT INTO movimientos_caja (cierre_id, tipo, monto, actor_rol, actor_nombre, "
+            "pedidos_ref, estado) VALUES (:c, 'base_repartidor', :m, :ar, :an, :pr, 'abierto')"
+        ), {"c": int(cierre_id), "m": int(monto), "ar": _actor_rol(),
+            "an": (nombre or "").strip() or None,
+            "pr": (json.dumps(ids) if ids else None)})
+
+
+def registrar_retorno_base(base_id: int, monto: int):
+    """Devuelve al cajón el float sobrante de una base de repartidor y la cierra. Los
+    pedidos ya se cobraron por separado (libro 'pagos'); aquí solo vuelve el cambio
+    que no se usó. Atómico (lee la base con FOR UPDATE y la marca 'cerrado')."""
+    if not auth.can("manage_caja"):
+        return
+    with engine.begin() as conn:
+        ref = conn.execute(text(
+            "SELECT cierre_id FROM movimientos_caja WHERE id = :id "
+            "AND tipo = 'base_repartidor' AND estado = 'abierto' FOR UPDATE"
+        ), {"id": int(base_id)}).mappings().first()
+        if not ref:
+            return
+        if int(monto) > 0:
+            conn.execute(text(
+                "INSERT INTO movimientos_caja (cierre_id, tipo, monto, ref_id, actor_rol, "
+                "estado) VALUES (:c, 'retorno_base', :m, :ref, :ar, 'cerrado')"
+            ), {"c": ref["cierre_id"], "m": int(monto), "ref": int(base_id), "ar": _actor_rol()})
+        conn.execute(text("UPDATE movimientos_caja SET estado = 'cerrado' WHERE id = :id"),
+                     {"id": int(base_id)})
+
+
+# ── Pedidos de domicilio para el flujo del repartidor ───────────────────────────
+def pedidos_domicilio_pendientes():
+    """[{id, nombre, saldo}] de pedidos de domicilio/para_llevar activos y con saldo,
+    para asignarlos a la base de un repartidor. Tolerante a fallos."""
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(text("""
+                SELECT id, numero_cliente, cliente_nombre, total,
+                       COALESCE(total_pagado, 0) AS total_pagado, pagado
+                FROM pedidos
+                WHERE tipo_entrega IN ('domicilio', 'para_llevar')
+                  AND estado <> 'cancelado' AND pagado = FALSE
+                ORDER BY id
+            """)).mappings().all()
+    except Exception:
+        return []
+    out = []
+    for r in rows:
+        d = dict(r)
+        s = saldo_pedido(d)
+        if s > 0:
+            out.append({"id": int(d["id"]),
+                        "nombre": d.get("cliente_nombre") or d.get("numero_cliente") or f"#{d['id']}",
+                        "saldo": s})
+    return out
+
+
+def _pedidos_por_ids(ids):
+    """[{id, nombre, saldo, pagado}] de los pedidos cuyos ids se piden (para el retorno
+    del repartidor). Tolerante a fallos."""
+    ids = [int(i) for i in (ids or [])]
+    if not ids:
+        return []
+    try:
+        sel = text("""
+            SELECT id, numero_cliente, cliente_nombre, total,
+                   COALESCE(total_pagado, 0) AS total_pagado, pagado, estado
+            FROM pedidos WHERE id IN :ids ORDER BY id
+        """).bindparams(bindparam("ids", expanding=True))
+        with engine.connect() as conn:
+            rows = conn.execute(sel, {"ids": ids}).mappings().all()
+    except Exception:
+        return []
+    out = []
+    for r in rows:
+        d = dict(r)
+        out.append({"id": int(d["id"]),
+                    "nombre": d.get("cliente_nombre") or d.get("numero_cliente") or f"#{d['id']}",
+                    "saldo": saldo_pedido(d), "estado": d.get("estado")})
+    return out
+
+
+def movimientos_del_turno(cierre_id: int):
+    """Todos los movimientos del turno (recientes primero). Tolerante a fallos."""
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(text(
+                "SELECT id, tipo, monto, motivo, actor_rol, actor_nombre, ref_id, estado, "
+                "       creado_at FROM movimientos_caja WHERE cierre_id = :c "
+                "ORDER BY id DESC"
+            ), {"c": int(cierre_id)}).mappings().all()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+def movimientos_abiertos(cierre_id: int, tipo: str):
+    """Movimientos de un 'tipo' aún 'abiertos' (esperan devolución / retorno)."""
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(text(
+                "SELECT id, monto, motivo, actor_nombre, pedidos_ref, creado_at "
+                "FROM movimientos_caja "
+                "WHERE cierre_id = :c AND tipo = :t AND estado = 'abierto' ORDER BY id"
+            ), {"c": int(cierre_id), "t": tipo}).mappings().all()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+def neto_movimientos(cierre_id: int) -> int:
+    """Efecto neto de los movimientos sobre el efectivo del cajón:
+    Σ(entradas) − Σ(salidas). Tolerante a fallos → 0."""
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(text(
+                "SELECT tipo, COALESCE(SUM(monto), 0) AS total FROM movimientos_caja "
+                "WHERE cierre_id = :c GROUP BY tipo"
+            ), {"c": int(cierre_id)}).mappings().all()
+        por_tipo = {r["tipo"]: int(r["total"]) for r in rows}
+    except Exception:
+        return 0
+    entra = sum(por_tipo.get(t, 0) for t in TIPOS_ENTRADA)
+    sale  = sum(por_tipo.get(t, 0) for t in TIPOS_SALIDA)
+    return entra - sale
+
+
 # ── Helpers de formato ───────────────────────────────────────────────────────────
 def _hora(dt) -> str:
     try:
@@ -136,6 +324,220 @@ def _pill(bg: str, borde: str, color: str, texto: str):
         f'padding:10px 14px; color:{color}; font-weight:600;">{texto}</div>',
         unsafe_allow_html=True,
     )
+
+
+# ── Modales de flujo de caja (@st.dialog, no perturban mesas abiertas) ──────────
+@st.dialog("🧾 Gasto de caja")
+def _dialog_gasto(cierre_id: int):
+    st.markdown("Retira efectivo del cajón. Al volver, registra el cambio sobrante.")
+    monto = int(st.number_input("Monto a retirar ($)", min_value=0, value=0, step=1000,
+                                format="%d", key="gasto_monto") or 0)
+    motivo = st.text_input("Motivo / justificación", key="gasto_motivo",
+                           placeholder="Ej: compra de gas, insumos urgentes…")
+    quien = st.text_input("¿Quién retira? (opcional)", key="gasto_quien")
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("🧾 Registrar gasto", key="gasto_confirm", type="primary",
+                     use_container_width=True, disabled=(monto <= 0 or not motivo.strip())):
+            registrar_gasto(cierre_id, monto, motivo, quien)
+            flash(f"Gasto registrado · ${fmt_money(monto)}", "🧾")
+            st.rerun()
+    with c2:
+        if st.button("Volver", key="gasto_volver", use_container_width=True):
+            st.rerun()
+
+
+@st.dialog("↩️ Devolución de cambio")
+def _dialog_reingreso(gasto_id: int, gasto_monto: int, motivo: str = ""):
+    detalle = f" · {html.escape(motivo)}" if motivo else ""
+    st.markdown(f"Gasto de **${fmt_money(gasto_monto)}**{detalle}.")
+    monto = int(st.number_input("Cambio devuelto al cajón ($)", min_value=0,
+                                max_value=int(gasto_monto), value=0, step=1000,
+                                format="%d", key=f"reing_monto_{gasto_id}") or 0)
+    st.caption(f"Gasto neto: ${fmt_money(int(gasto_monto) - monto)}")
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("↩️ Registrar devolución", key=f"reing_confirm_{gasto_id}",
+                     type="primary", use_container_width=True):
+            registrar_reingreso(gasto_id, monto)   # monto 0 = no sobró nada; cierra el gasto
+            flash(f"Devolución registrada · ${fmt_money(monto)}", "↩️")
+            st.rerun()
+    with c2:
+        if st.button("Volver", key=f"reing_volver_{gasto_id}", use_container_width=True):
+            st.rerun()
+
+
+@st.dialog("🛵 Base de repartidor")
+def _dialog_base(cierre_id: int):
+    st.markdown("Saca una base de cambio y asigna los pedidos de domicilio que lleva el "
+                "repartidor. Al volver, esos pedidos se cobran y devuelve el float sobrante.")
+    nombre = st.text_input("Nombre del repartidor", key="base_nombre",
+                           placeholder="Ej: Carlos")
+    monto = int(st.number_input("Base de cambio que se lleva ($)", min_value=0, value=0,
+                                step=1000, format="%d", key="base_monto") or 0)
+
+    pendientes = pedidos_domicilio_pendientes()
+    ids = []
+    if pendientes:
+        opciones = {f"#{p['id']} · {p['nombre']} · ${fmt_money(p['saldo'])}": p["id"]
+                    for p in pendientes}
+        elegidos = st.multiselect("Pedidos que lleva (se cobran al volver)",
+                                  list(opciones.keys()), key="base_pedidos")
+        ids = [opciones[l] for l in elegidos]
+    else:
+        st.caption("No hay pedidos de domicilio pendientes para asignar (puedes entregar "
+                   "la base igual).")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("🛵 Entregar base", key="base_confirm", type="primary",
+                     use_container_width=True, disabled=(monto <= 0 or not nombre.strip())):
+            registrar_base_repartidor(cierre_id, monto, nombre, ids)
+            extra = f" · {len(ids)} pedido(s)" if ids else ""
+            flash(f"Base entregada · {nombre} · ${fmt_money(monto)}{extra}", "🛵")
+            st.rerun()
+    with c2:
+        if st.button("Volver", key="base_volver", use_container_width=True):
+            st.rerun()
+
+
+@st.dialog("🟢 Cerrar base · float devuelto")
+def _dialog_retorno(base_id: int, base_monto: int, nombre: str = "", pendientes_saldo: int = 0):
+    quien = f"**{html.escape(nombre)}** · " if nombre else ""
+    st.markdown(f"{quien}base entregada **${fmt_money(base_monto)}**.")
+    if pendientes_saldo > 0:
+        st.warning(f"Aún hay ${fmt_money(pendientes_saldo)} sin cobrar en sus pedidos. "
+                   "Cóbralos antes de cerrar para no descuadrar la caja.")
+    monto = int(st.number_input("Float que devuelve al cajón ($)", min_value=0,
+                                max_value=int(base_monto), value=int(base_monto), step=1000,
+                                format="%d", key=f"ret_monto_{base_id}",
+                                help="El cambio sobrante de la base. Los cobros de los "
+                                     "pedidos se registran aparte en 💵 Cobrar.") or 0)
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("🟢 Cerrar base", key=f"ret_confirm_{base_id}",
+                     type="primary", use_container_width=True):
+            registrar_retorno_base(base_id, monto)
+            flash(f"Base cerrada · float devuelto ${fmt_money(monto)}", "🟢")
+            st.rerun()
+    with c2:
+        if st.button("Volver", key=f"ret_volver_{base_id}", use_container_width=True):
+            st.rerun()
+
+
+# ── Sección de flujo de caja (dentro del turno abierto) ─────────────────────────
+_MOV_LABEL = {
+    "gasto":           ("🧾 Gasto", "#dc2626"),
+    "reingreso_gasto": ("↩️ Devolución", "#16a34a"),
+    "base_repartidor": ("🛵 Base repartidor", "#dc2626"),
+    "retorno_base":    ("🟢 Float devuelto", "#16a34a"),
+}
+
+
+def _seccion_flujo_caja(cierre: dict):
+    cid = int(cierre["id"])
+    st.markdown('<div class="section-title">💸 Flujo de caja · gastos y repartidores</div>',
+                unsafe_allow_html=True)
+
+    b1, b2 = st.columns(2)
+    with b1:
+        if st.button("🧾 Registrar gasto de caja", key="btn_open_gasto",
+                     use_container_width=True):
+            _dialog_gasto(cid)
+    with b2:
+        if st.button("🛵 Base de repartidor", key="btn_open_base",
+                     use_container_width=True):
+            _dialog_base(cid)
+
+    # Gastos abiertos (esperan la devolución del cambio).
+    gastos = movimientos_abiertos(cid, "gasto")
+    for g in gastos:
+        gid = int(g["id"])
+        motivo = str(g["motivo"] or "")
+        quien = f" · {html.escape(str(g['actor_nombre']))}" if g["actor_nombre"] else ""
+        col_a, col_b = st.columns([3, 1])
+        with col_a:
+            st.markdown(
+                f'<div class="order-card" style="border-left:4px solid #dc2626;">'
+                f'<div style="font-size:0.85rem; color:#374151;">🧾 Gasto abierto · '
+                f'<b>${fmt_money(g["monto"])}</b>{quien}</div>'
+                f'<div style="font-size:0.78rem; color:#9ca3af;">{html.escape(motivo)}</div></div>',
+                unsafe_allow_html=True,
+            )
+        with col_b:
+            if st.button("↩️ Devolver", key=f"btn_reing_{gid}", use_container_width=True):
+                _dialog_reingreso(gid, int(g["monto"]), motivo)
+
+    # Bases de repartidor abiertas: el repartidor está en ruta con su float y sus
+    # pedidos. Al volver se cobran los pedidos (💵 Cobrar → libro 'pagos') y se cierra
+    # la base devolviendo el float sobrante.
+    bases = movimientos_abiertos(cid, "base_repartidor")
+    for b in bases:
+        bid = int(b["id"])
+        nombre = str(b["actor_nombre"] or "Repartidor")
+        try:
+            ref_ids = json.loads(b.get("pedidos_ref") or "[]")
+        except (ValueError, TypeError):
+            ref_ids = []
+        ordenes = _pedidos_por_ids(ref_ids)
+        pend_saldo = sum(int(o["saldo"]) for o in ordenes)
+
+        st.markdown(
+            f'<div class="order-card" style="border-left:4px solid #2563eb; margin-bottom:6px;">'
+            f'<div style="font-size:0.85rem; color:#374151;">🛵 Repartidor en ruta · '
+            f'<b>{html.escape(nombre)}</b> · base ${fmt_money(b["monto"])} · '
+            f'{len(ordenes)} pedido(s) · por cobrar ${fmt_money(pend_saldo)}</div></div>',
+            unsafe_allow_html=True,
+        )
+
+        # Un botón de cobro por cada pedido del repartidor que aún tenga saldo. El cobro
+        # usa el modal compartido (efectivo/transferencia + comprobante), que registra en
+        # 'pagos' → entra a las ventas en efectivo del arqueo (no por movimientos_caja).
+        for o in ordenes:
+            oid = int(o["id"])
+            col_o, col_b = st.columns([3, 1])
+            with col_o:
+                pagado_txt = ("✓ pagado" if o["saldo"] <= 0
+                              else f'por cobrar ${fmt_money(o["saldo"])}')
+                st.markdown(
+                    f'<div style="font-size:0.8rem; color:#6b7280; padding:4px 0;">'
+                    f'#{oid} · {html.escape(str(o["nombre"]))} · {pagado_txt}</div>',
+                    unsafe_allow_html=True,
+                )
+            with col_b:
+                if st.button("💵 Cobrar", key=f"btn_basecobro_{bid}_{oid}",
+                             use_container_width=True, disabled=o["saldo"] <= 0):
+                    pedidos.dialog_cobrar([oid], f"Pedido #{oid} · {nombre}",
+                                          int(o["saldo"]), f"basecobro_{bid}_{oid}")
+
+        if st.button("🟢 Cerrar base / float devuelto", key=f"btn_ret_{bid}",
+                     use_container_width=True):
+            _dialog_retorno(bid, int(b["monto"]), nombre, pend_saldo)
+
+    # Histórico compacto del turno + neto.
+    movs = movimientos_del_turno(cid)
+    if movs:
+        neto = neto_movimientos(cid)
+        signo = "+" if neto >= 0 else "−"
+        color = "#16a34a" if neto >= 0 else "#dc2626"
+        st.markdown(
+            f'<div style="font-size:0.82rem; color:#374151; margin-top:8px;">Efecto neto en el '
+            f'cajón: <b style="color:{color};">{signo}${fmt_money(abs(neto))}</b></div>',
+            unsafe_allow_html=True,
+        )
+        with st.expander(f"Ver movimientos del turno ({len(movs)})"):
+            for mv in movs:
+                etiqueta, c = _MOV_LABEL.get(mv["tipo"], (mv["tipo"], "#6b7280"))
+                signo_mv = "+" if mv["tipo"] in TIPOS_ENTRADA else "−"
+                extra = f" · {html.escape(str(mv['motivo'] or mv['actor_nombre'] or ''))}".rstrip(" ·")
+                st.markdown(
+                    f'<div style="display:flex; justify-content:space-between; font-size:0.8rem; '
+                    f'padding:4px 0; border-bottom:1px solid #f1f5f9;">'
+                    f'<span style="color:#374151;">{etiqueta} · {_fechahora(mv["creado_at"])}'
+                    f'{"" if extra == " · " else extra}</span>'
+                    f'<span style="color:{c}; font-weight:700;">{signo_mv}${fmt_money(mv["monto"])}</span></div>',
+                    unsafe_allow_html=True,
+                )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -195,7 +597,11 @@ def render():
         esp = ingresos_esperados(cierre["fecha_apertura"])
         efvo_esp = esp["efectivo"]
         transf_esp = esp["transferencia"]
-        total_esperado = monto_apertura + efvo_esp
+        # Efectivo esperado = base + ventas en efectivo + efecto neto del flujo de caja
+        # (gastos/devoluciones y bases de repartidor/depósitos). Así el arqueo concilia
+        # automáticamente con el dinero que salió y entró del cajón fuera de las ventas.
+        neto_mov = neto_movimientos(int(cierre["id"]))
+        total_esperado = monto_apertura + efvo_esp + neto_mov
 
         # Banner de turno abierto.
         st.markdown(f"""
@@ -224,6 +630,11 @@ def render():
         with cols[1]:
             if st.button("🔄 Actualizar", key="btn_caja_refrescar", use_container_width=True):
                 st.rerun()
+
+        st.divider()
+
+        # ── Flujo de caja: gastos y bases de repartidor (afecta lo esperado) ─────
+        _seccion_flujo_caja(cierre)
 
         st.divider()
 

@@ -152,6 +152,10 @@ def init_db():
                 fecha      TIMESTAMP   NOT NULL DEFAULT NOW()
             )
         """))
+        # Transferencias detalladas: submetodo (nequi/daviplata/breb) y comprobante
+        # (n.º de transacción). NULL en efectivo. Las llena el panel al cobrar.
+        conn.execute(text("ALTER TABLE pagos ADD COLUMN IF NOT EXISTS submetodo VARCHAR(20)"))
+        conn.execute(text("ALTER TABLE pagos ADD COLUMN IF NOT EXISTS comprobante VARCHAR(60)"))
 
         # ── Turnos de caja: arqueo (apertura con fondo, cierre con conteo) ──────
         # Esperado = fondo_inicial + efectivo cobrado entre abierto y cerrado (de

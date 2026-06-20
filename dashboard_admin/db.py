@@ -67,6 +67,22 @@ def _ensure_schema():
                 fecha      TIMESTAMP   NOT NULL DEFAULT NOW()
             )
         """))
+        # Transferencias detalladas: submetodo (nequi/daviplata/breb) y comprobante
+        # (n.º de transacción). NULL en efectivo. Canónico en el bot; defensivo aquí.
+        conn.execute(text("ALTER TABLE pagos ADD COLUMN IF NOT EXISTS submetodo VARCHAR(20)"))
+        conn.execute(text("ALTER TABLE pagos ADD COLUMN IF NOT EXISTS comprobante VARCHAR(60)"))
+        # pago_lineas: libro auxiliar de "pagar por plato" — cuántas unidades de cada
+        # línea (índice en pedidos.items) ya están pagadas. 'total_pagado' sigue siendo
+        # la autoridad del saldo; esto solo recuerda QUÉ unidades se cobraron para el
+        # checklist. Invariante en modo por-plato: total_pagado == Σ(cantidad_pagada×precio).
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS pago_lineas (
+                pedido_id       INTEGER NOT NULL REFERENCES pedidos(id),
+                linea_idx       INTEGER NOT NULL,
+                cantidad_pagada INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (pedido_id, linea_idx)
+            )
+        """))
         # turnos_caja: arqueo de caja v1 (apertura con fondo, cierre con conteo).
         # Reemplazada por cierres_caja (abajo); la dejamos definida de forma defensiva
         # para no perder datos de turnos ya cerrados en despliegues previos.
@@ -98,6 +114,34 @@ def _ensure_schema():
                 estado                 VARCHAR(10) NOT NULL DEFAULT 'abierto'
             )
         """))
+        # movimientos_caja: flujo de efectivo del cajón fuera de las ventas (gastos de
+        # caja con su devolución de cambio, y base de cambio del repartidor con el float
+        # devuelto al volver). 'estado'='abierto' = dinero aún afuera; 'cerrado' = ya
+        # conciliado. 'ref_id' enlaza el retorno con su salida (reingreso_gasto→gasto,
+        # retorno_base→base_repartidor). 'pedidos_ref' (JSON de ids) lista los pedidos de
+        # domicilio que el repartidor lleva, para cobrarlos al volver (esos cobros entran
+        # por el libro 'pagos', NO por aquí → sin doble conteo). Va DESPUÉS de cierres_caja.
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS movimientos_caja (
+                id           SERIAL       PRIMARY KEY,
+                cierre_id    INTEGER      REFERENCES cierres_caja(id),
+                tipo         VARCHAR(20)  NOT NULL,
+                monto        INTEGER      NOT NULL,
+                motivo       TEXT,
+                actor_rol    VARCHAR(20),
+                actor_nombre VARCHAR(120),
+                ref_id       INTEGER,
+                pedidos_ref  TEXT,
+                estado       VARCHAR(15)  NOT NULL DEFAULT 'abierto',
+                creado_at    TIMESTAMP    NOT NULL DEFAULT NOW()
+            )
+        """))
+        # Defensivo si la tabla se creó antes de existir esta columna.
+        conn.execute(text("ALTER TABLE movimientos_caja ADD COLUMN IF NOT EXISTS pedidos_ref TEXT"))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_movimientos_caja_cierre "
+            "ON movimientos_caja (cierre_id, tipo, estado)"
+        ))
         # print_jobs: cola de impresión multi-tenant. El panel (cloud/Railway) encola
         # filas 'pendiente'; el Agente de Impresión Local de cada restaurante hace
         # polling por (restaurante_id, estado) y las imprime en su Epson 80mm. 'payload'
