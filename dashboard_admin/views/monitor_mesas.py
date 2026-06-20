@@ -76,6 +76,20 @@ def _estado_mesa(sub: pd.DataFrame):
     return AMBAR, "Ocupada"
 
 
+def _espera_mesa(sub: pd.DataFrame) -> int:
+    """Minutos que la mesa lleva esperando: el pedido SIN ENTREGAR más antiguo. Es la
+    clave de orden cronológico del monitor (la que más espera va primero). Las mesas con
+    todo entregado (solo por cobrar) devuelven 0 → quedan después de las que aún esperan
+    comida. -1 si no hay pedidos activos (mesa libre, no se muestra)."""
+    if sub.empty:
+        return -1
+    pend = sub[sub["estado"] != "entregado"]
+    if pend.empty:
+        return 0
+    esperas = [pedidos.minutos_espera(f) for f in pend["fecha"]]
+    return max([m for m in esperas if m is not None], default=0)
+
+
 # ── Modal: cambio de mesa (transferir cuenta a una mesa libre) ──────────────────
 # Pop-up centrado: elige una mesa LIBRE y mueve allí todos los pedidos activos de la
 # mesa de origen (FK atómica en pedidos.mover_mesa). Disponible para todo el personal
@@ -171,6 +185,7 @@ def _monitor_en_vivo():
         activos["__mesa"] = pd.Series(dtype="object")
 
     # Subconjunto de pedidos activos por mesa + color/estado de cada una.
+    mesa_por_id = {int(m["id"]): m for m in mesas}
     por_mesa, color_por_mesa, estado_por_mesa = {}, {}, {}
     for m in mesas:
         mid = int(m["id"])
@@ -178,9 +193,16 @@ def _monitor_en_vivo():
         por_mesa[mid] = sub
         color_por_mesa[mid], estado_por_mesa[mid] = _estado_mesa(sub)
 
-    # Saneamos la selección: si la mesa ya no está activa, la limpiamos.
+    # Objetivos 1+2: SOLO las mesas con pedidos activos (las "Libre" se ocultan),
+    # ordenadas cronológicamente — la que lleva más tiempo esperando comida sin entregar
+    # va primero (_espera_mesa, desc). Las de "Por cobrar" (todo entregado) quedan al final.
+    activas = [mid for mid in por_mesa if not por_mesa[mid].empty]
+    activas.sort(key=lambda mid: _espera_mesa(por_mesa[mid]), reverse=True)
+
+    # Saneamos la selección: si la mesa ya no tiene pedidos activos (se cobró/liberó) o
+    # dejó de existir, la limpiamos — el monitor ya no la muestra.
     sel = st.session_state.get("mesa_activa")
-    if sel is not None and sel not in por_mesa:
+    if sel is not None and sel not in activas:
         st.session_state.pop("mesa_activa", None)
         sel = None
 
@@ -201,10 +223,10 @@ def _monitor_en_vivo():
     with m5:
         st.markdown(f'<div class="metric-card"><div class="metric-value" style="color:{ROJO}">{atencion}</div><div class="metric-label">Atención</div></div>', unsafe_allow_html=True)
 
-    # ── CSS: botones-tarjeta del panel izquierdo ────────────────────────────────
+    # ── CSS: botones-tarjeta de la fila superior (objetivo 3: horizontal) ───────
     st.markdown("""
     <style>
-    /* Tarjetas-botón de mesa (panel maestro). Sobrescriben el botón base. */
+    /* Tarjetas-botón de mesa (fila horizontal). Sobrescriben el botón base. */
     [class*="st-key-mesabtn_"] button {
         text-align: left !important; justify-content: flex-start !important;
         padding: 12px 14px !important; min-height: 62px !important;
@@ -224,7 +246,8 @@ def _monitor_en_vivo():
     # CSS dinámico: fondo COMPLETO por estado + resaltado de la mesa seleccionada.
     # Mismo nivel de especificidad que la regla base (declarado después → gana).
     dyn = []
-    for mid, color in color_por_mesa.items():
+    for mid in activas:
+        color = color_por_mesa[mid]
         bg, bg_h, txt = CARD_TINT[color]
         dyn.append(
             f".st-key-mesabtn_{mid} button {{ background:{bg} !important; "
@@ -242,44 +265,53 @@ def _monitor_en_vivo():
         )
     st.markdown(f"<style>{''.join(dyn)}</style>", unsafe_allow_html=True)
 
-    # ── Layout maestro-detalle ──────────────────────────────────────────────────
-    col_left, col_right = st.columns([1, 3], gap="large")
+    # ── Objetivo 3: layout horizontal (fila de tarjetas activas) + detalle debajo ─
+    if not activas:
+        st.markdown(
+            '<div style="border:1px dashed #d1d5db; border-radius:14px; background:#ffffff; '
+            'padding:2rem; text-align:center; color:#6b7280; box-shadow:0 1px 2px rgba(0,0,0,0.04);">'
+            '🟢 Todas las mesas están libres. Aparecerán aquí en cuanto tengan pedidos activos.</div>',
+            unsafe_allow_html=True,
+        )
+        return
 
-    with col_left:
-        for m in mesas:
-            mid    = int(m["id"])
-            nombre = str(m["nombre"])
-            sub    = por_mesa[mid]
-            color  = color_por_mesa[mid]
-            dot    = {VERDE: "🟢", AMBAR: "🟠", AZUL: "🔵", ROJO: "🔴"}[color]
-
-            if sub.empty:
-                resumen = "Libre"
-            else:
-                saldo = int(sub.apply(saldo_pedido, axis=1).sum())
+    DOT = {VERDE: "🟢", AMBAR: "🟠", AZUL: "🔵", ROJO: "🔴"}
+    POR_FILA = 4  # tarjetas por fila; el resto se envuelve a la siguiente
+    for inicio in range(0, len(activas), POR_FILA):
+        fila = activas[inicio:inicio + POR_FILA]
+        cols = st.columns(POR_FILA, gap="small")
+        for col, mid in zip(cols, fila):
+            with col:
+                nombre = str(mesa_por_id[mid]["nombre"])
+                sub    = por_mesa[mid]
+                color  = color_por_mesa[mid]
+                saldo  = int(sub.apply(saldo_pedido, axis=1).sum())
                 etiqueta = "por cobrar" if color == AZUL else "pedido(s)"
-                resumen = f"{len(sub)} {etiqueta} · ${fmt_money(saldo)}"
+                espera = _espera_mesa(sub)
+                chip = f" · ⏱ {espera}m" if espera > 0 else ""
+                resumen = f"{len(sub)} {etiqueta} · ${fmt_money(saldo)}{chip}"
+                if st.button(f"{DOT[color]}  {nombre}\n\n{resumen}", key=f"mesabtn_{mid}",
+                             use_container_width=True):
+                    st.session_state["mesa_activa"] = mid
+                    st.rerun()
 
-            if st.button(f"{dot}  {nombre}\n\n{resumen}", key=f"mesabtn_{mid}",
-                         use_container_width=True):
-                st.session_state["mesa_activa"] = mid
-                st.rerun()
+    st.markdown("<br>", unsafe_allow_html=True)
 
-    with col_right:
-        if sel is None:
-            _placeholder()
-        else:
-            mesa = next((m for m in mesas if int(m["id"]) == sel), None)
-            # Mesas libres (verde) como destinos válidos del cambio de mesa, excluida
-            # la propia mesa seleccionada. Solo libres → nunca se fusionan dos cuentas.
-            mesas_libres = [
-                {"id": int(m["id"]), "nombre": str(m["nombre"])}
-                for m in mesas
-                if color_por_mesa[int(m["id"])] == VERDE and int(m["id"]) != sel
-            ]
-            _detalle_mesa(sel, str(mesa["nombre"]) if mesa else f"Mesa {sel}",
-                          por_mesa[sel], color_por_mesa[sel], estado_por_mesa[sel],
-                          df, mesas_libres)
+    # Detalle de la mesa seleccionada, a todo el ancho debajo de la fila.
+    if sel is None:
+        _placeholder()
+    else:
+        mesa = mesa_por_id.get(sel)
+        # Mesas libres (verde) como destinos válidos del cambio de mesa, excluida la
+        # propia mesa seleccionada. Solo libres → nunca se fusionan dos cuentas.
+        mesas_libres = [
+            {"id": int(m["id"]), "nombre": str(m["nombre"])}
+            for m in mesas
+            if color_por_mesa[int(m["id"])] == VERDE and int(m["id"]) != sel
+        ]
+        _detalle_mesa(sel, str(mesa["nombre"]) if mesa else f"Mesa {sel}",
+                      por_mesa[sel], color_por_mesa[sel], estado_por_mesa[sel],
+                      df, mesas_libres)
 
 
 # ── Detalle: placeholder (sin mesa) ─────────────────────────────────────────────
@@ -293,7 +325,7 @@ def _placeholder():
         Selecciona una mesa
       </div>
       <div style="font-size:0.85rem; color:#9ca3af; margin-top:6px;">
-        Elige una mesa en el panel izquierdo para ver los detalles de su pedido.
+        Elige una mesa en la fila de arriba para ver los detalles de su pedido.
       </div>
     </div>
     """, unsafe_allow_html=True)
