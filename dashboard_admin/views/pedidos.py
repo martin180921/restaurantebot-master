@@ -14,16 +14,22 @@ from utils.print_jobs import enqueue_recibo, enqueue_comanda
 from utils.items import formatear_items_html, lineas_por_categoria
 
 # ── Constantes ─────────────────────────────────────────────────────────────────
+# Flujo de cocina simplificado: pendiente (recibido) → listo → entregado. Ya no hay
+# paso manual de "Iniciar preparación"; el pedido aparece en cocina al crearse y la
+# comanda se imprime en ese momento (ver utils.print_jobs.enqueue_comanda llamado por
+# nuevo_pedido al confirmar). 'en preparacion' se MANTIENE reconocido para que los
+# pedidos heredados que quedaron en ese estado sigan mostrándose y avanzando a 'listo';
+# ningún pedido nuevo entra ya en él.
 ESTADOS = ["pendiente", "en preparacion", "listo", "entregado"]
 ESTADO_SIGUIENTE = {
-    "pendiente":      "en preparacion",
-    "en preparacion": "listo",
+    "pendiente":      "listo",          # antes pasaba por "en preparacion"
+    "en preparacion": "listo",          # solo heredados: los empuja directo a listo
     "listo":          "entregado",
     "entregado":      None
 }
 ESTADO_LABEL_BTN = {
-    "pendiente":      "▶ Iniciar preparación",
-    "en preparacion": "✓ Marcar listo",
+    "pendiente":      "✓ Marcar listo",  # antes "▶ Iniciar preparación"
+    "en preparacion": "✓ Marcar listo",  # heredados
     "listo":          "✓ Entregar",
     "entregado":      None
 }
@@ -69,9 +75,8 @@ def avanzar_estado(pedido_id: int, estado_actual: str):
             text("UPDATE pedidos SET estado = :estado WHERE id = :id"),
             {"estado": siguiente, "id": pedido_id}
         )
-    # Arranca cocina (pendiente → en preparacion) → dispara la comanda al agente local.
-    if estado_actual == "pendiente":
-        enqueue_comanda(pedido_id)
+    # La comanda ya NO se dispara aquí: con el flujo simplificado se imprime al CREAR el
+    # pedido (nuevo_pedido.crear_pedido_manual), no al avanzar de estado.
     refrescar_pedidos()
     flash(f"Pedido #{pedido_id} → {siguiente}", "✅")
     st.rerun()
@@ -134,16 +139,29 @@ def _distribuir_abono(pendientes, monto):
     return updates
 
 
-def registrar_pago(ids, monto, metodo="efectivo"):
+# Submétodos válidos de transferencia (billeteras locales). NULL en efectivo.
+SUBMETODOS_TRANSF = {"nequi", "daviplata", "breb"}
+
+
+def registrar_pago(ids, monto, metodo="efectivo", submetodo=None, comprobante=None):
     """Registra un abono de 'monto' (en 'metodo') contra los pedidos 'ids' (uno o
     varios), repartiéndolo del más antiguo al más nuevo. Cada pedido cuyo saldo quede
     en 0 se marca pagado=TRUE; el resto acumula en total_pagado y sigue pagado=FALSE.
-    Cada abono aplicado se anota además en el libro 'pagos' (método + hora real de
-    pago). Lee y escribe en la MISMA transacción (FOR UPDATE) sobre el saldo real.
+    Cada abono aplicado se anota además en el libro 'pagos' (método + submétodo +
+    comprobante + hora real de pago). Lee y escribe en la MISMA transacción
+    (FOR UPDATE) sobre el saldo real.
+
+    submetodo/comprobante solo aplican a transferencias; en efectivo se guardan NULL.
     """
     ids = [int(i) for i in ids]
     monto = int(round(float(monto or 0)))
     metodo = metodo if metodo in ("efectivo", "transferencia") else "efectivo"
+    if metodo == "transferencia":
+        sub = (str(submetodo or "").strip().lower() or None)
+        sub = sub if sub in SUBMETODOS_TRANSF else None
+        comp = (str(comprobante or "").strip()[:60] or None)
+    else:
+        sub, comp = None, None   # el efectivo no lleva submétodo ni comprobante
     if not ids or monto <= 0:
         return
     sel = text("""
@@ -154,12 +172,14 @@ def registrar_pago(ids, monto, metodo="efectivo"):
         FOR UPDATE
     """).bindparams(bindparam("ids", expanding=True))
     upd = text("UPDATE pedidos SET total_pagado = :total_pagado, pagado = :pagado WHERE id = :id")
-    ins = text("INSERT INTO pagos (pedido_id, monto, metodo) VALUES (:pedido_id, :monto, :metodo)")
+    ins = text("INSERT INTO pagos (pedido_id, monto, metodo, submetodo, comprobante) "
+               "VALUES (:pedido_id, :monto, :metodo, :submetodo, :comprobante)")
     with engine.begin() as conn:
         pendientes = [dict(r) for r in conn.execute(sel, {"ids": ids}).mappings().all()]
         for u in _distribuir_abono(pendientes, monto):
             conn.execute(upd, {"total_pagado": u["total_pagado"], "pagado": u["pagado"], "id": u["id"]})
-            conn.execute(ins, {"pedido_id": u["id"], "monto": u["aplicado"], "metodo": metodo})
+            conn.execute(ins, {"pedido_id": u["id"], "monto": u["aplicado"], "metodo": metodo,
+                               "submetodo": sub, "comprobante": comp})
     # El cobro cambió saldos/ocupación → invalida el tablero para reflejarlo al instante.
     refrescar_pedidos()
 
@@ -439,8 +459,22 @@ def dialog_cobrar(ids, titulo, total, uid):
     # a Efectivo; y la validación de abajo ignora el cálculo de cambio (solo exige
     # abono > 0). Seguro: el widget 'recibe' solo se instancia en la rama de efectivo,
     # así que aquí (transferencia) podemos limpiar su clave sin chocar con el widget.
+    submetodo_val, comprobante_val = None, None
     if not es_efectivo:
         st.session_state.pop(f"recibe_{uid}", None)
+        # Detalle de la transferencia: billetera (Nequi/Daviplata/Bre-B) + comprobante.
+        # El comprobante vive solo en este cobro de caja (no en la app pública del cliente).
+        _SUBMETODOS = {"Nequi": "nequi", "Daviplata": "daviplata", "Bre-B": "breb"}
+        st.caption("Billetera / canal")
+        sub_label = st.radio(
+            "Billetera", list(_SUBMETODOS.keys()),
+            horizontal=True, label_visibility="collapsed", key=f"submetodo_{uid}",
+        )
+        submetodo_val = _SUBMETODOS.get(sub_label)
+        comprobante_val = (st.text_input(
+            "N.º de comprobante", key=f"comprobante_{uid}",
+            placeholder="Referencia de la transacción (opcional)",
+        ) or "").strip() or None
 
     # Monto a abonar: por defecto el total (cobro completo). Reducirlo = abono
     # parcial. min_value=0 bloquea negativos; max_value=total impide sobre-cobrar.
@@ -494,11 +528,13 @@ def dialog_cobrar(ids, titulo, total, uid):
                      use_container_width=True,
                      disabled=(abono <= 0 or (es_efectivo and efectivo_corto))):
             metodo_pago = "efectivo" if es_efectivo else "transferencia"
-            registrar_pago(ids, abono, metodo_pago)
+            registrar_pago(ids, abono, metodo_pago,
+                           submetodo=submetodo_val, comprobante=comprobante_val)
             # Cobro commiteado → encolamos el ticket. abrir_cajon lo decide el helper
             # (solo en efectivo). 'recibe' solo existe en la rama de efectivo.
             enqueue_recibo(ids, titulo, total, abono, metodo_pago,
-                           recibido=recibe if es_efectivo else None)
+                           recibido=recibe if es_efectivo else None,
+                           submetodo=submetodo_val, comprobante=comprobante_val)
             if abono >= total:
                 flash(f"Pago completo · {titulo} · ${fmt_money(total)}", "💵")
             else:

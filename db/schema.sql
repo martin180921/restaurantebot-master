@@ -98,11 +98,13 @@ CREATE INDEX IF NOT EXISTS idx_pedidos_tipo_entrega ON pedidos (tipo_entrega);
 
 -- Libro de abonos (método + hora real de pago).
 CREATE TABLE IF NOT EXISTS pagos (
-    id        SERIAL PRIMARY KEY,
-    pedido_id INTEGER     NOT NULL REFERENCES pedidos(id),
-    monto     INTEGER     NOT NULL,
-    metodo    VARCHAR(20) NOT NULL DEFAULT 'efectivo',
-    fecha     TIMESTAMP   NOT NULL DEFAULT NOW()
+    id          SERIAL PRIMARY KEY,
+    pedido_id   INTEGER     NOT NULL REFERENCES pedidos(id),
+    monto       INTEGER     NOT NULL,
+    metodo      VARCHAR(20) NOT NULL DEFAULT 'efectivo',
+    submetodo   VARCHAR(20),                      -- nequi | daviplata | breb (NULL en efectivo)
+    comprobante VARCHAR(60),                      -- n.º de transacción de la transferencia
+    fecha       TIMESTAMP   NOT NULL DEFAULT NOW()
 );
 
 -- Arqueo de caja v1 (heredado; coexiste con cierres_caja).
@@ -128,6 +130,27 @@ CREATE TABLE IF NOT EXISTS cierres_caja (
     diferencia             INTEGER     DEFAULT 0,
     estado                 VARCHAR(10) NOT NULL DEFAULT 'abierto'
 );
+
+-- Flujo de efectivo del cajón fuera de las ventas: gastos de caja (con su devolución
+-- de cambio) y base de cambio del repartidor (con el float devuelto al volver).
+-- 'estado'='abierto' = el dinero aún está afuera; 'cerrado' = ya conciliado. 'ref_id'
+-- enlaza el retorno con su salida (reingreso_gasto→gasto, retorno_base→base_repartidor).
+-- 'pedidos_ref' (JSON de ids) lista los pedidos de domicilio que lleva el repartidor;
+-- esos se cobran al volver por el libro 'pagos' (no por aquí → sin doble conteo).
+CREATE TABLE IF NOT EXISTS movimientos_caja (
+    id           SERIAL       PRIMARY KEY,
+    cierre_id    INTEGER      REFERENCES cierres_caja(id),
+    tipo         VARCHAR(20)  NOT NULL,   -- gasto | reingreso_gasto | base_repartidor | retorno_base
+    monto        INTEGER      NOT NULL,
+    motivo       TEXT,
+    actor_rol    VARCHAR(20),
+    actor_nombre VARCHAR(120),
+    ref_id       INTEGER,
+    pedidos_ref  TEXT,
+    estado       VARCHAR(15)  NOT NULL DEFAULT 'abierto',
+    creado_at    TIMESTAMP    NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_movimientos_caja_cierre ON movimientos_caja (cierre_id, tipo, estado);
 
 -- Cola de impresión multi-tenant (el agente local hace polling por tenant+estado).
 CREATE TABLE IF NOT EXISTS print_jobs (
@@ -163,6 +186,8 @@ ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS metodo_pago VARCHAR(20);
 ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS paga_con INTEGER;
 ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS fee INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS nota_general TEXT;
+ALTER TABLE pagos   ADD COLUMN IF NOT EXISTS submetodo VARCHAR(20);
+ALTER TABLE pagos   ADD COLUMN IF NOT EXISTS comprobante VARCHAR(60);
 
 -- ── Seeds (idempotentes) ────────────────────────────────────────────────────
 INSERT INTO ajustes (clave, valor) VALUES

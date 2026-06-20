@@ -19,23 +19,28 @@ import html
 from db import (engine, cargar_mesas_activas, componentes_activos_por_grupo,
                 cargar_catalogo, disponibles, precio_plato_dia,
                 num_acompanamientos, fmt_money, flash, drain_toasts)
+from utils.print_jobs import enqueue_comanda
 
 
 # ── DB: crear pedido de mesa ────────────────────────────────────────────────────
 def crear_pedido_manual(mesa_id: int, mesa_nombre: str, items: list, total: int,
                         nota_general=None):
     with engine.begin() as conn:
-        conn.execute(text("""
+        nuevo_id = conn.execute(text("""
             INSERT INTO pedidos
               (numero_cliente, items, total, estado, mesa_id, tipo_entrega, nota_general)
             VALUES (:numero, :items, :total, 'pendiente', :mesa_id, 'mesa', :ng)
+            RETURNING id
         """), {
             "numero":  mesa_nombre,
             "items":   json.dumps(items, ensure_ascii=False),
             "total":   total,
             "mesa_id": mesa_id,
             "ng":      (nota_general or None),
-        })
+        }).scalar_one()
+    # Flujo de cocina simplificado: ya no hay "Iniciar preparación", así que la comanda
+    # se imprime al confirmar el pedido. Tolera fallos: no debe romper la creación.
+    enqueue_comanda(int(nuevo_id))
     flash(f"Pedido para {mesa_nombre} creado", "✅")
 
 

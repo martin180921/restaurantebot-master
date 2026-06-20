@@ -49,11 +49,14 @@ def _items_payload(ids) -> list[dict]:
 
 
 def enqueue_recibo(ids, titulo: str, total: int, abono: int, metodo: str,
-                   recibido: int | None = None) -> None:
+                   recibido: int | None = None, submetodo: str | None = None,
+                   comprobante: str | None = None) -> None:
     """Encola el ticket de un cobro recién commiteado.
 
     Regla del cajón SAT: solo se abre en efectivo (abrir_cajon = metodo=='efectivo').
-    Tolera cualquier fallo: la impresión no debe tumbar el cobro ya registrado.
+    'submetodo'/'comprobante' detallan la transferencia (Nequi/Daviplata/Bre-B + n.º de
+    transacción) en el ticket. Tolera cualquier fallo: la impresión no debe tumbar el
+    cobro ya registrado.
     """
     try:
         saldo = max(0, int(total) - int(abono))
@@ -64,6 +67,8 @@ def enqueue_recibo(ids, titulo: str, total: int, abono: int, metodo: str,
             "pagado": int(abono),
             "saldo": saldo,
             "metodo": metodo,
+            "submetodo": submetodo or None,
+            "comprobante": comprobante or None,
             "recibido": int(recibido) if recibido is not None else None,
             "cambio": max(0, int(recibido) - int(abono)) if recibido is not None else 0,
             "abrir_cajon": metodo == "efectivo",
