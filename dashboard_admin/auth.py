@@ -38,9 +38,9 @@ _ENV = {
 # con require_view() (defensa en profundidad: current_view vive en session_state y
 # podría quedar "pegado" en una vista prohibida tras un cambio de rol).
 ROLE_VIEWS = {
-    ADMIN:  ["monitor", "menu", "mesas", "nuevo", "caja"],
-    CAJA:   ["monitor", "menu", "mesas", "nuevo", "caja"],
-    MESERO: ["nuevo", "mesas", "monitor", "menu"],  # sin caja
+    ADMIN:  ["monitor", "menu", "mesas", "nuevo", "caja", "meseros"],
+    CAJA:   ["monitor", "menu", "mesas", "nuevo", "caja", "meseros"],
+    MESERO: ["nuevo", "mesas", "monitor", "menu"],  # sin caja ni gestión de meseros
 }
 
 # Vista de aterrizaje por rol (la primera tarea de cada uno).

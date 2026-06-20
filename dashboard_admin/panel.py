@@ -19,7 +19,7 @@ from datetime import datetime
 import auth
 import mesero_keys
 from views import (pedidos, monitor_mesas, nuevo_pedido, menu, mesas, resumen,
-                   caja, cancelaciones)
+                   caja, cancelaciones, meseros)
 from db import fecha_larga
 
 load_dotenv()
@@ -441,6 +441,7 @@ NAV_LABELS = {
     "mesas":   "🪑 Mesas",
     "nuevo":   "➕ Nuevo pedido",
     "caja":    "💰 Caja",
+    "meseros": "👤 Meseros",
 }
 
 
@@ -470,6 +471,8 @@ def _dispatch(view: str):
         mesas.render()
     elif view == "nuevo":
         nuevo_pedido.render()
+    elif view == "meseros":
+        meseros.render()
 
 
 def _nav_item(label: str, view: str):
