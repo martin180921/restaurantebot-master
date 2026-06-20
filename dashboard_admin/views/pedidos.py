@@ -41,10 +41,24 @@ ESTADOS_ACTIVOS = ["pendiente", "en preparacion", "listo"]
 
 
 # ── DB: pedidos ────────────────────────────────────────────────────────────────
+# P-CAJA: cacheada con TTL corto. Antes era una lectura SIN caché que corría en
+# CADA rerun de los tres fragmentos en vivo (tablero, monitor, web) — uno por mesa
+# cada 30 s — y, peor, en CADA pulsación de los number_input del modal de cobro (un
+# rerun por tecla → un SELECT por tecla), lo que congelaba la caja bajo movimiento.
+# Con la caché: los reruns concurrentes comparten un único SELECT y las teclas del
+# modal no tocan la BD (el cálculo de cambio es Python puro e instantáneo). El TTL
+# de 8 s mantiene el refresco en vivo "suficientemente fresco"; las ESCRITURAS
+# llaman refrescar_pedidos() para que las acciones se reflejen al instante.
+@st.cache_data(ttl=8)
 def cargar_pedidos():
     with engine.connect() as conn:
         resultado = conn.execute(text("SELECT * FROM pedidos ORDER BY fecha DESC"))
         return pd.DataFrame(resultado.fetchall(), columns=resultado.keys())
+
+def refrescar_pedidos():
+    """Invalida la caché del tablero tras una escritura (cobro, avance, cancelación,
+    cambio de mesa) para que el cambio se vea en el siguiente run sin esperar el TTL."""
+    cargar_pedidos.clear()
 
 def avanzar_estado(pedido_id: int, estado_actual: str):
     siguiente = ESTADO_SIGUIENTE.get(estado_actual)
@@ -58,6 +72,7 @@ def avanzar_estado(pedido_id: int, estado_actual: str):
     # Arranca cocina (pendiente → en preparacion) → dispara la comanda al agente local.
     if estado_actual == "pendiente":
         enqueue_comanda(pedido_id)
+    refrescar_pedidos()
     flash(f"Pedido #{pedido_id} → {siguiente}", "✅")
     st.rerun()
 
@@ -71,15 +86,20 @@ def revertir_estado(pedido_id: int, estado_actual: str):
             text("UPDATE pedidos SET estado = :estado WHERE id = :id"),
             {"estado": anterior, "id": pedido_id}
         )
+    refrescar_pedidos()
     flash(f"Pedido #{pedido_id} → {anterior}", "↩️")
     st.rerun()
 
 def cancelar_pedido(pedido_id: int, motivo: str = ""):
+    # cancelled_at = NOW() sella la hora de la cancelación para el historial del
+    # administrador (Caja → Cancelaciones, agrupado por día).
     with engine.begin() as conn:
         conn.execute(
-            text("UPDATE pedidos SET estado = 'cancelado', motivo_cancelacion = :m WHERE id = :id"),
+            text("UPDATE pedidos SET estado = 'cancelado', motivo_cancelacion = :m, "
+                 "cancelled_at = NOW() WHERE id = :id"),
             {"m": (motivo or "").strip() or None, "id": pedido_id}
         )
+    refrescar_pedidos()
     flash(f"Pedido #{pedido_id} cancelado", "🗑️")
     st.rerun()
 
@@ -140,6 +160,34 @@ def registrar_pago(ids, monto, metodo="efectivo"):
         for u in _distribuir_abono(pendientes, monto):
             conn.execute(upd, {"total_pagado": u["total_pagado"], "pagado": u["pagado"], "id": u["id"]})
             conn.execute(ins, {"pedido_id": u["id"], "monto": u["aplicado"], "metodo": metodo})
+    # El cobro cambió saldos/ocupación → invalida el tablero para reflejarlo al instante.
+    refrescar_pedidos()
+
+
+# ── DB: cambio de mesa (transferir cuenta a otra mesa) ──────────────────────────
+# Mueve TODOS los pedidos activos de una mesa a otra reescribiendo su FK mesa_id en
+# UNA sola transacción (atómico: o se mueven todos, o ninguno). La ocupación de las
+# mesas es DERIVADA (una mesa está ocupada si tiene pedidos activos), así que al
+# reasignar la FK la mesa origen queda libre y la destino ocupada sin tocar ninguna
+# bandera. Acota a pedidos con saldo y sin cancelar para no arrastrar cuentas ya
+# cerradas; mover por 'ids' explícitos cubre también los pedidos heredados cuya
+# mesa_id era NULL (se les fija la mesa destino).
+def mover_mesa(ids, mesa_destino: int) -> int:
+    """Reasigna los pedidos 'ids' a 'mesa_destino'. Devuelve cuántos se movieron.
+    Solo toca pedidos no pagados y no cancelados (cuenta viva). Atómico."""
+    ids = [int(i) for i in ids]
+    mesa_destino = int(mesa_destino)
+    if not ids:
+        return 0
+    upd = text("""
+        UPDATE pedidos SET mesa_id = :destino
+        WHERE id IN :ids AND pagado = FALSE AND estado <> 'cancelado'
+    """).bindparams(bindparam("ids", expanding=True))
+    with engine.begin() as conn:
+        res = conn.execute(upd, {"destino": mesa_destino, "ids": ids})
+        movidos = res.rowcount or 0
+    refrescar_pedidos()
+    return movidos
 
 
 # ── Helpers visuales ───────────────────────────────────────────────────────────

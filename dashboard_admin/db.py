@@ -46,6 +46,10 @@ engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_recycle=1800)
 def _ensure_schema():
     with engine.begin() as conn:
         conn.execute(text("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS motivo_cancelacion TEXT"))
+        # cancelled_at: marca de tiempo de la cancelación, para el historial del
+        # administrador (agrupa los cancelados por día). Se rellena al cancelar; los
+        # cancelados previos a esta columna quedan NULL y caen bajo su 'fecha' de creación.
+        conn.execute(text("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP"))
         conn.execute(text("ALTER TABLE menu ADD COLUMN IF NOT EXISTS agotado_hasta DATE"))
         # pagado: cobro independiente del estado de cocina (lo usa el monitor de mesas).
         conn.execute(text("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS pagado BOOLEAN NOT NULL DEFAULT FALSE"))

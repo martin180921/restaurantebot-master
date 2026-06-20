@@ -108,6 +108,7 @@ def init_db():
                 fecha               TIMESTAMP    NOT NULL DEFAULT NOW(),
                 mesa_id             INTEGER      REFERENCES mesas(id),
                 motivo_cancelacion  TEXT,
+                cancelled_at        TIMESTAMP,
                 pagado              BOOLEAN      NOT NULL DEFAULT FALSE,
                 total_pagado        INTEGER      NOT NULL DEFAULT 0
             )
@@ -118,6 +119,11 @@ def init_db():
         ))
         conn.execute(text(
             "ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS motivo_cancelacion TEXT"
+        ))
+        # cancelled_at: hora de la cancelación, para el historial del panel
+        # (Caja → Cancelaciones, agrupado por día). Los cancelados previos quedan NULL.
+        conn.execute(text(
+            "ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP"
         ))
         # pagado: dimensión de cobro independiente del estado de cocina (el monitor
         # de mesas marca 'pagado' sin tocar el flujo pendiente→…→entregado).
