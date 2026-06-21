@@ -13,6 +13,7 @@ Uso:
 import argparse
 import json
 import os
+import socket
 import sys
 import time
 import signal
@@ -406,7 +407,8 @@ def reclamar_trabajo(conn, restaurante_id: int):
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
             """
-            UPDATE print_jobs SET estado = 'imprimiendo', intentos = intentos + 1
+            UPDATE print_jobs
+               SET estado = 'imprimiendo', intentos = intentos + 1, reclamado_at = NOW()
             WHERE id = (
                 SELECT id FROM print_jobs
                 WHERE restaurante_id = %s AND estado = 'pendiente'
@@ -473,6 +475,69 @@ def _imprimir_trabajo(conn, trabajo, printer_cfg) -> bool:
     return True
 
 
+# ── Mantenimiento de cola (janitor) + latido (heartbeat) ─────────────────────────
+def _ensure_agent_schema(conn) -> None:
+    """Garantiza las piezas que el agente necesita aunque arranque antes que el panel:
+    la columna reclamado_at (marca cuándo se tomó un job, para detectar atascos) y la
+    tabla agentes_estado (latido). El agente es autosuficiente: no depende del panel."""
+    with conn.cursor() as cur:
+        cur.execute("ALTER TABLE print_jobs ADD COLUMN IF NOT EXISTS reclamado_at TIMESTAMP")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS agentes_estado (
+                restaurante_id INTEGER   PRIMARY KEY,
+                hostname       VARCHAR(120),
+                visto_at       TIMESTAMP NOT NULL DEFAULT NOW(),
+                cola_pendiente INTEGER   NOT NULL DEFAULT 0
+            )
+        """)
+    conn.commit()
+
+
+def recuperar_huerfanos(conn, restaurante_id: int, max_intentos: int = 5) -> None:
+    """Janitor de cada ciclo. Dos limpiezas:
+    1) Jobs atascados en 'imprimiendo' > 2 min (el agente murió tras reclamar pero antes
+       de cerrar el estado) → vuelven a 'pendiente'. Se mide por reclamado_at (cuándo se
+       tomó), NO por creado_at, para no re-encolar un ticket que se está imprimiendo ahora.
+    2) Jobs en 'error' con intentos < max → vuelven a 'pendiente' (reintento de fallos
+       transitorios: sin papel, tapa abierta, USB suelto). Pasado el tope quedan 'error'
+       terminal para no reimprimir en bucle un payload imposible.
+    """
+    with conn.cursor() as cur:
+        cur.execute("""
+            UPDATE print_jobs SET estado = 'pendiente'
+            WHERE restaurante_id = %s AND estado = 'imprimiendo'
+              AND reclamado_at IS NOT NULL
+              AND reclamado_at < NOW() - INTERVAL '2 minutes'
+        """, (restaurante_id,))
+        huerfanos = cur.rowcount or 0
+        cur.execute("""
+            UPDATE print_jobs SET estado = 'pendiente'
+            WHERE restaurante_id = %s AND estado = 'error' AND intentos < %s
+        """, (restaurante_id, max_intentos))
+        reintentos = cur.rowcount or 0
+    conn.commit()
+    if huerfanos or reintentos:
+        print(f"[agent] janitor · {huerfanos} re-encolado(s) por atasco, "
+              f"{reintentos} reintento(s) de error")
+
+
+def heartbeat(conn, restaurante_id: int) -> None:
+    """Upsert del latido en agentes_estado: visto_at=NOW() + profundidad de cola pendiente.
+    El panel lo lee para pintar el badge '🟢 en línea / 🔴 sin conexión · N en cola'."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM print_jobs "
+                    "WHERE restaurante_id = %s AND estado = 'pendiente'", (restaurante_id,))
+        cola = int(cur.fetchone()[0])
+        cur.execute("""
+            INSERT INTO agentes_estado (restaurante_id, hostname, visto_at, cola_pendiente)
+            VALUES (%s, %s, NOW(), %s)
+            ON CONFLICT (restaurante_id) DO UPDATE
+              SET visto_at = NOW(), cola_pendiente = EXCLUDED.cola_pendiente,
+                  hostname = EXCLUDED.hostname
+        """, (restaurante_id, socket.gethostname()[:120], cola))
+    conn.commit()
+
+
 # ── Loop principal ───────────────────────────────────────────────────────────────
 _corriendo = True
 
@@ -532,6 +597,11 @@ def main() -> None:
         try:
             if conn is None or conn.closed:
                 conn = psycopg2.connect(cfg["DATABASE_URL"])
+                _ensure_agent_schema(conn)
+            # Cada ciclo: limpia atascos / reintenta errores transitorios y emite el latido
+            # (barato e indexado) ANTES de reclamar el siguiente trabajo.
+            recuperar_huerfanos(conn, restaurante_id)
+            heartbeat(conn, restaurante_id)
             trabajo = reclamar_trabajo(conn, restaurante_id)
         except Exception as exc:  # caída de BD → reintentar tras el sleep
             print(f"[agent] error de BD: {exc}")

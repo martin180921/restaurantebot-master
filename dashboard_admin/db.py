@@ -36,7 +36,20 @@ DATABASE_URL = _normalizar_db_url(os.getenv("DATABASE_URL"))
 RESTAURANTE_ID = int(os.getenv("RESTAURANTE_ID", "1"))
 # C5: pre_ping descarta conexiones muertas (Railway corta las inactivas) y
 # pool_recycle las renueva antes del timeout del servidor → sin 500s aleatorios.
-engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_recycle=1800)
+# P-POOL: techo de conexiones EXPLÍCITO por proceso. El pool por defecto de
+# SQLAlchemy (pool_size=5 + max_overflow=10) abre hasta 15 conexiones por proceso;
+# con tres servicios (panel, app_cliente, bot) sobre una sola Postgres pequeña eso
+# llega a 45 y agota el límite del plan → 'FATAL: too many connections' (cae todo).
+# Lo acotamos a 5+5=10/proceso y, con pool_timeout=10, una espera por contención
+# falla rápido con error claro en vez de congelar la UI de Streamlit indefinidamente.
+engine = create_engine(
+    DATABASE_URL,
+    pool_pre_ping=True,
+    pool_recycle=1800,
+    pool_size=5,
+    max_overflow=5,
+    pool_timeout=10,
+)
 
 
 # ── Esquema defensivo (F1/F6) ───────────────────────────────────────────────────
@@ -182,6 +195,10 @@ def _ensure_schema():
             "CREATE INDEX IF NOT EXISTS idx_print_jobs_tenant_estado "
             "ON print_jobs (restaurante_id, estado)"
         ))
+        # reclamado_at: hora en que el agente tomó el job (estado→'imprimiendo'). El janitor
+        # del agente la usa para detectar trabajos atascados sin re-encolar los que se están
+        # imprimiendo ahora (no sirve creado_at). Defensiva: el agente también la garantiza.
+        conn.execute(text("ALTER TABLE print_jobs ADD COLUMN IF NOT EXISTS reclamado_at TIMESTAMP"))
 
         # ── OVERHAUL DEL MENÚ (aditivo, defensivo) ───────────────────────────
         # El bot es el dueño canónico del esquema y siembra los datos; aquí solo
@@ -241,6 +258,110 @@ def _ensure_schema():
         conn.execute(text(
             "CREATE INDEX IF NOT EXISTS idx_pedidos_tipo_entrega ON pedidos (tipo_entrega)"
         ))
+
+        # ── FASE 1: control anti-fraude, auditoría y personal ────────────────
+        # Bloqueo anti-skimming + descuento autorizado en pedidos.
+        #   cobro_iniciado     → TRUE en cuanto la cuenta toca caja (se abre el cobro o
+        #                        se aplica un descuento). Una vez TRUE, cancelar queda
+        #                        bloqueado (igual que con un abono) → evita anular ventas
+        #                        ya cobradas para quedarse el efectivo.
+        #   descuento_valor    → rebaja acumulada (gross = total + descuento_valor).
+        #   tipo/motivo/autoriza→ tipo de rebaja, justificación y admin que la autorizó.
+        for _col, _ddl in [
+            ("cobro_iniciado",     "BOOLEAN NOT NULL DEFAULT FALSE"),
+            ("descuento_valor",    "INTEGER NOT NULL DEFAULT 0"),
+            ("tipo_descuento",     "VARCHAR(20)"),
+            ("motivo_descuento",   "TEXT"),
+            ("descuento_autoriza", "VARCHAR(120)"),
+        ]:
+            conn.execute(text(f"ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS {_col} {_ddl}"))
+
+        # Índices del tablero en vivo: el SELECT activo filtra por estado, saldo y fecha
+        # de hoy; sin estos cae en seq-scan de toda la tabla bajo carga (ver pedidos.py).
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_pedidos_estado ON pedidos (estado)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_pedidos_fecha ON pedidos (fecha DESC)"))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_pedidos_no_pagado ON pedidos (pagado) "
+            "WHERE pagado = FALSE"
+        ))
+
+        # empleados: perfiles PERSISTENTES de personal (mesero/caja/admin) con PIN propio
+        # (hash). Distinto de claves_mesero (PIN efímero de turno, legado): un empleado no
+        # se revoca al cerrar caja. Es la fuente de identidad del actor en la auditoría.
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS empleados (
+                id         SERIAL      PRIMARY KEY,
+                nombre     VARCHAR(120) NOT NULL,
+                rol        VARCHAR(20)  NOT NULL DEFAULT 'mesero',
+                pin_hash   VARCHAR(64)  NOT NULL,
+                activo     BOOLEAN      NOT NULL DEFAULT TRUE,
+                creado     TIMESTAMP    NOT NULL DEFAULT NOW(),
+                creado_por VARCHAR(120)
+            )
+        """))
+        conn.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_empleados_pin ON empleados (pin_hash)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_empleados_activo ON empleados (activo)"
+        ))
+
+        # sesiones_empleado: marcaje de entrada/salida (clock-in/out). login_at al entrar,
+        # logout_at al salir; 'activa' = en turno ahora. Snapshot de nombre/rol para que el
+        # histórico sobreviva a cambios de perfil. Como mucho una sesión activa por empleado.
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS sesiones_empleado (
+                id          SERIAL    PRIMARY KEY,
+                empleado_id INTEGER   REFERENCES empleados(id),
+                nombre      VARCHAR(120),
+                rol         VARCHAR(20),
+                login_at    TIMESTAMP NOT NULL DEFAULT NOW(),
+                logout_at   TIMESTAMP,
+                activa      BOOLEAN   NOT NULL DEFAULT TRUE
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_sesiones_emp_activa ON sesiones_empleado (activa)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_sesiones_emp_login ON sesiones_empleado (login_at DESC)"
+        ))
+
+        # auditoria: LIBRO MAYOR central de eventos críticos. Una fila por evento con
+        # actor (nombre+rol), acción, entidad afectada y un JSONB 'detalle' con el diff /
+        # metadatos. Lo escriben las acciones de dominio (cobrar, cancelar, descuento,
+        # clock-in/out, alta/baja de empleado, movimientos de caja). Append-only.
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS auditoria (
+                id             SERIAL      PRIMARY KEY,
+                ts             TIMESTAMP   NOT NULL DEFAULT NOW(),
+                actor_nombre   VARCHAR(120),
+                actor_rol      VARCHAR(20),
+                accion         VARCHAR(40) NOT NULL,
+                entidad        VARCHAR(40),
+                entidad_id     INTEGER,
+                detalle        JSONB,
+                restaurante_id INTEGER     NOT NULL DEFAULT 1
+            )
+        """))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_auditoria_ts ON auditoria (ts DESC)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_auditoria_accion ON auditoria (accion)"))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_auditoria_actor ON auditoria (actor_nombre)"
+        ))
+
+        # agentes_estado: latido (heartbeat) del Agente de Impresión Local. El agente hace
+        # upsert de su estado en cada ciclo de polling (visto_at + profundidad de cola); el
+        # panel lo lee para pintar un badge "🟢 en línea / 🔴 sin conexión". Una fila por
+        # restaurante (PK = restaurante_id). Lo crea también el agente de forma defensiva.
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS agentes_estado (
+                restaurante_id INTEGER   PRIMARY KEY,
+                hostname       VARCHAR(120),
+                visto_at       TIMESTAMP NOT NULL DEFAULT NOW(),
+                cola_pendiente INTEGER   NOT NULL DEFAULT 0
+            )
+        """))
 
 try:
     _ensure_schema()

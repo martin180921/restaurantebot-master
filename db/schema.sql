@@ -10,7 +10,7 @@
 --
 -- Es idempotente: seguro de correr en una base nueva o ya existente (todo es
 -- CREATE/ALTER ... IF NOT EXISTS y los seeds están guardados). Crea exactamente
--- las mismas 11 tablas, columnas e índices que el código, y siembra los 12
+-- las mismas 15 tablas, columnas e índices que el código, y siembra los 12
 -- componentes del Plato del Día y los 4 ajustes de precios/recargo.
 --
 -- NOTA: a diferencia del bot, NO inserta los 3 platos de ejemplo del menú; arranca
@@ -92,9 +92,18 @@ CREATE TABLE IF NOT EXISTS pedidos (
     metodo_pago         VARCHAR(20),
     paga_con            INTEGER,
     fee                 INTEGER      NOT NULL DEFAULT 0,
-    nota_general        TEXT
+    nota_general        TEXT,
+    cobro_iniciado      BOOLEAN      NOT NULL DEFAULT FALSE,  -- anti-skimming: bloquea cancelar
+    descuento_valor     INTEGER      NOT NULL DEFAULT 0,      -- rebaja acumulada (gross=total+esto)
+    tipo_descuento      VARCHAR(20),                          -- monto | porcentaje | cortesia
+    motivo_descuento    TEXT,                                 -- justificación obligatoria
+    descuento_autoriza  VARCHAR(120)                          -- admin que autorizó la rebaja
 );
 CREATE INDEX IF NOT EXISTS idx_pedidos_tipo_entrega ON pedidos (tipo_entrega);
+-- Índices del tablero en vivo (lectura acotada por estado / saldo / fecha de hoy).
+CREATE INDEX IF NOT EXISTS idx_pedidos_estado    ON pedidos (estado);
+CREATE INDEX IF NOT EXISTS idx_pedidos_fecha     ON pedidos (fecha DESC);
+CREATE INDEX IF NOT EXISTS idx_pedidos_no_pagado ON pedidos (pagado) WHERE pagado = FALSE;
 
 -- Libro de abonos (método + hora real de pago).
 CREATE TABLE IF NOT EXISTS pagos (
@@ -184,9 +193,62 @@ CREATE TABLE IF NOT EXISTS print_jobs (
     intentos       INTEGER     NOT NULL DEFAULT 0,
     error_msg      TEXT,
     creado_at      TIMESTAMP   DEFAULT CURRENT_TIMESTAMP,
+    reclamado_at   TIMESTAMP,                 -- hora del claim (estado→imprimiendo); janitor
     impreso_at     TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_print_jobs_tenant_estado ON print_jobs (restaurante_id, estado);
+
+-- ── FASE 1: auditoría, personal y heartbeat del agente ──────────────────────
+-- Perfiles PERSISTENTES de personal (mesero/caja/admin) con PIN propio (hash). Fuente de
+-- identidad del actor en la auditoría. Distinto de claves_mesero (PIN efímero de turno).
+CREATE TABLE IF NOT EXISTS empleados (
+    id         SERIAL       PRIMARY KEY,
+    nombre     VARCHAR(120) NOT NULL,
+    rol        VARCHAR(20)  NOT NULL DEFAULT 'mesero',
+    pin_hash   VARCHAR(64)  NOT NULL,
+    activo     BOOLEAN      NOT NULL DEFAULT TRUE,
+    creado     TIMESTAMP    NOT NULL DEFAULT NOW(),
+    creado_por VARCHAR(120)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_empleados_pin ON empleados (pin_hash);
+CREATE INDEX IF NOT EXISTS idx_empleados_activo ON empleados (activo);
+
+-- Marcaje entrada/salida (clock-in/out). Una sesión activa como mucho por empleado.
+CREATE TABLE IF NOT EXISTS sesiones_empleado (
+    id          SERIAL    PRIMARY KEY,
+    empleado_id INTEGER   REFERENCES empleados(id),
+    nombre      VARCHAR(120),
+    rol         VARCHAR(20),
+    login_at    TIMESTAMP NOT NULL DEFAULT NOW(),
+    logout_at   TIMESTAMP,
+    activa      BOOLEAN   NOT NULL DEFAULT TRUE
+);
+CREATE INDEX IF NOT EXISTS idx_sesiones_emp_activa ON sesiones_empleado (activa);
+CREATE INDEX IF NOT EXISTS idx_sesiones_emp_login  ON sesiones_empleado (login_at DESC);
+
+-- Libro mayor central de eventos críticos (append-only): quién, qué, cuándo, sobre qué.
+CREATE TABLE IF NOT EXISTS auditoria (
+    id             SERIAL      PRIMARY KEY,
+    ts             TIMESTAMP   NOT NULL DEFAULT NOW(),
+    actor_nombre   VARCHAR(120),
+    actor_rol      VARCHAR(20),
+    accion         VARCHAR(40) NOT NULL,
+    entidad        VARCHAR(40),
+    entidad_id     INTEGER,
+    detalle        JSONB,
+    restaurante_id INTEGER     NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_auditoria_ts     ON auditoria (ts DESC);
+CREATE INDEX IF NOT EXISTS idx_auditoria_accion ON auditoria (accion);
+CREATE INDEX IF NOT EXISTS idx_auditoria_actor  ON auditoria (actor_nombre);
+
+-- Latido (heartbeat) del Agente de Impresión Local: una fila por restaurante.
+CREATE TABLE IF NOT EXISTS agentes_estado (
+    restaurante_id INTEGER   PRIMARY KEY,
+    hostname       VARCHAR(120),
+    visto_at       TIMESTAMP NOT NULL DEFAULT NOW(),
+    cola_pendiente INTEGER   NOT NULL DEFAULT 0
+);
 
 -- ── Upgrade de tablas preexistentes (idempotente) ───────────────────────────
 -- Si menu/pedidos YA existían (base de datos en uso), los CREATE de arriba no los
@@ -210,6 +272,13 @@ ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS fee INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS nota_general TEXT;
 ALTER TABLE pagos   ADD COLUMN IF NOT EXISTS submetodo VARCHAR(20);
 ALTER TABLE pagos   ADD COLUMN IF NOT EXISTS comprobante VARCHAR(60);
+-- FASE 1: anti-skimming + descuentos en pedidos, y reclamado_at en la cola de impresión.
+ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS cobro_iniciado BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS descuento_valor INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS tipo_descuento VARCHAR(20);
+ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS motivo_descuento TEXT;
+ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS descuento_autoriza VARCHAR(120);
+ALTER TABLE print_jobs ADD COLUMN IF NOT EXISTS reclamado_at TIMESTAMP;
 
 -- ── Seeds (idempotentes) ────────────────────────────────────────────────────
 INSERT INTO ajustes (clave, valor) VALUES

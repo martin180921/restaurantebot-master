@@ -89,20 +89,47 @@ def role_from_credentials(password: str) -> str | None:
 
 
 # ── Sesión (por conexión: solo st.session_state) ────────────────────────────────
-def login(role: str) -> None:
+# Identidad del ACTOR (FASE 1): nombre + rol que la auditoría estampa en cada evento.
+# Vive en session_state (puro, sin BD). El marcaje de turno (sesiones_empleado) y la
+# escritura del log los orquesta panel.py/empleados.py, que SÍ tocan BD; auth solo
+# guarda la identidad para que audit.registrar() sepa a quién atribuir la acción.
+_ROL_LABEL = {ADMIN: "Admin (maestro)", CAJA: "Caja (maestro)", MESERO: "Mesero"}
+
+
+def _set_actor(nombre: str, rol: str) -> None:
+    st.session_state["actor_nombre"] = nombre
+    st.session_state["actor_rol"] = rol
+
+
+def login(role: str, nombre: str = None) -> None:
     """Marca la sesión autenticada SOLO en session_state (esta pestaña/dispositivo).
-    Ya no se escribe nada en la URL → el enlace no es una credencial compartible."""
+    Ya no se escribe nada en la URL → el enlace no es una credencial compartible.
+    'nombre' identifica al actor en la auditoría (default: etiqueta genérica del rol)."""
     st.session_state["autenticado"] = True
     st.session_state["user_role"] = role
-    st.session_state.pop("mesero_key_id", None)  # limpia un PIN previo si cambia de rol
+    st.session_state.pop("mesero_key_id", None)   # limpia un PIN previo si cambia de rol
+    st.session_state.pop("empleado_id", None)
+    _set_actor(nombre or _ROL_LABEL.get(role, role), role)
 
 
-def login_mesero(key_id: int) -> None:
-    """Autentica como mesero contra un PIN de turno. Guarda el id de la clave para
-    revalidarla en cada run (revocación inmediata desde caja)."""
+def login_empleado(emp: dict) -> None:
+    """Autentica con un perfil de empleado persistente (empleados.py): rol e identidad
+    salen del perfil, así la auditoría atribuye cada acción a la persona concreta."""
+    st.session_state["autenticado"] = True
+    st.session_state["user_role"] = emp["rol"]
+    st.session_state["empleado_id"] = int(emp["id"])
+    st.session_state.pop("mesero_key_id", None)
+    _set_actor(emp["nombre"], emp["rol"])
+
+
+def login_mesero(key_id: int, nombre: str = None) -> None:
+    """Autentica como mesero contra un PIN de turno EFÍMERO (legado). Guarda el id de la
+    clave para revalidarla en cada run (revocación inmediata desde caja)."""
     st.session_state["autenticado"] = True
     st.session_state["user_role"] = MESERO
     st.session_state["mesero_key_id"] = int(key_id)
+    st.session_state.pop("empleado_id", None)
+    _set_actor(nombre or _ROL_LABEL[MESERO], MESERO)
 
 
 def logout() -> None:
@@ -114,12 +141,19 @@ def logout() -> None:
         except KeyError:
             pass
     st.session_state["autenticado"] = False
-    st.session_state.pop("user_role", None)
-    st.session_state.pop("mesero_key_id", None)
+    for k in ("user_role", "mesero_key_id", "empleado_id",
+              "actor_nombre", "actor_rol", "sesion_id"):
+        st.session_state.pop(k, None)
 
 
 def current_role() -> str | None:
     return st.session_state.get("user_role")
+
+
+def actor() -> tuple:
+    """(nombre, rol) del usuario en sesión, para la auditoría. Defaults seguros."""
+    rol = current_role() or ""
+    return (st.session_state.get("actor_nombre") or _ROL_LABEL.get(rol, "Desconocido"), rol)
 
 
 # ── Comprobaciones (las usan el router y las vistas) ─────────────────────────────

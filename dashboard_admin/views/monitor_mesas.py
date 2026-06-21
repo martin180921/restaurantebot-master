@@ -462,7 +462,7 @@ def _detalle_pedido(row, idx: int):
     </div>
     """, unsafe_allow_html=True)
 
-    b1, b2, b3, b4, b5 = st.columns(5)
+    b1, b2, b3, b4, b5, b6 = st.columns(6)
     with b1:
         btn_label = pedidos.ESTADO_LABEL_BTN.get(estado)
         if btn_label and st.button(btn_label, key=f"avanzar_{uid}", type="primary",
@@ -479,6 +479,12 @@ def _detalle_pedido(row, idx: int):
                 disabled=saldo <= 0):
             pedidos.dialog_cobrar([pid], f"Pedido #{pid}", saldo, uid)
     with b4:
+        # Descuento / cortesía: solo cajero/admin y con saldo; el modal exige PIN de admin.
+        if auth.can("cobrar") and saldo > 0 and st.button(
+                "🏷️ Descuento", key=f"descuento_{uid}", use_container_width=True,
+                help="Descuento o cortesía (requiere PIN de administrador)"):
+            pedidos.dialog_descuento(pid, saldo, uid)
+    with b5:
         # Reimprimir la comanda de cocina (atasco / ticket perdido) sin cambiar de estado.
         # Solo aplica a pedidos en cocina (ESTADOS_ACTIVOS).
         if estado in pedidos.ESTADOS_ACTIVOS and st.button(
@@ -487,10 +493,16 @@ def _detalle_pedido(row, idx: int):
             pedidos.enqueue_comanda(pid)
             pedidos.flash(f"Comanda reenviada · Pedido #{pid}", "🍳")
             st.rerun()
-    with b5:
-        # Fase 3: modal centrado en vez de aviso inline (compartido con el tablero).
-        if st.button("✕ Cancelar", key=f"cancelar_{uid}", use_container_width=True):
-            pedidos.dialog_cancelar(pid, uid)
+    with b6:
+        # Anti-skimming: si la cuenta ya tocó caja (cobro iniciado / abono / pago), el
+        # botón queda BLOQUEADO. Fase 3: modal centrado compartido con el tablero.
+        if pedidos.puede_cancelar(row):
+            if st.button("✕ Cancelar", key=f"cancelar_{uid}", use_container_width=True):
+                pedidos.dialog_cancelar(pid, uid)
+        else:
+            st.button("🔒 En caja", key=f"cancelar_{uid}", use_container_width=True,
+                      disabled=True,
+                      help="No se puede cancelar: la cuenta ya entró a caja (anti-fraude).")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -627,7 +639,7 @@ def _web_card(row, idx: int):
     </div>
     """, unsafe_allow_html=True)
 
-    b1, b2, b3, b4, b5 = st.columns(5)
+    b1, b2, b3, b4, b5, b6 = st.columns(6)
     with b1:
         btn_label = pedidos.ESTADO_LABEL_BTN.get(estado)
         if btn_label and st.button(btn_label, key=f"avanzar_{uid}", type="primary",
@@ -643,6 +655,11 @@ def _web_card(row, idx: int):
                 disabled=saldo <= 0):
             pedidos.dialog_cobrar([pid], f"Pedido #{pid}", saldo, uid)
     with b4:
+        if auth.can("cobrar") and saldo > 0 and st.button(
+                "🏷️ Descuento", key=f"descuento_{uid}", use_container_width=True,
+                help="Descuento o cortesía (requiere PIN de administrador)"):
+            pedidos.dialog_descuento(pid, saldo, uid)
+    with b5:
         # Reimprimir la comanda de cocina del pedido web (atasco / ticket perdido).
         if estado in pedidos.ESTADOS_ACTIVOS and st.button(
                 "🍳 Comanda", key=f"comanda_{uid}", use_container_width=True,
@@ -650,6 +667,12 @@ def _web_card(row, idx: int):
             pedidos.enqueue_comanda(pid)
             pedidos.flash(f"Comanda reenviada · Pedido #{pid}", "🍳")
             st.rerun()
-    with b5:
-        if st.button("✕ Cancelar", key=f"cancelar_{uid}", use_container_width=True):
-            pedidos.dialog_cancelar(pid, uid)
+    with b6:
+        # Anti-skimming: bloqueado si la cuenta ya tocó caja (cobro iniciado / abono / pago).
+        if pedidos.puede_cancelar(row):
+            if st.button("✕ Cancelar", key=f"cancelar_{uid}", use_container_width=True):
+                pedidos.dialog_cancelar(pid, uid)
+        else:
+            st.button("🔒 En caja", key=f"cancelar_{uid}", use_container_width=True,
+                      disabled=True,
+                      help="No se puede cancelar: la cuenta ya entró a caja (anti-fraude).")

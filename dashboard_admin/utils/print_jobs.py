@@ -80,6 +80,49 @@ def enqueue_recibo(ids, titulo: str, total: int, abono: int, metodo: str,
         pass
 
 
+# ── Salud del Agente de Impresión Local (heartbeat) ─────────────────────────────
+# El agente hace upsert de su latido en agentes_estado en cada ciclo de polling. Aquí
+# lo leemos para que el panel muestre si está vivo y cuánto tiene en cola, en vez de
+# enterarnos de que está caído porque un cliente se quedó sin recibo.
+def estado_agente(restaurante_id=None) -> dict | None:
+    """{online, visto_at, cola_pendiente, segundos} del agente local, o None si nunca
+    latió. 'online' = visto en los últimos 30 s (el agente late cada ~2 s)."""
+    rid = int(restaurante_id if restaurante_id is not None else RESTAURANTE_ID)
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(text(
+                "SELECT visto_at, cola_pendiente, "
+                "       EXTRACT(EPOCH FROM (NOW() - visto_at)) AS seg "
+                "FROM agentes_estado WHERE restaurante_id = :r"
+            ), {"r": rid}).mappings().first()
+    except Exception:
+        return None
+    if not row:
+        return None
+    seg = int(row["seg"] or 0)
+    return {"online": seg <= 30, "visto_at": row["visto_at"],
+            "cola_pendiente": int(row["cola_pendiente"] or 0), "segundos": seg}
+
+
+def badge_agente_html(estado: dict | None = "__auto__") -> str:
+    """Badge HTML de salud del agente para incrustar en una vista (Caja/Monitor)."""
+    if estado == "__auto__":
+        estado = estado_agente()
+    base = ("display:inline-block; padding:4px 12px; border-radius:999px; "
+            "font-size:0.75rem; font-weight:600; border:1px solid;")
+    if not estado:
+        return (f'<span style="{base} background:#f3f4f6; color:#6b7280; border-color:#e5e7eb;">'
+                '🖨️ Agente de impresión: sin datos</span>')
+    cola = estado["cola_pendiente"]
+    cola_txt = f' · {cola} en cola' if cola else ''
+    if estado["online"]:
+        return (f'<span style="{base} background:#dcfce7; color:#15803d; border-color:#bbf7d0;">'
+                f'🟢 Agente en línea{cola_txt}</span>')
+    mins = max(1, estado["segundos"] // 60)
+    return (f'<span style="{base} background:#fee2e2; color:#b91c1c; border-color:#fecaca;">'
+            f'🔴 Agente sin conexión (~{mins} min){cola_txt}</span>')
+
+
 def enqueue_comanda(pedido_id: int) -> None:
     """Encola la comanda de cocina de un pedido (al pasar a 'en preparacion').
 

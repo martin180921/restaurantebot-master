@@ -14,8 +14,11 @@ import json
 import html
 
 import auth
+import audit
+import empleados
 import mesero_keys
 from db import engine, fmt_money, flash, saldo_pedido
+from utils.print_jobs import badge_agente_html
 from views import pedidos
 
 
@@ -60,15 +63,18 @@ def abrir_caja(monto_apertura: int) -> bool:
     # Candado de capacidad (RBAC): solo admin/caja gestionan el arqueo.
     if not auth.can("manage_caja"):
         return False
+    nuevo_id = None
     with engine.begin() as conn:
         existe = conn.execute(text(
             "SELECT 1 FROM cierres_caja WHERE estado = 'abierto' LIMIT 1"
         )).first()
         if existe:
             return False
-        conn.execute(text(
-            "INSERT INTO cierres_caja (monto_apertura, estado) VALUES (:m, 'abierto')"
-        ), {"m": int(monto_apertura)})
+        nuevo_id = conn.execute(text(
+            "INSERT INTO cierres_caja (monto_apertura, estado) VALUES (:m, 'abierto') RETURNING id"
+        ), {"m": int(monto_apertura)}).scalar_one()
+    audit.registrar("caja_apertura", "caja", int(nuevo_id) if nuevo_id else None,
+                    {"monto_apertura": int(monto_apertura)})
     return True
 
 
@@ -92,8 +98,14 @@ def cerrar_caja(cierre_id: int, efectivo_esperado: int, transferencia_esperada: 
             "dif": int(diferencia), "id": int(cierre_id),
         })
     # Cierre de caja = fin de jornada → revoca todos los PINs de turno del mesero
-    # (barrido de fin de día). Cada mesero conectado se desloguea en su próximo run.
+    # (barrido de fin de día) y marca la SALIDA de todo el personal en turno (clock-out
+    # masivo). Cada mesero conectado se desloguea en su próximo run.
     mesero_keys.revocar_todas()
+    cerradas = empleados.cerrar_todas_sesiones()
+    audit.registrar("caja_cierre", "caja", int(cierre_id),
+                    {"efectivo_real": int(efectivo_real),
+                     "transferencia_real": int(transferencia_real),
+                     "diferencia": int(diferencia), "sesiones_cerradas": int(cerradas)})
 
 
 def cierres_recientes(n: int = 8):
@@ -129,23 +141,35 @@ def _actor_rol() -> str:
     return auth.current_role() or ""
 
 
+def _actor_nombre() -> str:
+    """Nombre del operador en sesión (para el libro mayor)."""
+    n, _ = audit.actor()
+    return n
+
+
 def registrar_gasto(cierre_id: int, monto: int, motivo: str, actor_nombre: str = None):
     """Retiro de efectivo del cajón (gasto/imprevisto). Queda 'abierto' hasta que se
     registre la devolución del cambio sobrante."""
     if not auth.can("manage_caja"):
         return
+    # 'actor_nombre' = quién retira (puede ser un tercero); si va vacío, el operador en sesión.
+    quien = (actor_nombre or "").strip() or _actor_nombre()
     with engine.begin() as conn:
         conn.execute(text(
             "INSERT INTO movimientos_caja (cierre_id, tipo, monto, motivo, actor_rol, "
             "actor_nombre, estado) VALUES (:c, 'gasto', :m, :mo, :ar, :an, 'abierto')"
         ), {"c": int(cierre_id), "m": int(monto), "mo": (motivo or "").strip() or None,
-            "ar": _actor_rol(), "an": (actor_nombre or "").strip() or None})
+            "ar": _actor_rol(), "an": quien})
+    audit.registrar("gasto_caja", "caja", int(cierre_id),
+                    {"monto": int(monto), "motivo": (motivo or "").strip() or None,
+                     "retira": quien})
 
 
 def registrar_reingreso(gasto_id: int, monto: int):
     """Devuelve al cajón el cambio sobrante de un gasto y lo marca 'cerrado'. Atómico."""
     if not auth.can("manage_caja"):
         return
+    cid = None
     with engine.begin() as conn:
         ref = conn.execute(text(
             "SELECT cierre_id FROM movimientos_caja WHERE id = :id AND tipo = 'gasto' "
@@ -153,13 +177,16 @@ def registrar_reingreso(gasto_id: int, monto: int):
         ), {"id": int(gasto_id)}).mappings().first()
         if not ref:
             return
+        cid = ref["cierre_id"]
         if int(monto) > 0:
             conn.execute(text(
                 "INSERT INTO movimientos_caja (cierre_id, tipo, monto, ref_id, actor_rol, "
                 "estado) VALUES (:c, 'reingreso_gasto', :m, :ref, :ar, 'cerrado')"
-            ), {"c": ref["cierre_id"], "m": int(monto), "ref": int(gasto_id), "ar": _actor_rol()})
+            ), {"c": cid, "m": int(monto), "ref": int(gasto_id), "ar": _actor_rol()})
         conn.execute(text("UPDATE movimientos_caja SET estado = 'cerrado' WHERE id = :id"),
                      {"id": int(gasto_id)})
+    audit.registrar("reingreso_gasto", "caja", int(cid) if cid is not None else None,
+                    {"gasto_id": int(gasto_id), "monto": int(monto)})
 
 
 def registrar_base_repartidor(cierre_id: int, monto: int, nombre: str, pedidos_ids=None):
@@ -176,6 +203,9 @@ def registrar_base_repartidor(cierre_id: int, monto: int, nombre: str, pedidos_i
         ), {"c": int(cierre_id), "m": int(monto), "ar": _actor_rol(),
             "an": (nombre or "").strip() or None,
             "pr": (json.dumps(ids) if ids else None)})
+    audit.registrar("base_repartidor", "caja", int(cierre_id),
+                    {"monto": int(monto), "repartidor": (nombre or "").strip() or None,
+                     "pedidos": ids})
 
 
 def registrar_retorno_base(base_id: int, monto: int):
@@ -184,6 +214,7 @@ def registrar_retorno_base(base_id: int, monto: int):
     que no se usó. Atómico (lee la base con FOR UPDATE y la marca 'cerrado')."""
     if not auth.can("manage_caja"):
         return
+    cid = None
     with engine.begin() as conn:
         ref = conn.execute(text(
             "SELECT cierre_id FROM movimientos_caja WHERE id = :id "
@@ -191,13 +222,16 @@ def registrar_retorno_base(base_id: int, monto: int):
         ), {"id": int(base_id)}).mappings().first()
         if not ref:
             return
+        cid = ref["cierre_id"]
         if int(monto) > 0:
             conn.execute(text(
                 "INSERT INTO movimientos_caja (cierre_id, tipo, monto, ref_id, actor_rol, "
                 "estado) VALUES (:c, 'retorno_base', :m, :ref, :ar, 'cerrado')"
-            ), {"c": ref["cierre_id"], "m": int(monto), "ref": int(base_id), "ar": _actor_rol()})
+            ), {"c": cid, "m": int(monto), "ref": int(base_id), "ar": _actor_rol()})
         conn.execute(text("UPDATE movimientos_caja SET estado = 'cerrado' WHERE id = :id"),
                      {"id": int(base_id)})
+    audit.registrar("retorno_base", "caja", int(cid) if cid is not None else None,
+                    {"base_id": int(base_id), "monto": int(monto)})
 
 
 # ── Pedidos de domicilio para el flujo del repartidor ───────────────────────────
@@ -565,6 +599,13 @@ def render():
     )
     st.markdown('<div class="section-title">💰 Caja · cierre de turno</div>',
                 unsafe_allow_html=True)
+
+    # Salud del Agente de Impresión Local (heartbeat): el cajero ve de un vistazo si los
+    # recibos van a salir y cuántos hay en cola, sin enterarse por un cliente sin ticket.
+    st.markdown(
+        f'<div style="margin:-4px 0 12px 0;">{badge_agente_html()}</div>',
+        unsafe_allow_html=True,
+    )
 
     cierre = cierre_activo()
 

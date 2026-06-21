@@ -17,9 +17,11 @@ from dotenv import load_dotenv
 from datetime import datetime
 
 import auth
+import audit
+import empleados
 import mesero_keys
 from views import (pedidos, monitor_mesas, nuevo_pedido, menu, mesas, resumen,
-                   caja, cancelaciones, meseros)
+                   caja, cancelaciones, meseros, reporte_personal)
 from db import fecha_larga
 
 load_dotenv()
@@ -31,6 +33,29 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed"
 )
+
+
+# ── Marcaje de turno (clock-in / clock-out) + auditoría de sesión ────────────────
+# El login abre una sesión de turno (sesiones_empleado) y la anota en el libro mayor; el
+# logout la cierra. Vive en panel.py (no en auth.py, que se mantiene sin dependencias de
+# BD): aquí sí tenemos empleados/audit. Tolerante a fallos: un marcaje que falle NO impide
+# entrar ni salir.
+def _abrir_turno(nombre: str, rol: str, empleado_id=None) -> None:
+    sid = empleados.abrir_sesion(nombre, rol, empleado_id)
+    st.session_state["sesion_id"] = sid
+    audit.registrar("clock_in", "sesion", sid, {"nombre": nombre, "rol": rol})
+
+
+def _logout() -> None:
+    """Cierra el turno (clock-out + auditoría) y luego limpia la sesión de auth."""
+    sid = st.session_state.get("sesion_id")
+    if sid:
+        info = empleados.cerrar_sesion(sid)
+        if info:
+            audit.registrar("clock_out", "sesion", sid,
+                            {"nombre": info.get("nombre"), "rol": info.get("rol")})
+    auth.logout()
+
 
 # ── Login y resolución de rol (RBAC) ─────────────────────────────────────────────
 # Sesión POR CONEXIÓN: la autenticación vive SOLO en st.session_state (ver auth.py). Ya
@@ -85,18 +110,31 @@ if not st.session_state["autenticado"]:
             label_visibility="collapsed", key="login_input"
         )
         if st.button("Entrar", key="btn_login"):
-            # admin/caja por contraseña de entorno; el mesero por PIN de turno (efímero).
-            rol = auth.role_from_credentials(password_input)
-            if rol:
+            # Orden de resolución: (1) empleado con PIN propio (perfil persistente), (2)
+            # contraseña de rol de entorno (admin/caja maestro), (3) PIN de turno efímero
+            # del mesero (legado). El primero que valide gana; cada login abre turno.
+            emp = empleados.validar_pin(password_input)
+            rol = None if emp else auth.role_from_credentials(password_input)
+            key_id = None if (emp or rol) else mesero_keys.validar_clave(password_input)
+            if emp:
+                auth.login_empleado(emp)
+                _abrir_turno(emp["nombre"], emp["rol"], emp["id"])
+                st.rerun()
+            elif rol:
                 auth.login(rol)
+                nombre, r = auth.actor()
+                _abrir_turno(nombre, r)
+                st.rerun()
+            elif key_id:
+                # Etiqueta del acceso efímero → identifica al mesero en la auditoría.
+                etiqueta = next((k.get("etiqueta") for k in mesero_keys.claves_activas()
+                                 if int(k["id"]) == int(key_id)), None)
+                auth.login_mesero(key_id, etiqueta)
+                nombre, r = auth.actor()
+                _abrir_turno(nombre, r)
                 st.rerun()
             else:
-                key_id = mesero_keys.validar_clave(password_input)
-                if key_id:
-                    auth.login_mesero(key_id)
-                    st.rerun()
-                else:
-                    st.error("Contraseña o PIN incorrecto")
+                st.error("Contraseña o PIN incorrecto")
     st.stop()
 
 # A partir de aquí la sesión está autenticada. Si por alguna razón quedó marcada como
@@ -104,14 +142,17 @@ if not st.session_state["autenticado"]:
 # redeploy en caliente), forzamos un re-login limpio en lugar de romper.
 role = st.session_state.get("user_role")
 if not role:
-    auth.logout()
+    _logout()
     st.rerun()
 
-# Revalidación del PIN de mesero en CADA run: si su clave de turno fue revocada (a mano
-# o al cerrar la caja), lo deslogueamos en el acto (revocación inmediata). Otros roles
-# (admin/caja) no dependen de claves de turno.
-if role == auth.MESERO and not mesero_keys.clave_activa(st.session_state.get("mesero_key_id")):
-    auth.logout()
+# Revalidación en CADA run del mesero con PIN de turno EFÍMERO: si su clave fue revocada
+# (a mano o al cerrar la caja), lo deslogueamos en el acto. Solo aplica a sesiones con
+# clave efímera (mesero_key_id); un mesero con perfil de EMPLEADO (PIN propio) no tiene
+# clave efímera, así que se salta este control (su acceso lo rige empleados.activo). Otros
+# roles (admin/caja) tampoco dependen de claves de turno.
+if (role == auth.MESERO and st.session_state.get("mesero_key_id")
+        and not mesero_keys.clave_activa(st.session_state.get("mesero_key_id"))):
+    _logout()
     st.rerun()
 
 # ── Auto-refresh (30s) — C1 + P2 + P4 ──────────────────────────────────────────
@@ -441,7 +482,7 @@ NAV_LABELS = {
     "mesas":   "🪑 Mesas",
     "nuevo":   "➕ Nuevo pedido",
     "caja":    "💰 Caja",
-    "meseros": "👤 Meseros",
+    "meseros": "👤 Personal",
 }
 
 
@@ -453,14 +494,16 @@ def _dispatch(view: str):
         # Caja + Resumen. La pestaña Resumen (métricas de venta) SOLO se instancia si
         # el rol puede ver ingresos; caja la pierde por completo (no se crea el tab).
         if auth.can("see_revenue"):
-            tab_caja, tab_resumen, tab_cancel = st.tabs(
-                ["💰 Caja", "📊 Resumen", "🚫 Cancelaciones"])
+            tab_caja, tab_resumen, tab_cancel, tab_personal = st.tabs(
+                ["💰 Caja", "📊 Resumen", "🚫 Cancelaciones", "👥 Personal"])
             with tab_caja:
                 caja.render()
             with tab_resumen:
                 resumen.render()
             with tab_cancel:
                 cancelaciones.render()
+            with tab_personal:
+                reporte_personal.render()
         else:
             caja.render()
     elif view == "monitor":
@@ -516,7 +559,7 @@ def _render_mobile_shell():
                     '<div class="nav-brand-sub">Mesero</div>', unsafe_allow_html=True)
     with top_r:
         if st.button("Salir", key="btn_logout_m", use_container_width=True):
-            auth.logout()
+            _logout()
             st.rerun()
 
     vistas = auth.allowed_views(role)
@@ -552,7 +595,7 @@ def _render_desktop_shell():
                 _nav_item(NAV_LABELS[v], v)
             st.divider()
             if st.button("Salir", key="btn_logout", use_container_width=True):
-                auth.logout()
+                _logout()
                 st.rerun()
 
     with col_content:

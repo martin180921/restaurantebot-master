@@ -8,8 +8,10 @@ import html
 from datetime import datetime
 
 import auth
+import audit
+import empleados
 from db import (engine, fmt_money, fecha_corta, flash, drain_toasts,
-                saldo_pedido, cobrado_pedido)
+                saldo_pedido, cobrado_pedido, _es_pagado, _a_entero)
 from utils.print_jobs import enqueue_recibo, enqueue_comanda
 from utils.items import (formatear_items_html, lineas_por_categoria,
                          parse_items, etiqueta_item)
@@ -58,8 +60,21 @@ ESTADOS_ACTIVOS = ["pendiente", "en preparacion", "listo"]
 # llaman refrescar_pedidos() para que las acciones se reflejen al instante.
 @st.cache_data(ttl=8)
 def cargar_pedidos():
+    # P-SCALE: lectura ACOTADA en el servidor (antes 'SELECT * FROM pedidos' sin filtro
+    # cargaba la tabla entera en cada cache-miss → crecía sin límite y congelaba la caja
+    # a los meses). El tablero en vivo solo necesita: lo que está en cocina, lo que tiene
+    # saldo pendiente (de cualquier día) y todo lo de HOY (para stats/ventas del día). El
+    # histórico completo lo sirven las vistas de Resumen/Cancelaciones con su propia query.
+    # Apoyado en idx_pedidos_estado / idx_pedidos_fecha / idx_pedidos_no_pagado.
     with engine.connect() as conn:
-        resultado = conn.execute(text("SELECT * FROM pedidos ORDER BY fecha DESC"))
+        resultado = conn.execute(text("""
+            SELECT * FROM pedidos
+            WHERE estado IN ('pendiente', 'en preparacion', 'listo')
+               OR (pagado = FALSE AND total > COALESCE(total_pagado, 0)
+                   AND estado <> 'cancelado')
+               OR fecha::date = CURRENT_DATE
+            ORDER BY fecha DESC
+        """))
         return pd.DataFrame(resultado.fetchall(), columns=resultado.keys())
 
 def refrescar_pedidos():
@@ -96,18 +111,137 @@ def revertir_estado(pedido_id: int, estado_actual: str):
     flash(f"Pedido #{pedido_id} → {anterior}", "↩️")
     st.rerun()
 
+# ── Regla anti-skimming (FASE 1) ────────────────────────────────────────────────
+# Una vez que la cuenta TOCÓ CAJA no se puede cancelar: cobro iniciado (se abrió el
+# checkout), abono parcial (total_pagado>0) o pago completo (pagado). Es el control
+# contra el robo hormiga clásico: cobrar al cliente, anular la venta y quedarse el
+# efectivo. La regla se aplica en la UI (botón bloqueado) Y aquí en el servidor (un id
+# forzado por otra ruta no la salta).
+def puede_cancelar(row) -> bool:
+    """True si el pedido está 'limpio' (sin interacción de caja) y por tanto cancelable.
+    Acepta filas pandas o dict; defensivo ante columnas faltantes pre-migración."""
+    if _es_pagado(row.get("pagado", False)):
+        return False
+    if _a_entero(row.get("total_pagado", 0)) > 0:
+        return False
+    if _es_pagado(row.get("cobro_iniciado", False)):   # bool seguro ante None/NaN
+        return False
+    return True
+
+
+def marcar_cobro_iniciado(ids) -> None:
+    """Sella cobro_iniciado=TRUE en cuanto la cuenta entra al checkout (abrir el modal de
+    cobro o aplicar un descuento). A partir de aquí la cancelación queda bloqueada. Solo
+    audita la primera vez que un id cambia de estado (no en cada rerun del modal)."""
+    ids = [int(i) for i in ids]
+    if not ids:
+        return
+    upd = text(
+        "UPDATE pedidos SET cobro_iniciado = TRUE "
+        "WHERE id IN :ids AND COALESCE(cobro_iniciado, FALSE) = FALSE AND estado <> 'cancelado'"
+    ).bindparams(bindparam("ids", expanding=True))
+    try:
+        with engine.begin() as conn:
+            n = conn.execute(upd, {"ids": ids}).rowcount or 0
+        if n:
+            refrescar_pedidos()
+            audit.registrar("checkout_iniciado", "pedido", ids[0], {"ids": ids})
+    except Exception:
+        pass
+
+
 def cancelar_pedido(pedido_id: int, motivo: str = ""):
     # cancelled_at = NOW() sella la hora de la cancelación para el historial del
-    # administrador (Caja → Cancelaciones, agrupado por día).
+    # administrador (Caja → Cancelaciones, agrupado por día). Guard anti-skimming en
+    # transacción (FOR UPDATE): si entre la lectura de la UI y este punto la cuenta tocó
+    # caja, se rechaza. La cancelación se anota en el libro mayor con el actor.
+    pedido_id = int(pedido_id)
+    bloqueado = False
+    total_canc = 0
     with engine.begin() as conn:
-        conn.execute(
-            text("UPDATE pedidos SET estado = 'cancelado', motivo_cancelacion = :m, "
-                 "cancelled_at = NOW() WHERE id = :id"),
-            {"m": (motivo or "").strip() or None, "id": pedido_id}
-        )
+        row = conn.execute(text(
+            "SELECT total, COALESCE(total_pagado, 0) AS tp, pagado, "
+            "COALESCE(cobro_iniciado, FALSE) AS ci, estado "
+            "FROM pedidos WHERE id = :id FOR UPDATE"
+        ), {"id": pedido_id}).mappings().first()
+        if not row or row["estado"] == "cancelado":
+            return
+        if row["pagado"] or int(row["tp"]) > 0 or row["ci"]:
+            bloqueado = True
+        else:
+            total_canc = int(row["total"])
+            conn.execute(
+                text("UPDATE pedidos SET estado = 'cancelado', motivo_cancelacion = :m, "
+                     "cancelled_at = NOW() WHERE id = :id"),
+                {"m": (motivo or "").strip() or None, "id": pedido_id}
+            )
+    if bloqueado:
+        # Defensa en profundidad: la UI ya oculta el botón, pero si se llega aquí avisamos.
+        flash("🔒 No se puede cancelar: la cuenta ya entró a caja.", "🔒")
+        st.rerun()
+        return
     refrescar_pedidos()
+    audit.registrar("cancelar_pedido", "pedido", pedido_id,
+                    {"motivo": (motivo or "").strip() or None, "total": total_canc})
     flash(f"Pedido #{pedido_id} cancelado", "🗑️")
     st.rerun()
+
+
+# ── Descuentos y cortesías autorizados (FASE 1) ─────────────────────────────────
+# Rebaja del saldo de un pedido, desbloqueada solo con PIN de administrador (lo valida
+# el modal con empleados.admin_pin_valido) y con justificación obligatoria. Recalcula el
+# total NETO (el saldo baja en la rebaja) conservando la rebaja acumulada en
+# descuento_valor (gross = total + descuento_valor) y deja rastro en el libro mayor.
+TIPOS_DESCUENTO = {"monto", "porcentaje", "cortesia"}
+
+
+def aplicar_descuento(pedido_id: int, tipo: str, valor, motivo: str, autoriza: str) -> tuple:
+    """Aplica una rebaja autorizada y devuelve (ok, mensaje).
+    tipo: 'monto' (COP fijos) | 'porcentaje' (% del total actual) | 'cortesia' (comp del
+    saldo restante → saldo 0). Marca cobro_iniciado (la cuenta entró a caja). Atómico."""
+    pedido_id = int(pedido_id)
+    tipo = (tipo or "").lower()
+    if tipo not in TIPOS_DESCUENTO:
+        return False, "Tipo de descuento inválido."
+    with engine.begin() as conn:
+        row = conn.execute(text(
+            "SELECT total, COALESCE(total_pagado, 0) AS tp, COALESCE(descuento_valor, 0) AS dv, "
+            "pagado, estado FROM pedidos WHERE id = :id FOR UPDATE"
+        ), {"id": pedido_id}).mappings().first()
+        if not row or row["estado"] == "cancelado":
+            return False, "Pedido no disponible."
+        if row["pagado"]:
+            return False, "El pedido ya está pagado por completo."
+        total, tp, dv = int(row["total"]), int(row["tp"]), int(row["dv"])
+        saldo = max(0, total - tp)
+        if saldo <= 0:
+            return False, "No hay saldo por descontar."
+        if tipo == "monto":
+            rebaja = min(int(valor or 0), saldo)
+        elif tipo == "porcentaje":
+            pct = max(0, min(100, int(valor or 0)))
+            rebaja = min(saldo, round(total * pct / 100))
+        else:  # cortesia → comp del saldo restante
+            rebaja = saldo
+        rebaja = int(rebaja)
+        if rebaja <= 0:
+            return False, "El descuento calculado es $0."
+        nuevo_total = total - rebaja
+        saldado = nuevo_total <= tp          # si el neto ya está cubierto, queda pagado
+        conn.execute(text(
+            "UPDATE pedidos SET total = :t, descuento_valor = :dv, tipo_descuento = :tp_, "
+            "motivo_descuento = :mo, descuento_autoriza = :au, cobro_iniciado = TRUE, "
+            "pagado = :pg WHERE id = :id"
+        ), {"t": nuevo_total, "dv": dv + rebaja, "tp_": tipo,
+            "mo": (motivo or "").strip()[:500] or None, "au": (autoriza or "")[:120],
+            "pg": bool(saldado), "id": pedido_id})
+    refrescar_pedidos()
+    audit.registrar("cortesia" if tipo == "cortesia" else "descuento", "pedido", pedido_id,
+                    {"tipo": tipo, "valor": int(valor or 0), "monto": rebaja,
+                     "total_antes": total, "total_despues": nuevo_total,
+                     "motivo": (motivo or "").strip() or None, "autoriza": autoriza})
+    etiqueta = "Cortesía" if tipo == "cortesia" else "Descuento"
+    return True, f"{etiqueta} aplicado · −${fmt_money(rebaja)}"
 
 
 # ── DB: cobro (pagos completos y parciales) ─────────────────────────────────────
@@ -529,6 +663,14 @@ def dialog_cobrar(ids, titulo, total, uid):
     ids = [int(i) for i in ids]
     total = max(0, int(total))
 
+    # Anti-skimming: abrir el checkout SELLA cobro_iniciado (bloquea cancelar). Se hace una
+    # sola vez por apertura del modal (flag de sesión) para no escribir en cada rerun de
+    # tecla — el modal se re-ejecuta con cada number_input y no debe pegarle a la BD por tecla.
+    _lock_key = f"_cobro_lock_{uid}"
+    if not st.session_state.get(_lock_key):
+        marcar_cobro_iniciado(ids)
+        st.session_state[_lock_key] = True
+
     st.markdown(f"**{html.escape(str(titulo))}**")
     st.markdown(
         '<div style="font-size:0.78rem; color:#6b7280; text-transform:uppercase; '
@@ -694,6 +836,15 @@ def dialog_cobrar(ids, titulo, total, uid):
             enqueue_recibo(ids, titulo, total, abono, metodo_pago,
                            recibido=recibe if es_efectivo else None,
                            submetodo=submetodo_val, comprobante=comprobante_val)
+            # Libro mayor: el cobro queda atribuido al cajero (base del informe de personal).
+            # 'monto' = lo abonado ahora; lo agrega reporte_personal por actor.
+            audit.registrar("cobrar", "pedido", ids[0], {
+                "ids": ids, "titulo": str(titulo), "monto": int(abono),
+                "metodo": metodo_pago, "submetodo": submetodo_val,
+                "saldo_antes": int(total), "saldo_despues": int(max(0, total - abono)),
+                "por_plato": bool(por_plato),
+            })
+            st.session_state.pop(f"_cobro_lock_{uid}", None)
             if abono >= total:
                 flash(f"Pago completo · {titulo} · ${fmt_money(total)}", "💵")
             else:
@@ -701,6 +852,66 @@ def dialog_cobrar(ids, titulo, total, uid):
             st.rerun()
     with c2:
         if st.button("Cancelar", key=f"volver_cobrar_{uid}", use_container_width=True):
+            st.rerun()
+
+
+# ── Modal de descuento / cortesía (gated por PIN de admin) ──────────────────────
+@st.dialog("🏷️ Descuento / Cortesía")
+def dialog_descuento(pedido_id: int, saldo: int, uid: str):
+    # Capacidad base (cobrar) + autorización fuerte por PIN de admin dentro del modal.
+    if not auth.can("cobrar"):
+        st.error("🔒 No tienes permiso.")
+        return
+    pedido_id, saldo = int(pedido_id), int(saldo)
+    st.markdown(f"Saldo actual del pedido **#{pedido_id}**: "
+                f"<b style='color:#1a1a1a;'>${fmt_money(saldo)}</b>", unsafe_allow_html=True)
+    if saldo <= 0:
+        st.info("Este pedido no tiene saldo por descontar.")
+        if st.button("Cerrar", key=f"desc_cerrar_{uid}", use_container_width=True):
+            st.rerun()
+        return
+
+    st.caption("Tipo de ajuste")
+    _TIPOS = {"💲 Monto fijo": "monto", "％ Porcentaje": "porcentaje",
+              "🎁 Cortesía (comp. total)": "cortesia"}
+    tipo_label = st.radio("Tipo", list(_TIPOS.keys()), horizontal=True,
+                          label_visibility="collapsed", key=f"desc_tipo_{uid}")
+    tipo = _TIPOS[tipo_label]
+
+    if tipo == "monto":
+        valor = int(st.number_input("Monto a descontar ($)", min_value=0, max_value=saldo,
+                                    value=0, step=1000, format="%d", key=f"desc_val_{uid}") or 0)
+    elif tipo == "porcentaje":
+        valor = int(st.number_input("Porcentaje (%)", min_value=0, max_value=100, value=0,
+                                    step=5, format="%d", key=f"desc_pct_{uid}") or 0)
+        st.caption(f"≈ −${fmt_money(round(saldo * valor / 100))} sobre el saldo actual.")
+    else:
+        st.info(f"Cortesía: se comparán los ${fmt_money(saldo)} restantes (saldo → $0).")
+        valor = saldo
+
+    motivo = st.text_input("Justificación (obligatoria)", key=f"desc_motivo_{uid}",
+                           placeholder="Ej: cortesía gerencia, demora en cocina, queja…")
+    st.caption("🔐 Requiere PIN de administrador. Queda registrado en la auditoría a su nombre.")
+    admin_pin = st.text_input("PIN de administrador", type="password", key=f"desc_pin_{uid}")
+
+    falta_valor = (tipo != "cortesia" and valor <= 0)
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("🏷️ Aplicar", key=f"desc_apply_{uid}", type="primary",
+                     use_container_width=True,
+                     disabled=(not motivo.strip() or falta_valor)):
+            autoriza = empleados.admin_pin_valido(admin_pin)
+            if not autoriza:
+                st.error("PIN de administrador inválido.")
+            else:
+                ok, msg = aplicar_descuento(pedido_id, tipo, valor, motivo, autoriza)
+                if ok:
+                    flash(msg, "🏷️")
+                    st.rerun()
+                else:
+                    st.error(msg)
+    with c2:
+        if st.button("Cancelar", key=f"desc_volver_{uid}", use_container_width=True):
             st.rerun()
 
 
