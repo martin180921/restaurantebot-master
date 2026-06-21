@@ -59,6 +59,9 @@ _CAPS = {
     "see_revenue": {ADMIN},
     # edit_menu: crear/editar/eliminar/togglear platos y componentes.
     "edit_menu":   {ADMIN, CAJA},
+    # manage_empleados: crear/dar de baja/regenerar PIN de perfiles de personal. SOLO
+    # admin (caja conserva la generación de PINs de turno EFÍMEROS, no perfiles fijos).
+    "manage_empleados": {ADMIN},
 }
 
 

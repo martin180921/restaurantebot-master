@@ -51,6 +51,10 @@ def render():
     st.markdown('<div class="section-title">👥 Personal · actividad y auditoría</div>',
                 unsafe_allow_html=True)
 
+    # Finaliza sesiones sin latido (pestañas cerradas sin "Salir") antes de calcular horas,
+    # fijando su salida en el último momento visto → horas exactas y "en turno" fiel.
+    empleados.cerrar_sesiones_inactivas()
+
     # ── 1. En turno ahora (clock-in en vivo) ────────────────────────────────────
     activos = empleados.sesiones_activas()
     if activos:

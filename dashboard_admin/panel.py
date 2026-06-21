@@ -57,6 +57,16 @@ def _logout() -> None:
     auth.logout()
 
 
+@st.fragment(run_every="60s")
+def _latido_sesion() -> None:
+    """Latido de presencia: mientras esta pestaña siga abierta, refresca ultima_actividad
+    cada 60 s (solo se re-ejecuta ESTE fragmento, no toda la app). Si el empleado cierra la
+    pestaña sin pulsar "Salir", el latido se detiene y su sesión pasa a FUERA de turno tras
+    SESION_TIMEOUT_MIN (empleados.sesiones_activas la oculta; cerrar_sesiones_inactivas la
+    finaliza). No pinta nada."""
+    empleados.tocar_sesion(st.session_state.get("sesion_id"))
+
+
 # ── Login y resolución de rol (RBAC) ─────────────────────────────────────────────
 # Sesión POR CONEXIÓN: la autenticación vive SOLO en st.session_state (ver auth.py). Ya
 # no se lee la URL — un enlace compartido o una pestaña nueva arrancan sin sesión y deben
@@ -614,6 +624,10 @@ def _render_desktop_shell():
         )
         pedidos.render()
 
+
+# Latido de presencia (clock-in/out en vivo): mantiene "en turno" mientras la pestaña esté
+# abierta y la marca fuera de turno en cuanto se cierre. Solo se re-ejecuta este fragmento.
+_latido_sesion()
 
 # ── Branch raíz por rol (arregla el layout de 3 columnas en móvil) ───────────────
 if role == auth.MESERO:

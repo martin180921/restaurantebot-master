@@ -311,15 +311,27 @@ def _ensure_schema():
         # histórico sobreviva a cambios de perfil. Como mucho una sesión activa por empleado.
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS sesiones_empleado (
-                id          SERIAL    PRIMARY KEY,
-                empleado_id INTEGER   REFERENCES empleados(id),
-                nombre      VARCHAR(120),
-                rol         VARCHAR(20),
-                login_at    TIMESTAMP NOT NULL DEFAULT NOW(),
-                logout_at   TIMESTAMP,
-                activa      BOOLEAN   NOT NULL DEFAULT TRUE
+                id               SERIAL    PRIMARY KEY,
+                empleado_id      INTEGER   REFERENCES empleados(id),
+                nombre           VARCHAR(120),
+                rol              VARCHAR(20),
+                login_at         TIMESTAMP NOT NULL DEFAULT NOW(),
+                logout_at        TIMESTAMP,
+                ultima_actividad TIMESTAMP NOT NULL DEFAULT NOW(),
+                activa           BOOLEAN   NOT NULL DEFAULT TRUE
             )
         """))
+        # ultima_actividad: latido de presencia. El panel lo refresca cada ~60 s mientras
+        # la pestaña sigue abierta; una sesión sin latido reciente se considera FUERA de
+        # turno (el empleado cerró la pestaña sin pulsar "Salir"). Defensiva si la tabla se
+        # creó en un deploy anterior sin esta columna.
+        conn.execute(text(
+            "ALTER TABLE sesiones_empleado ADD COLUMN IF NOT EXISTS ultima_actividad TIMESTAMP"
+        ))
+        conn.execute(text(
+            "UPDATE sesiones_empleado SET ultima_actividad = COALESCE(ultima_actividad, login_at) "
+            "WHERE ultima_actividad IS NULL"
+        ))
         conn.execute(text(
             "CREATE INDEX IF NOT EXISTS idx_sesiones_emp_activa ON sesiones_empleado (activa)"
         ))

@@ -20,6 +20,11 @@ from db import engine
 
 ROLES_VALIDOS = ("mesero", "caja", "admin")
 
+# Minutos sin latido tras los cuales una sesión se considera FUERA de turno (el empleado
+# cerró la pestaña sin pulsar "Salir"). El panel late cada ~60 s, así que 3 min tolera un
+# latido perdido. "Salir" cierra la sesión en el acto, sin esperar este umbral.
+SESION_TIMEOUT_MIN = 3
+
 
 def _hash(pin: str) -> str:
     return hashlib.sha256(str(pin or "").strip().encode()).hexdigest()
@@ -190,6 +195,40 @@ def abrir_sesion(nombre: str, rol: str, empleado_id=None) -> int | None:
         return None
 
 
+def tocar_sesion(sesion_id) -> None:
+    """Latido de presencia: refresca ultima_actividad de la sesión. Lo llama el panel cada
+    ~60 s mientras la pestaña esté abierta. Tolerante a fallos (un latido perdido no rompe
+    nada: lo cubre el umbral SESION_TIMEOUT_MIN)."""
+    if not sesion_id:
+        return
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(
+                "UPDATE sesiones_empleado SET ultima_actividad = NOW() "
+                "WHERE id = :id AND activa = TRUE"
+            ), {"id": int(sesion_id)})
+    except Exception:
+        pass
+
+
+def cerrar_sesiones_inactivas(minutos: int = SESION_TIMEOUT_MIN) -> int:
+    """Finaliza (clock-out) las sesiones activas SIN latido en 'minutos': el empleado dejó
+    la pestaña abierta o la cerró sin pulsar "Salir". logout_at = ultima_actividad (su
+    último momento real visto) para que las horas del informe queden exactas. Devuelve
+    cuántas cerró. Tolerante a fallos → 0."""
+    try:
+        with engine.begin() as conn:
+            res = conn.execute(text(
+                "UPDATE sesiones_empleado SET activa = FALSE, "
+                "logout_at = COALESCE(ultima_actividad, login_at) "
+                "WHERE activa = TRUE "
+                f"AND COALESCE(ultima_actividad, login_at) < NOW() - INTERVAL '{int(minutos)} minutes'"
+            ))
+        return res.rowcount or 0
+    except Exception:
+        return 0
+
+
 def cerrar_sesion(sesion_id) -> dict | None:
     """Marca salida (clock-out) de una sesión y devuelve {nombre, rol} para auditar.
     Tolerante a fallos → None."""
@@ -220,13 +259,17 @@ def cerrar_todas_sesiones() -> int:
 
 
 def sesiones_activas() -> list:
-    """[{id, empleado_id, nombre, rol, login_at}] de quién está en turno AHORA.
+    """[{id, empleado_id, nombre, rol, login_at}] de quién está en turno AHORA = sesión
+    abierta Y con latido reciente (dentro de SESION_TIMEOUT_MIN). Una sesión cuya pestaña
+    se cerró deja de latir y desaparece de aquí aunque aún no se haya finalizado en BD.
     Tolerante a fallos."""
     try:
         with engine.connect() as conn:
             rows = conn.execute(text(
                 "SELECT id, empleado_id, nombre, rol, login_at FROM sesiones_empleado "
-                "WHERE activa = TRUE ORDER BY login_at"
+                "WHERE activa = TRUE "
+                f"AND COALESCE(ultima_actividad, login_at) > NOW() - INTERVAL '{SESION_TIMEOUT_MIN} minutes' "
+                "ORDER BY login_at"
             )).mappings().all()
         return [dict(r) for r in rows]
     except Exception:

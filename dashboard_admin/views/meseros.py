@@ -88,10 +88,18 @@ def render():
         unsafe_allow_html=True,
     )
 
+    # Solo el ADMINISTRADOR crea/gestiona perfiles de empleado. Caja conserva los accesos
+    # de turno efímeros (abajo) para dar acceso temporal a un mesero sin perfil fijo.
+    puede_gestionar = auth.can("manage_empleados")
+
     _mostrar_pin_generado()
 
-    if st.button("➕ Nuevo empleado", key="btn_nuevo_emp", use_container_width=True):
-        _dialog_nuevo_empleado()
+    if puede_gestionar:
+        if st.button("➕ Nuevo empleado", key="btn_nuevo_emp", use_container_width=True):
+            _dialog_nuevo_empleado()
+    else:
+        st.caption("🔒 Solo un administrador puede crear o gestionar perfiles de empleado. "
+                   "Como caja puedes generar accesos de turno efímeros (más abajo).")
 
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown('<div class="section-title">Empleados</div>', unsafe_allow_html=True)
@@ -108,22 +116,30 @@ def render():
         nombre = str(e["nombre"])
         rol = str(e["rol"])
         activo = bool(e["activo"])
-        turno = " · 🟢 en turno" if eid in en_turno else ""
-        borde = "#16a34a" if activo else "#9ca3af"
-        estado_txt = "" if activo else " · inactivo"
+        # Estado de sesión en vivo: En turno (latido reciente) / Fuera de turno / inactivo.
+        if not activo:
+            estado_chip = '<span style="color:#9ca3af;"> · perfil inactivo</span>'
+            borde = "#9ca3af"
+        elif eid in en_turno:
+            estado_chip = '<span style="color:#16a34a;"> · 🟢 En turno</span>'
+            borde = "#16a34a"
+        else:
+            estado_chip = '<span style="color:#9ca3af;"> · ⚪ Fuera de turno</span>'
+            borde = "#d1d5db"
         col_a, col_b, col_c = st.columns([3, 1, 1])
         with col_a:
             st.markdown(
                 f'<div class="order-card" style="border-left:4px solid {borde};">'
                 f'<div style="font-size:0.9rem; color:#1a1a1a; font-weight:600;">'
                 f'{_ROL_LABEL.get(rol, rol)} · {html.escape(nombre)}'
-                f'<span style="color:#6b7280; font-weight:400; font-size:0.8rem;">'
-                f'{turno}{estado_txt}</span></div></div>',
+                f'<span style="font-weight:400; font-size:0.8rem;">{estado_chip}</span>'
+                f'</div></div>',
                 unsafe_allow_html=True,
             )
+        # Acciones de perfil: SOLO admin (manage_empleados). Caja ve el roster en solo lectura.
         with col_b:
-            if activo and st.button("🔑 Nuevo PIN", key=f"regen_{eid}",
-                                    use_container_width=True):
+            if puede_gestionar and activo and st.button("🔑 Nuevo PIN", key=f"regen_{eid}",
+                                                        use_container_width=True):
                 pin, err = empleados.regenerar_pin(eid)
                 if err:
                     st.session_state["_emp_msg"] = err
@@ -132,8 +148,8 @@ def render():
                     st.session_state["_emp_pin"] = (nombre, rol, pin)
                 st.rerun()
         with col_c:
-            if activo and st.button("⏹ Dar de baja", key=f"baja_{eid}",
-                                    use_container_width=True):
+            if puede_gestionar and activo and st.button("⏹ Dar de baja", key=f"baja_{eid}",
+                                                        use_container_width=True):
                 if empleados.desactivar_empleado(eid):
                     audit.registrar("empleado_baja", "empleado", eid, {"nombre": nombre})
                     flash(f"Empleado dado de baja · {nombre}", "⏹")

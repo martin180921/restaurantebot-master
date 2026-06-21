@@ -215,13 +215,14 @@ CREATE INDEX IF NOT EXISTS idx_empleados_activo ON empleados (activo);
 
 -- Marcaje entrada/salida (clock-in/out). Una sesión activa como mucho por empleado.
 CREATE TABLE IF NOT EXISTS sesiones_empleado (
-    id          SERIAL    PRIMARY KEY,
-    empleado_id INTEGER   REFERENCES empleados(id),
-    nombre      VARCHAR(120),
-    rol         VARCHAR(20),
-    login_at    TIMESTAMP NOT NULL DEFAULT NOW(),
-    logout_at   TIMESTAMP,
-    activa      BOOLEAN   NOT NULL DEFAULT TRUE
+    id               SERIAL    PRIMARY KEY,
+    empleado_id      INTEGER   REFERENCES empleados(id),
+    nombre           VARCHAR(120),
+    rol              VARCHAR(20),
+    login_at         TIMESTAMP NOT NULL DEFAULT NOW(),
+    logout_at        TIMESTAMP,
+    ultima_actividad TIMESTAMP NOT NULL DEFAULT NOW(),  -- latido de presencia (en turno)
+    activa           BOOLEAN   NOT NULL DEFAULT TRUE
 );
 CREATE INDEX IF NOT EXISTS idx_sesiones_emp_activa ON sesiones_empleado (activa);
 CREATE INDEX IF NOT EXISTS idx_sesiones_emp_login  ON sesiones_empleado (login_at DESC);
@@ -279,6 +280,7 @@ ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS tipo_descuento VARCHAR(20);
 ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS motivo_descuento TEXT;
 ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS descuento_autoriza VARCHAR(120);
 ALTER TABLE print_jobs ADD COLUMN IF NOT EXISTS reclamado_at TIMESTAMP;
+ALTER TABLE sesiones_empleado ADD COLUMN IF NOT EXISTS ultima_actividad TIMESTAMP;
 
 -- ── Seeds (idempotentes) ────────────────────────────────────────────────────
 INSERT INTO ajustes (clave, valor) VALUES
