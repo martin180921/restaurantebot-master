@@ -305,6 +305,12 @@ def _ensure_schema():
         conn.execute(text(
             "CREATE INDEX IF NOT EXISTS idx_empleados_activo ON empleados (activo)"
         ))
+        # bloqueado: acceso cerrado por el cajero al terminar el turno (el PIN no entra y
+        # su sesión se mata) hasta que se reactiva. Distinto de activo=FALSE (baja
+        # permanente): un empleado bloqueado sigue en la nómina, solo sin acceso ahora.
+        conn.execute(text(
+            "ALTER TABLE empleados ADD COLUMN IF NOT EXISTS bloqueado BOOLEAN NOT NULL DEFAULT FALSE"
+        ))
 
         # sesiones_empleado: marcaje de entrada/salida (clock-in/out). login_at al entrar,
         # logout_at al salir; 'activa' = en turno ahora. Snapshot de nombre/rol para que el

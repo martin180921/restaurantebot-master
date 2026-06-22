@@ -97,11 +97,13 @@ def cerrar_caja(cierre_id: int, efectivo_esperado: int, transferencia_esperada: 
             "er": int(efectivo_real), "tr": int(transferencia_real),
             "dif": int(diferencia), "id": int(cierre_id),
         })
-    # Cierre de caja = fin de jornada → revoca todos los PINs de turno del mesero
-    # (barrido de fin de día) y marca la SALIDA de todo el personal en turno (clock-out
-    # masivo). Cada mesero conectado se desloguea en su próximo run.
+    # Cierre de caja = fin de jornada → barrido de acceso de meseros: revoca los PINs de
+    # turno EFÍMEROS, BLOQUEA el PIN de los meseros con perfil, y marca la SALIDA de todo el
+    # personal (clock-out masivo) EXCEPTO el propio cajero que cierra. Cada mesero conectado
+    # se desloguea en su próximo run; ningún mesero vuelve a entrar hasta que se reactive.
     mesero_keys.revocar_todas()
-    cerradas = empleados.cerrar_todas_sesiones()
+    empleados.bloquear_meseros()
+    cerradas = empleados.cerrar_todas_sesiones(excepto=st.session_state.get("sesion_id"))
     audit.registrar("caja_cierre", "caja", int(cierre_id),
                     {"efectivo_real": int(efectivo_real),
                      "transferencia_real": int(transferencia_real),

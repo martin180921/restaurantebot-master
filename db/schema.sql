@@ -207,11 +207,13 @@ CREATE TABLE IF NOT EXISTS empleados (
     rol        VARCHAR(20)  NOT NULL DEFAULT 'mesero',
     pin_hash   VARCHAR(64)  NOT NULL,
     activo     BOOLEAN      NOT NULL DEFAULT TRUE,
+    bloqueado  BOOLEAN      NOT NULL DEFAULT FALSE,  -- acceso cerrado por caja hasta reactivar
     creado     TIMESTAMP    NOT NULL DEFAULT NOW(),
     creado_por VARCHAR(120)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_empleados_pin ON empleados (pin_hash);
 CREATE INDEX IF NOT EXISTS idx_empleados_activo ON empleados (activo);
+ALTER TABLE empleados ADD COLUMN IF NOT EXISTS bloqueado BOOLEAN NOT NULL DEFAULT FALSE;
 
 -- Marcaje entrada/salida (clock-in/out). Una sesión activa como mucho por empleado.
 CREATE TABLE IF NOT EXISTS sesiones_empleado (

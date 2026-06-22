@@ -116,17 +116,22 @@ def render():
         nombre = str(e["nombre"])
         rol = str(e["rol"])
         activo = bool(e["activo"])
-        # Estado de sesión en vivo: En turno (latido reciente) / Fuera de turno / inactivo.
+        bloqueado = bool(e.get("bloqueado"))
+        # Estado en vivo: inactivo / acceso cerrado (bloqueado) / En turno / Fuera de turno.
         if not activo:
             estado_chip = '<span style="color:#9ca3af;"> · perfil inactivo</span>'
             borde = "#9ca3af"
+        elif bloqueado:
+            estado_chip = '<span style="color:#b45309;"> · 🔒 Acceso cerrado</span>'
+            borde = "#d97706"
         elif eid in en_turno:
             estado_chip = '<span style="color:#16a34a;"> · 🟢 En turno</span>'
             borde = "#16a34a"
         else:
             estado_chip = '<span style="color:#9ca3af;"> · ⚪ Fuera de turno</span>'
             borde = "#d1d5db"
-        col_a, col_b, col_c = st.columns([3, 1, 1])
+        # Tarjeta + 3 acciones: Salida/Reactivar (caja+admin) · Nuevo PIN · Baja (admin).
+        col_a, col_acc, col_pin, col_baja = st.columns([3, 1.3, 1, 1])
         with col_a:
             st.markdown(
                 f'<div class="order-card" style="border-left:4px solid {borde};">'
@@ -136,8 +141,25 @@ def render():
                 f'</div></div>',
                 unsafe_allow_html=True,
             )
-        # Acciones de perfil: SOLO admin (manage_empleados). Caja ve el roster en solo lectura.
-        with col_b:
+        # Salida (cerrar turno) / Reactivar acceso: lo hace CAJA o admin (manage_caja). La
+        # vista ya está restringida a ese candado, así que aquí siempre está disponible.
+        with col_acc:
+            if activo and not bloqueado:
+                if st.button("⏹ Salida", key=f"salida_{eid}", use_container_width=True,
+                             help="Cerrar turno: bloquea el PIN y cierra su sesión ahora"):
+                    if empleados.bloquear_acceso(eid):
+                        audit.registrar("acceso_bloqueado", "empleado", eid, {"nombre": nombre})
+                        flash(f"Turno cerrado · {nombre} (su acceso queda bloqueado)", "🔒")
+                    st.rerun()
+            elif activo and bloqueado:
+                if st.button("▶ Reactivar", key=f"reactivar_{eid}", use_container_width=True,
+                             help="Reabrir el acceso: su PIN vuelve a servir"):
+                    if empleados.reactivar_acceso(eid):
+                        audit.registrar("acceso_reactivado", "empleado", eid, {"nombre": nombre})
+                        flash(f"Acceso reactivado · {nombre}", "▶")
+                    st.rerun()
+        # Acciones de PERFIL: solo admin (manage_empleados). Caja las ve deshabilitadas/ocultas.
+        with col_pin:
             if puede_gestionar and activo and st.button("🔑 Nuevo PIN", key=f"regen_{eid}",
                                                         use_container_width=True):
                 pin, err = empleados.regenerar_pin(eid)
@@ -147,9 +169,10 @@ def render():
                     audit.registrar("pin_regenerado", "empleado", eid, {"nombre": nombre})
                     st.session_state["_emp_pin"] = (nombre, rol, pin)
                 st.rerun()
-        with col_c:
-            if puede_gestionar and activo and st.button("⏹ Dar de baja", key=f"baja_{eid}",
-                                                        use_container_width=True):
+        with col_baja:
+            if puede_gestionar and activo and st.button("⏹ Baja", key=f"baja_{eid}",
+                                                        use_container_width=True,
+                                                        help="Dar de baja el perfil (permanente)"):
                 if empleados.desactivar_empleado(eid):
                     audit.registrar("empleado_baja", "empleado", eid, {"nombre": nombre})
                     flash(f"Empleado dado de baja · {nombre}", "⏹")

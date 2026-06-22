@@ -155,21 +155,59 @@ def render():
     </style>
     """, unsafe_allow_html=True)
 
-    # Dos vistas aisladas: el salón (mesas) y los pedidos web (Domicilio / Para
-    # Llevar). Los pedidos web no ocupan mesa, así que NUNCA aparecen en el salón;
-    # esta pestaña los reúne para preparar y despachar sin mezclarlos con el comedor.
+    # Pausa del refresco mientras hay una ventana abierta (ver _pedir_dialogo): run_every
+    # se fija al CREAR el fragmento, así que lo decidimos aquí (scope app) según la bandera.
+    # Con un diálogo abierto → run_every=None: el fragmento no se auto-relanza y no descuadra
+    # el modal. Sin diálogo → "30s" en vivo, como siempre.
+    rv = None if st.session_state.get("_mon_refresco_pausa") else "30s"
+
+    # Dos vistas aisladas: el salón (mesas) y los pedidos web (Domicilio / Para Llevar).
     tab_salon, tab_web = st.tabs(["🪑 Salón", "🛵 Pedidos web"])
     with tab_salon:
-        # Monitor en vivo: SOLO este fragmento se re-ejecuta en el intervalo (no toda
-        # la app ni panel.py) → menos parpadeo. La mesa seleccionada vive en
-        # session_state, así que se conserva entre refrescos; las acciones usan
-        # st.rerun() (scope app) para refrescar todo.
-        _monitor_en_vivo()
+        # SOLO este fragmento se re-ejecuta en el intervalo (no toda la app). La mesa
+        # seleccionada vive en session_state → se conserva entre refrescos.
+        st.fragment(run_every=rv)(_monitor_en_vivo)()
     with tab_web:
-        _web_en_vivo()
+        st.fragment(run_every=rv)(_web_en_vivo)()
+
+    # Abre (una sola vez) el diálogo que pidió una tarjeta, ya FUERA de los fragmentos:
+    # así es estable (como en caja) y los fragmentos quedan pausados mientras esté abierto.
+    _abrir_dialogo_pendiente()
 
 
-@st.fragment(run_every="30s")
+# ── Ventanas del monitor: abrir sin que el refresco de 30 s las descuadre ────────
+# Los diálogos (cobrar, cambiar mesa, cancelar) viven dentro de los fragmentos run_every.
+# Si el refresco salta con uno abierto, lo relanza y falla. Por eso las tarjetas NO abren
+# el diálogo directamente: lo PIDEN (_pedir_dialogo) marcando una pausa y re-ejecutando la
+# app; render() recrea los fragmentos pausados (run_every=None) y abre el diálogo fuera de
+# ellos. Al cerrarlo (botones del propio diálogo) se reanuda el refresco.
+def _pedir_dialogo(kind: str, **args) -> None:
+    st.session_state["_mon_dialog"] = {"kind": kind, **args}
+    st.session_state["_mon_refresco_pausa"] = True
+    st.rerun()
+
+
+def _reanudar_refresco() -> None:
+    """Quita la pausa del refresco (lo llaman los diálogos al cerrarse y el cambio de mesa)."""
+    st.session_state.pop("_mon_refresco_pausa", None)
+
+
+def _abrir_dialogo_pendiente() -> None:
+    d = st.session_state.get("_mon_dialog")
+    if not d:
+        return
+    st.session_state["_mon_dialog"] = None   # one-shot: Streamlit mantiene el modal abierto
+    kind = d.get("kind")
+    if kind == "cobrar":
+        pedidos.dialog_cobrar(d["ids"], d["titulo"], d["saldo"], d["uid"])
+    elif kind == "cancelar":
+        pedidos.dialog_cancelar(d["pid"], d["uid"])
+    elif kind == "descuento":
+        pedidos.dialog_descuento(d["pid"], d["saldo"], d["uid"])
+    elif kind == "cambiar_mesa":
+        _dialog_cambiar_mesa(d["origen_id"], d["nombre"], d["ids"], d["mesas_libres"], d["uid"])
+
+
 def _monitor_en_vivo():
     st.markdown('<div class="section-title">🖥️ Monitor de mesas</div>', unsafe_allow_html=True)
 
@@ -309,6 +347,7 @@ def _monitor_en_vivo():
                 if st.button(f"{DOT[color]}  {nombre}\n\n{resumen}", key=f"mesabtn_{mid}",
                              use_container_width=True):
                     st.session_state["mesa_activa"] = mid
+                    _reanudar_refresco()   # navegar = reanuda el refresco (autocura tras una X)
                     st.rerun()
 
     st.markdown("<br>", unsafe_allow_html=True)
@@ -397,7 +436,8 @@ def _detalle_mesa(mid: int, nombre: str, sub: pd.DataFrame, color: str,
         if not sub.empty and auth.can("cobrar"):
             if st.button("💵 Cobrar mesa", key=f"mon_cobrar_mesa_{mid}",
                          type="primary", use_container_width=True):
-                pedidos.dialog_cobrar(sub["id"].tolist(), nombre, saldo_activo, f"mesa_{mid}")
+                _pedir_dialogo("cobrar", ids=[int(i) for i in sub["id"].tolist()],
+                               titulo=nombre, saldo=int(saldo_activo), uid=f"mesa_{mid}")
     with a2:
         # Cambio de mesa: mueve la cuenta a una mesa libre. Disponible para todo el
         # personal (reubicar comensales es tarea de salón). Solo si la mesa tiene
@@ -405,12 +445,14 @@ def _detalle_mesa(mid: int, nombre: str, sub: pd.DataFrame, color: str,
         if not sub.empty:
             if st.button("🔀 Cambiar de mesa", key=f"mon_cambiar_mesa_{mid}",
                          use_container_width=True):
-                _dialog_cambiar_mesa(mid, nombre, sub["id"].tolist(),
-                                     mesas_libres or [], f"mesa_{mid}")
+                _pedir_dialogo("cambiar_mesa", origen_id=int(mid), nombre=nombre,
+                               ids=[int(i) for i in sub["id"].tolist()],
+                               mesas_libres=(mesas_libres or []), uid=f"mesa_{mid}")
     with a3:
         if st.button("✕ Deseleccionar", key=f"mon_deselect_{mid}",
                      use_container_width=True):
             st.session_state.pop("mesa_activa", None)
+            _reanudar_refresco()
             st.rerun()
 
     st.markdown("<br>", unsafe_allow_html=True)
@@ -477,13 +519,14 @@ def _detalle_pedido(row, idx: int):
                 "💵 Cobrar", key=f"cobrar_{uid}", use_container_width=True,
                 help="Cobrar este pedido (efectivo/transferencia, abono parcial)",
                 disabled=saldo <= 0):
-            pedidos.dialog_cobrar([pid], f"Pedido #{pid}", saldo, uid)
+            _pedir_dialogo("cobrar", ids=[int(pid)], titulo=f"Pedido #{pid}",
+                           saldo=int(saldo), uid=uid)
     with b4:
         # Descuento / cortesía: solo cajero/admin y con saldo; el modal exige PIN de admin.
         if auth.can("cobrar") and saldo > 0 and st.button(
                 "🏷️ Descuento", key=f"descuento_{uid}", use_container_width=True,
                 help="Descuento o cortesía (requiere PIN de administrador)"):
-            pedidos.dialog_descuento(pid, saldo, uid)
+            _pedir_dialogo("descuento", pid=int(pid), saldo=int(saldo), uid=uid)
     with b5:
         # Reimprimir la comanda de cocina (atasco / ticket perdido) sin cambiar de estado.
         # Solo aplica a pedidos en cocina (ESTADOS_ACTIVOS).
@@ -498,7 +541,7 @@ def _detalle_pedido(row, idx: int):
         # botón queda BLOQUEADO. Fase 3: modal centrado compartido con el tablero.
         if pedidos.puede_cancelar(row):
             if st.button("✕ Cancelar", key=f"cancelar_{uid}", use_container_width=True):
-                pedidos.dialog_cancelar(pid, uid)
+                _pedir_dialogo("cancelar", pid=int(pid), uid=uid)
         else:
             st.button("🔒 En caja", key=f"cancelar_{uid}", use_container_width=True,
                       disabled=True,
@@ -530,7 +573,6 @@ def _txt(valor) -> str:
     return str(valor)
 
 
-@st.fragment(run_every="30s")
 def _web_en_vivo():
     st.markdown('<div class="section-title">🛵 Pedidos web · Domicilio y Para Llevar</div>',
                 unsafe_allow_html=True)
@@ -653,12 +695,13 @@ def _web_card(row, idx: int):
         if auth.can("cobrar") and st.button(
                 "💵 Cobrar", key=f"cobrar_{uid}", use_container_width=True,
                 disabled=saldo <= 0):
-            pedidos.dialog_cobrar([pid], f"Pedido #{pid}", saldo, uid)
+            _pedir_dialogo("cobrar", ids=[int(pid)], titulo=f"Pedido #{pid}",
+                           saldo=int(saldo), uid=uid)
     with b4:
         if auth.can("cobrar") and saldo > 0 and st.button(
                 "🏷️ Descuento", key=f"descuento_{uid}", use_container_width=True,
                 help="Descuento o cortesía (requiere PIN de administrador)"):
-            pedidos.dialog_descuento(pid, saldo, uid)
+            _pedir_dialogo("descuento", pid=int(pid), saldo=int(saldo), uid=uid)
     with b5:
         # Reimprimir la comanda de cocina del pedido web (atasco / ticket perdido).
         if estado in pedidos.ESTADOS_ACTIVOS and st.button(
@@ -671,7 +714,7 @@ def _web_card(row, idx: int):
         # Anti-skimming: bloqueado si la cuenta ya tocó caja (cobro iniciado / abono / pago).
         if pedidos.puede_cancelar(row):
             if st.button("✕ Cancelar", key=f"cancelar_{uid}", use_container_width=True):
-                pedidos.dialog_cancelar(pid, uid)
+                _pedir_dialogo("cancelar", pid=int(pid), uid=uid)
         else:
             st.button("🔒 En caja", key=f"cancelar_{uid}", use_container_width=True,
                       disabled=True,

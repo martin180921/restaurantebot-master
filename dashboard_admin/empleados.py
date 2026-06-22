@@ -75,12 +75,12 @@ def crear_empleado(nombre: str, rol: str, pin: str = "", creado_por: str = "") -
 
 
 def listar_empleados(incluir_inactivos: bool = True) -> list:
-    """[{id, nombre, rol, activo, creado}] de empleados. Tolerante a fallos."""
+    """[{id, nombre, rol, activo, bloqueado, creado}] de empleados. Tolerante a fallos."""
     cond = "" if incluir_inactivos else "WHERE activo = TRUE"
     try:
         with engine.connect() as conn:
             rows = conn.execute(text(
-                f"SELECT id, nombre, rol, activo, creado FROM empleados {cond} "
+                f"SELECT id, nombre, rol, activo, bloqueado, creado FROM empleados {cond} "
                 "ORDER BY activo DESC, nombre"
             )).mappings().all()
         return [dict(r) for r in rows]
@@ -132,19 +132,85 @@ def regenerar_pin(emp_id: int) -> tuple:
 
 # ── Autenticación por PIN ─────────────────────────────────────────────────────────
 def validar_pin(pin: str):
-    """{id, nombre, rol} del empleado ACTIVO cuyo PIN coincide, o None. Para el login."""
+    """{id, nombre, rol} del empleado ACTIVO y NO BLOQUEADO cuyo PIN coincide, o None.
+    Para el login: un empleado con acceso cerrado (bloqueado) no puede entrar hasta que
+    el cajero lo reactive."""
     pin = (pin or "").strip()
     if not pin:
         return None
     try:
         with engine.connect() as conn:
             row = conn.execute(text(
-                "SELECT id, nombre, rol FROM empleados WHERE pin_hash = :h AND activo = TRUE "
+                "SELECT id, nombre, rol FROM empleados "
+                "WHERE pin_hash = :h AND activo = TRUE AND bloqueado = FALSE "
                 "ORDER BY id DESC LIMIT 1"
             ), {"h": _hash(pin)}).mappings().first()
         return dict(row) if row else None
     except Exception:
         return None
+
+
+# ── Cierre de acceso de turno (bloquear / reactivar) ─────────────────────────────
+def bloquear_acceso(emp_id: int) -> bool:
+    """Cierra el acceso de un empleado al terminar su turno: bloquea el PIN (no podrá
+    entrar) y CIERRA su sesión abierta (el panel lo desloguea en su próximo run). Atómico.
+    Reversible con reactivar_acceso. Devuelve True si cambió algo."""
+    try:
+        with engine.begin() as conn:
+            res = conn.execute(text(
+                "UPDATE empleados SET bloqueado = TRUE WHERE id = :id AND activo = TRUE"
+            ), {"id": int(emp_id)})
+            conn.execute(text(
+                "UPDATE sesiones_empleado SET activa = FALSE, logout_at = NOW() "
+                "WHERE empleado_id = :id AND activa = TRUE"
+            ), {"id": int(emp_id)})
+        return (res.rowcount or 0) > 0
+    except Exception:
+        return False
+
+
+def reactivar_acceso(emp_id: int) -> bool:
+    """Reabre el acceso de un empleado bloqueado (su PIN vuelve a servir). Devuelve True
+    si cambió algo."""
+    try:
+        with engine.begin() as conn:
+            res = conn.execute(text(
+                "UPDATE empleados SET bloqueado = FALSE WHERE id = :id AND activo = TRUE"
+            ), {"id": int(emp_id)})
+        return (res.rowcount or 0) > 0
+    except Exception:
+        return False
+
+
+def bloquear_meseros() -> int:
+    """Bloquea el acceso de TODOS los empleados con rol 'mesero' (fin de jornada / cierre
+    de caja): ningún mesero podrá entrar hasta que se reactive. No toca admin/caja.
+    Devuelve cuántos se bloquearon."""
+    try:
+        with engine.begin() as conn:
+            res = conn.execute(text(
+                "UPDATE empleados SET bloqueado = TRUE "
+                "WHERE rol = 'mesero' AND activo = TRUE AND bloqueado = FALSE"
+            ))
+        return res.rowcount or 0
+    except Exception:
+        return 0
+
+
+def sesion_activa(sesion_id) -> bool:
+    """True si la sesión sigue abierta. Lo llama el panel en cada run para echar al
+    mesero cuyo turno cerró el cajero (revocación inmediata). Tolerante: ante un fallo de
+    BD devuelve True (no desloguea por un blip de red; la próxima lectura sana resuelve)."""
+    if not sesion_id:
+        return False
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(text(
+                "SELECT 1 FROM sesiones_empleado WHERE id = :id AND activa = TRUE"
+            ), {"id": int(sesion_id)}).first()
+        return row is not None
+    except Exception:
+        return True
 
 
 def admin_pin_valido(pin: str):
@@ -245,14 +311,21 @@ def cerrar_sesion(sesion_id) -> dict | None:
         return None
 
 
-def cerrar_todas_sesiones() -> int:
-    """Cierra TODAS las sesiones activas (fin de jornada / cierre de caja). Devuelve
+def cerrar_todas_sesiones(excepto=None) -> int:
+    """Cierra TODAS las sesiones activas (fin de jornada / cierre de caja), salvo
+    'excepto' (la del propio cajero que cierra, para que no se autoexpulse). Devuelve
     cuántas se cerraron."""
     try:
         with engine.begin() as conn:
-            res = conn.execute(text(
-                "UPDATE sesiones_empleado SET activa = FALSE, logout_at = NOW() WHERE activa = TRUE"
-            ))
+            if excepto is not None:
+                res = conn.execute(text(
+                    "UPDATE sesiones_empleado SET activa = FALSE, logout_at = NOW() "
+                    "WHERE activa = TRUE AND id <> :ex"
+                ), {"ex": int(excepto)})
+            else:
+                res = conn.execute(text(
+                    "UPDATE sesiones_empleado SET activa = FALSE, logout_at = NOW() WHERE activa = TRUE"
+                ))
         return res.rowcount or 0
     except Exception:
         return 0

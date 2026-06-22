@@ -155,15 +155,19 @@ if not role:
     _logout()
     st.rerun()
 
-# Revalidación en CADA run del mesero con PIN de turno EFÍMERO: si su clave fue revocada
-# (a mano o al cerrar la caja), lo deslogueamos en el acto. Solo aplica a sesiones con
-# clave efímera (mesero_key_id); un mesero con perfil de EMPLEADO (PIN propio) no tiene
-# clave efímera, así que se salta este control (su acceso lo rige empleados.activo). Otros
-# roles (admin/caja) tampoco dependen de claves de turno.
-if (role == auth.MESERO and st.session_state.get("mesero_key_id")
-        and not mesero_keys.clave_activa(st.session_state.get("mesero_key_id"))):
-    _logout()
-    st.rerun()
+# Revalidación en CADA run del MESERO (revocación inmediata desde caja). Dos controles,
+# según cómo entró:
+#  (a) PIN de turno EFÍMERO (mesero_key_id): si la clave fue revocada → fuera.
+#  (b) Perfil de EMPLEADO o efímero: si el cajero cerró su turno ("⏹ Salida", que cierra
+#      la sesión y bloquea el PIN) o cerró la caja → su sesión deja de estar activa → fuera.
+# Admin/caja NO se revalidan así (no son meseros), así que cerrar la caja nunca los expulsa.
+if role == auth.MESERO:
+    _kid = st.session_state.get("mesero_key_id")
+    _sid = st.session_state.get("sesion_id")
+    if (_kid and not mesero_keys.clave_activa(_kid)) or \
+       (_sid and not empleados.sesion_activa(_sid)):
+        _logout()
+        st.rerun()
 
 # ── Auto-refresh (30s) — C1 + P2 + P4 ──────────────────────────────────────────
 # El refresco en vivo vive ahora dentro de cada vista como un st.fragment
