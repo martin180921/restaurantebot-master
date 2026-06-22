@@ -214,6 +214,8 @@ CREATE TABLE IF NOT EXISTS empleados (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_empleados_pin ON empleados (pin_hash);
 CREATE INDEX IF NOT EXISTS idx_empleados_activo ON empleados (activo);
 ALTER TABLE empleados ADD COLUMN IF NOT EXISTS bloqueado BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE empleados ADD COLUMN IF NOT EXISTS token VARCHAR(32);  -- persistencia móvil del mesero (?mt)
+CREATE INDEX IF NOT EXISTS idx_empleados_token ON empleados (token);
 
 -- Marcaje entrada/salida (clock-in/out). Una sesión activa como mucho por empleado.
 CREATE TABLE IF NOT EXISTS sesiones_empleado (

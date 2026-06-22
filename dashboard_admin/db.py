@@ -311,6 +311,16 @@ def _ensure_schema():
         conn.execute(text(
             "ALTER TABLE empleados ADD COLUMN IF NOT EXISTS bloqueado BOOLEAN NOT NULL DEFAULT FALSE"
         ))
+        # token: secreto aleatorio para PERSISTIR la sesión del mesero en móvil (la URL
+        # lleva ?mt=token). Al reconectar (bloqueo de pantalla / refresco) se restaura su
+        # sesión sin volver a pedir el PIN, mientras siga activo y no bloqueado. Se rota al
+        # cerrar su acceso (⏹ Salida), así una URL vieja deja de servir. Solo para mesero.
+        conn.execute(text(
+            "ALTER TABLE empleados ADD COLUMN IF NOT EXISTS token VARCHAR(32)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_empleados_token ON empleados (token)"
+        ))
 
         # sesiones_empleado: marcaje de entrada/salida (clock-in/out). login_at al entrar,
         # logout_at al salir; 'activa' = en turno ahora. Snapshot de nombre/rol para que el

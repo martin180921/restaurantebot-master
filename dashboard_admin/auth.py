@@ -136,9 +136,9 @@ def login_mesero(key_id: int, nombre: str = None) -> None:
 
 
 def logout() -> None:
-    """Cierra la sesión: limpia session_state y depura restos de la URL antigua
-    (?r=&auth=), que en sesiones nuevas ya se ignoran pero conviene no arrastrar."""
-    for k in ("r", "auth"):
+    """Cierra la sesión: limpia session_state y la URL (restos del esquema antiguo ?r=&auth=
+    y el token de persistencia del mesero ?mt, para que no quede acceso pegado al enlace)."""
+    for k in ("r", "auth", "mt"):
         try:
             del st.query_params[k]
         except KeyError:

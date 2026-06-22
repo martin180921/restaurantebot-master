@@ -35,6 +35,11 @@ def _pin_aleatorio() -> str:
     return f"{secrets.randbelow(1_000_000):06d}"
 
 
+def _token_aleatorio() -> str:
+    """Secreto de 32 hex para persistir la sesión del mesero en la URL (?mt)."""
+    return secrets.token_hex(16)
+
+
 # ── CRUD de perfiles ──────────────────────────────────────────────────────────────
 def crear_empleado(nombre: str, rol: str, pin: str = "", creado_por: str = "") -> tuple:
     """Crea un empleado activo. Si 'pin' viene vacío, genera uno de 6 dígitos.
@@ -64,10 +69,11 @@ def crear_empleado(nombre: str, rol: str, pin: str = "", creado_por: str = "") -
                         return None, "Ese PIN ya está en uso. Elige otro."
                     continue                      # PIN aleatorio: reintenta con otro
                 conn.execute(text(
-                    "INSERT INTO empleados (nombre, rol, pin_hash, creado_por) "
-                    "VALUES (:n, :r, :h, :cp)"
+                    "INSERT INTO empleados (nombre, rol, pin_hash, creado_por, token) "
+                    "VALUES (:n, :r, :h, :cp, :tk)"
                 ), {"n": nombre, "r": rol, "h": h,
-                    "cp": (creado_por or "").strip()[:120] or None})
+                    "cp": (creado_por or "").strip()[:120] or None,
+                    "tk": _token_aleatorio()})
                 return actual, None
     except Exception:
         return None, "No se pudo crear el empleado (error de base de datos)."
@@ -153,13 +159,15 @@ def validar_pin(pin: str):
 # ── Cierre de acceso de turno (bloquear / reactivar) ─────────────────────────────
 def bloquear_acceso(emp_id: int) -> bool:
     """Cierra el acceso de un empleado al terminar su turno: bloquea el PIN (no podrá
-    entrar) y CIERRA su sesión abierta (el panel lo desloguea en su próximo run). Atómico.
-    Reversible con reactivar_acceso. Devuelve True si cambió algo."""
+    entrar), CIERRA su sesión abierta (el panel lo desloguea en su próximo run) y ROTA su
+    token de persistencia (una URL ?mt vieja en su móvil deja de servir → tendrá que volver
+    a teclear el PIN). Atómico. Reversible con reactivar_acceso. True si cambió algo."""
     try:
         with engine.begin() as conn:
             res = conn.execute(text(
-                "UPDATE empleados SET bloqueado = TRUE WHERE id = :id AND activo = TRUE"
-            ), {"id": int(emp_id)})
+                "UPDATE empleados SET bloqueado = TRUE, token = :tk "
+                "WHERE id = :id AND activo = TRUE"
+            ), {"tk": _token_aleatorio(), "id": int(emp_id)})
             conn.execute(text(
                 "UPDATE sesiones_empleado SET activa = FALSE, logout_at = NOW() "
                 "WHERE empleado_id = :id AND activa = TRUE"
@@ -167,6 +175,57 @@ def bloquear_acceso(emp_id: int) -> bool:
         return (res.rowcount or 0) > 0
     except Exception:
         return False
+
+
+# ── Persistencia de sesión del mesero (móvil: ?mt=token) ─────────────────────────
+def obtener_token(emp_id: int):
+    """Token de persistencia del empleado; lo genera y guarda si aún no tiene (perfiles
+    creados antes de existir la columna). None ante fallo."""
+    try:
+        with engine.begin() as conn:
+            row = conn.execute(text("SELECT token FROM empleados WHERE id = :id"),
+                               {"id": int(emp_id)}).first()
+            if not row:
+                return None
+            tok = row[0]
+            if not tok:
+                tok = _token_aleatorio()
+                conn.execute(text("UPDATE empleados SET token = :t WHERE id = :id"),
+                             {"t": tok, "id": int(emp_id)})
+            return tok
+    except Exception:
+        return None
+
+
+def emple_por_token(token: str):
+    """{id, nombre, rol, activo, bloqueado} del empleado cuyo token coincide, o None.
+    Lo usa el panel para restaurar la sesión del mesero sin pedir el PIN."""
+    token = (token or "").strip()
+    if not token:
+        return None
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(text(
+                "SELECT id, nombre, rol, activo, bloqueado FROM empleados "
+                "WHERE token = :t LIMIT 1"
+            ), {"t": token}).mappings().first()
+        return dict(row) if row else None
+    except Exception:
+        return None
+
+
+def sesion_activa_de(empleado_id):
+    """id de la sesión de turno ABIERTA del empleado (la más reciente), o None. Para
+    reanudar la sesión viva al reconectar sin abrir un clock-in nuevo cada vez."""
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(text(
+                "SELECT id FROM sesiones_empleado WHERE empleado_id = :id AND activa = TRUE "
+                "ORDER BY id DESC LIMIT 1"
+            ), {"id": int(empleado_id)}).first()
+        return int(row[0]) if row else None
+    except Exception:
+        return None
 
 
 def reactivar_acceso(emp_id: int) -> bool:

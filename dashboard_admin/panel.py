@@ -44,6 +44,13 @@ def _abrir_turno(nombre: str, rol: str, empleado_id=None) -> None:
     sid = empleados.abrir_sesion(nombre, rol, empleado_id)
     st.session_state["sesion_id"] = sid
     audit.registrar("clock_in", "sesion", sid, {"nombre": nombre, "rol": rol})
+    # Persistencia móvil SOLO para el mesero (perfil de empleado): deja su token en la URL
+    # para restaurar la sesión al reconectar (bloqueo de pantalla / refresco) sin re-pedir
+    # el PIN. admin/caja NO persisten (siguen siendo por-sesión, más seguros).
+    if rol == auth.MESERO and empleado_id is not None:
+        tok = empleados.obtener_token(empleado_id)
+        if tok:
+            st.query_params["mt"] = tok
 
 
 def _logout() -> None:
@@ -80,6 +87,28 @@ for _k in ("r", "auth"):
 
 if "autenticado" not in st.session_state:
     st.session_state["autenticado"] = False
+
+# Restauración del MESERO en móvil: si la pestaña se reconecta (bloqueo de pantalla /
+# refresco) sin sesión en memoria pero la URL trae ?mt=token de un mesero cuyo acceso
+# SIGUE activo (activo y NO bloqueado), restauramos su sesión SIN volver a pedir el PIN.
+# Reanuda su sesión de turno viva si la hay; si no, marca un nuevo clock-in. Si el token ya
+# no vale (cajero cerró su acceso / lo dio de baja), limpiamos la URL y pedimos el PIN.
+if not st.session_state["autenticado"]:
+    _mt = st.query_params.get("mt")
+    if _mt:
+        _emp = empleados.emple_por_token(_mt)
+        if _emp and _emp["rol"] == auth.MESERO and _emp["activo"] and not _emp["bloqueado"]:
+            auth.login_empleado(_emp)
+            _sid = empleados.sesion_activa_de(_emp["id"])
+            if _sid:
+                st.session_state["sesion_id"] = _sid   # reanuda la sesión viva
+            else:
+                _abrir_turno(_emp["nombre"], _emp["rol"], _emp["id"])  # estaba fuera → clock-in
+        else:
+            try:
+                del st.query_params["mt"]
+            except KeyError:
+                pass
 
 if not st.session_state["autenticado"]:
     st.markdown("""
