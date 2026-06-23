@@ -697,14 +697,18 @@ def render():
 
             f1, f2 = st.columns(2)
             with f1:
+                # value se acota a >=0: 'total_esperado' puede salir NEGATIVO si los gastos /
+                # bases superan la base + ventas (el efectivo no puede ser negativo), y un
+                # value < min_value rompía el number_input. La diferencia sigue usando el
+                # total_esperado real (negativo) más abajo.
                 efectivo_real = int(st.number_input(
-                    "Efectivo Físico Contado ($)", min_value=0, value=total_esperado,
+                    "Efectivo Físico Contado ($)", min_value=0, value=max(0, total_esperado),
                     step=1000, format="%d", key=f"efectivo_real_{cierre['id']}",
                     help="Dinero en efectivo realmente contado en la caja.",
                 ) or 0)
             with f2:
                 transferencia_real = int(st.number_input(
-                    "Transferencias Verificadas en Banco ($)", min_value=0, value=transf_esp,
+                    "Transferencias Verificadas en Banco ($)", min_value=0, value=max(0, transf_esp),
                     step=1000, format="%d", key=f"transferencia_real_{cierre['id']}",
                     help="Transferencias confirmadas en la cuenta bancaria.",
                 ) or 0)
