@@ -190,6 +190,26 @@ def quitar_agotado_item(item_id: int):
     flash("Disponible de nuevo", "♻️")
 
 
+# ── Edición de stock por ítem (desde la tarjeta del menú, no solo en 📦 Inventario) ──
+# El indicador de stock de cada tarjeta es además el editor: stock None = ilimitado;
+# un número = porciones de hoy (0 = agotado). Invalida las cachés y refresca igual que
+# el resto de acciones de la tarjeta (activar / 86 / editar).
+def guardar_stock_componente(cid: int, stock):
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE menu_componentes SET stock = :s WHERE id = :id"),
+                     {"s": (None if stock is None else int(stock)), "id": int(cid)})
+    cargar_componentes.clear()
+    flash("Stock actualizado", "📦")
+
+
+def guardar_stock_item(item_id: int, stock):
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE menu SET stock = :s WHERE id = :id"),
+                     {"s": (None if stock is None else int(stock)), "id": int(item_id)})
+    _clear_menu_caches()
+    flash("Stock actualizado", "📦")
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # DB: ajustes (precios planos + recargo de entrega)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -259,6 +279,38 @@ def _dialog_eliminar_item(item_id: int, nombre: str, categoria: str):
             st.rerun()
     with c2:
         if st.button("Volver", key=f"volver_del_{categoria}_{item_id}", use_container_width=True):
+            st.rerun()
+
+
+def _stock_btn_label(stock) -> str:
+    """Etiqueta del botón-indicador de stock: '📦 N' (con control) o '♾️' (ilimitado)."""
+    s = stock_int(stock)
+    return "♾️" if s is None else f"📦 {s}"
+
+
+@st.dialog("📦 Stock del día")
+def _dialog_stock(scope: str, oid: int, nombre: str, stock_actual):
+    """Editor de stock por ítem, abierto desde su tarjeta (sustituye al viejo 86). El stock
+    sustituye al 86: poner 0 = agotado (se atenúa en el menú y se oculta/bloquea al pedir);
+    'Ilimitado' = sin control. scope = 'comp' (componente) | 'menu' (plato a la carta)."""
+    s = stock_int(stock_actual)
+    st.markdown(f"Existencias de **{html.escape(str(nombre))}**")
+    ilimitado = st.checkbox("Ilimitado (sin control de stock)", value=(s is None),
+                            key=f"dlgstk_unl_{scope}_{oid}")
+    cantidad = st.number_input("Porciones disponibles hoy", min_value=0, step=1,
+                               value=int(s) if s is not None else 0,
+                               key=f"dlgstk_qty_{scope}_{oid}", disabled=ilimitado)
+    st.caption("0 = agotado. Se descuenta al crear el pedido y se reintegra al cancelar "
+               "antes de 'listo'. El montaje masivo de la mañana está en 📦 Inventario.")
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("💾 Guardar", key=f"dlgstk_save_{scope}_{oid}", type="primary",
+                     use_container_width=True):
+            val = None if ilimitado else int(cantidad or 0)
+            (guardar_stock_componente if scope == "comp" else guardar_stock_item)(oid, val)
+            st.rerun()
+    with c2:
+        if st.button("Volver", key=f"dlgstk_back_{scope}_{oid}", use_container_width=True):
             st.rerun()
 
 
@@ -335,7 +387,7 @@ def _componente_card(row, grupo: str):
         f'<div class="{card_cls}" style="padding:0.6rem 0.8rem; margin-bottom:0.4rem;">'
         f'<div style="display:flex; justify-content:space-between; align-items:center;">'
         f'<div class="menu-nombre" style="font-size:0.9rem;">{html.escape(str(nombre))}</div>'
-        f'<div>{_stock_chip(row.get("stock"))}{estado}</div></div></div>',
+        f'<div>{estado}</div></div></div>',
         unsafe_allow_html=True,
     )
     b1, b2, b3, b4 = st.columns(4)
@@ -345,16 +397,11 @@ def _componente_card(row, grupo: str):
             toggle_componente(cid, activo)
             st.rerun()
     with b2:
-        if agotado_dia:
-            if st.button("♻", key=f"unago_comp_{cid}", help="Disponible de nuevo",
-                         use_container_width=True):
-                quitar_agotado_componente(cid)
-                st.rerun()
-        else:
-            if st.button("86", key=f"ago_comp_{cid}", help="Agotado hoy (vuelve mañana)",
-                         use_container_width=True):
-                marcar_agotado_componente(cid)
-                st.rerun()
+        # El indicador de stock ocupa el lugar del antiguo 86; al pulsarlo se edita.
+        if st.button(_stock_btn_label(row.get("stock")), key=f"stock_comp_{cid}",
+                     help="Stock de hoy (toca para editar). 0 = agotado.",
+                     use_container_width=True):
+            _dialog_stock("comp", cid, str(nombre), row.get("stock"))
     with b3:
         if st.button("✏️", key=f"edit_comp_{cid}", help="Renombrar", use_container_width=True):
             _dialog_editar_componente(cid, str(nombre))
@@ -438,7 +485,7 @@ def _item_card(row, categoria: str, con_precio: bool):
             f'<div class="{card_cls}">'
             f'<div style="display:flex; justify-content:space-between; align-items:center;">'
             f'<div><div class="menu-nombre">{html.escape(str(nombre))}</div>{sub_html}</div>'
-            f'<div style="text-align:right;">{_stock_chip(row.get("stock"))}{badge}</div></div></div>',
+            f'<div style="text-align:right;">{badge}</div></div></div>',
             unsafe_allow_html=True,
         )
     with col_btns:
@@ -450,16 +497,11 @@ def _item_card(row, categoria: str, con_precio: bool):
                 toggle_item(iid, activo)
                 st.rerun()
         with b2:
-            if agotado_dia:
-                if st.button("♻", key=f"unago_{categoria}_{iid}", help="Disponible de nuevo",
-                             use_container_width=True):
-                    quitar_agotado_item(iid)
-                    st.rerun()
-            else:
-                if st.button("86", key=f"ago_{categoria}_{iid}", help="Agotado hoy",
-                             use_container_width=True):
-                    marcar_agotado_item(iid)
-                    st.rerun()
+            # Indicador de stock en el lugar del antiguo 86; al pulsarlo se edita.
+            if st.button(_stock_btn_label(row.get("stock")), key=f"stock_{categoria}_{iid}",
+                         help="Stock de hoy (toca para editar). 0 = agotado.",
+                         use_container_width=True):
+                _dialog_stock("menu", iid, str(nombre), row.get("stock"))
         with b3:
             if st.button("✏️", key=f"edit_{categoria}_{iid}", help="Editar",
                          use_container_width=True):
@@ -689,11 +731,18 @@ def _render_readonly():
             nombre = html.escape(_txt(r.get("nombre")))
             desc = html.escape(_txt(r.get("descripcion")))
             precio = int(r.get("precio", 0) or 0)
+            sin_stock = agotado_por_stock(r.get("stock"))
+            card_cls = "menu-card inactivo" if sin_stock else "menu-card"
             desc_html = f'<div class="menu-precio">{desc}</div>' if desc else ""
+            badge = (' <span class="badge badge-agotado">🚫 Sin stock</span>'
+                     if sin_stock else "")
             st.markdown(
-                f'<div class="menu-card"><div class="menu-nombre">{nombre}</div>'
-                f'{desc_html}'
-                f'<div class="menu-precio">${fmt_money(precio)}</div></div>',
+                f'<div class="{card_cls}">'
+                f'<div style="display:flex; justify-content:space-between; align-items:center;">'
+                f'<div><div class="menu-nombre">{nombre}</div>{desc_html}'
+                f'<div class="menu-precio">${fmt_money(precio)}</div></div>'
+                f'<div style="text-align:right;">{_stock_chip(r.get("stock"))}{badge}</div>'
+                f'</div></div>',
                 unsafe_allow_html=True,
             )
 
@@ -705,12 +754,25 @@ def _render_readonly():
         f'elige {num_acompanamientos()} acompañamientos</div>',
         unsafe_allow_html=True,
     )
+    def _opt_label(o):
+        """Nombre del componente con sus porciones para el mesero: 'Pollo (12)',
+        ámbar si quedan pocas, tachado si está agotado, sin nada si es ilimitado."""
+        s = stock_int(o.get("stock"))
+        nom = html.escape(str(o["nombre"]))
+        if s is None:
+            return nom
+        if s <= 0:
+            return (f'<span style="color:#b91c1c; text-decoration:line-through;">'
+                    f'{nom} (agotado)</span>')
+        color = "#b45309" if s <= STOCK_BAJO else "#6b7280"
+        return f'{nom} <span style="color:{color}; font-weight:600;">({s})</span>'
+
     por_grupo = componentes_activos_por_grupo()
     for grupo in GRUPOS_COMPONENTE:
         opciones = por_grupo.get(grupo, [])
         if not opciones:
             continue
-        nombres = " · ".join(html.escape(str(o["nombre"])) for o in opciones)
+        nombres = " · ".join(_opt_label(o) for o in opciones)
         st.markdown(
             f'<div style="margin-bottom:0.6rem;"><span style="font-weight:600; color:#1a1a1a;">'
             f'{html.escape(GRUPO_LABEL.get(grupo, grupo))}:</span> '
