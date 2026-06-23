@@ -742,9 +742,12 @@ def dialog_cobrar(ids, titulo, total, uid):
         st.markdown('<div style="font-size:0.82rem; color:#374151; margin:6px 0 2px;">'
                     'Unidades a cobrar</div>', unsafe_allow_html=True)
         for l in lineas:
-            col_n, col_q = st.columns([3, 1])
+            idx = l["idx"]
+            ppkey = f"pp_{uid}_{idx}"
+            restante = int(l["restante"])
+            col_n, col_m, col_c, col_p = st.columns([4, 1, 1, 1])
             with col_n:
-                if l["restante"] <= 0:
+                if restante <= 0:
                     st.markdown(f'<div style="font-size:0.85rem; color:#9ca3af; padding:8px 0;">'
                                 f'✓ {html.escape(str(l["nombre"]))} · pagado</div>',
                                 unsafe_allow_html=True)
@@ -752,15 +755,30 @@ def dialog_cobrar(ids, titulo, total, uid):
                     st.markdown(f'<div style="font-size:0.85rem; color:#1a1a1a; padding:4px 0;">'
                                 f'{html.escape(str(l["nombre"]))}<br>'
                                 f'<span style="font-size:0.76rem; color:#6b7280;">'
-                                f'${fmt_money(l["precio"])} c/u · quedan {l["restante"]}</span></div>',
+                                f'${fmt_money(l["precio"])} c/u · quedan {restante}</span></div>',
                                 unsafe_allow_html=True)
-            with col_q:
-                if l["restante"] > 0:
-                    q = int(st.number_input("u", min_value=0, max_value=l["restante"], value=0,
-                                            step=1, key=f"pp_{uid}_{l['idx']}",
-                                            label_visibility="collapsed") or 0)
-                    if q > 0:
-                        seleccion[l["idx"]] = q
+            if restante <= 0:
+                st.session_state.pop(ppkey, None)   # línea ya pagada: sin selector ni estado
+                continue
+            # Stepper −/+ (mismo estilo que el resto de la app, en vez de digitar el número).
+            # OJO: NADA de st.rerun() aquí — dentro de un st.dialog cerraría el modal; el click
+            # del botón ya re-ejecuta solo el cuerpo del diálogo. La cuenta se pinta DESPUÉS de
+            # ambos botones (col_c se escribe al final) para que refleje el valor recién tocado.
+            cur = max(0, min(int(st.session_state.get(ppkey, 0) or 0), restante))
+            with col_m:
+                if st.button("−", key=f"ppm_{uid}_{idx}", use_container_width=True,
+                             disabled=cur <= 0):
+                    st.session_state[ppkey] = max(0, cur - 1)
+            with col_p:
+                if st.button("+", key=f"ppp_{uid}_{idx}", use_container_width=True,
+                             disabled=cur >= restante):
+                    st.session_state[ppkey] = min(restante, cur + 1)
+            with col_c:
+                val = max(0, min(int(st.session_state.get(ppkey, 0) or 0), restante))
+                st.markdown(f'<div style="text-align:center; padding:6px 0; font-weight:700;">'
+                            f'{val}</div>', unsafe_allow_html=True)
+            if val > 0:
+                seleccion[idx] = val
         abono = sum(q * precio_idx.get(idx, 0) for idx, q in seleccion.items())
         st.markdown(
             '<div style="display:flex; justify-content:space-between; padding:8px 0 2px; '

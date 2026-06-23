@@ -424,15 +424,6 @@ def _pantalla_gate():
                         horizontal=True, label_visibility="collapsed", key="g_tipo")
     es_domicilio = tipo_lbl == "🛵 Domicilio"
 
-    st.markdown('<div class="c-sub">Método de pago</div>', unsafe_allow_html=True)
-    metodo_lbl = st.radio("Método de pago", ["💵 Efectivo", "💳 Transferencia"],
-                          horizontal=True, label_visibility="collapsed", key="g_metodo")
-    es_efectivo = metodo_lbl == "💵 Efectivo"
-    paga_con = 0
-    if es_efectivo:
-        paga_con = int(st.number_input("¿Con cuánto vas a pagar? (para tu cambio)",
-                                       min_value=0, step=1000, key="g_paga_con") or 0)
-
     st.markdown('<div class="c-sub">Tus datos</div>', unsafe_allow_html=True)
     nombre = st.text_input("Nombre", value=(cli or {}).get("nombre") or "", key="g_nombre")
     telefono = st.text_input("Número de teléfono",
@@ -451,16 +442,14 @@ def _pantalla_gate():
             errores.append("Escribe un teléfono válido.")
         if es_domicilio and not (direccion or "").strip():
             errores.append("La dirección es obligatoria para Domicilio.")
-        if es_efectivo and paga_con <= 0:
-            errores.append("Indica con cuánto vas a pagar.")
         if errores:
             for e in errores:
                 st.warning(e)
         else:
+            # El método de pago y el "¿con cuánto pagas?" se piden al FINAL de la carta,
+            # ya con el total a la vista (ver _carta), no aquí.
             st.session_state["gate"] = {
                 "tipo_entrega": "domicilio" if es_domicilio else "para_llevar",
-                "metodo_pago": "efectivo" if es_efectivo else "transferencia",
-                "paga_con": paga_con if es_efectivo else 0,
                 "nombre": nombre.strip(),
                 "telefono": _clean_tel(telefono),
                 "direccion": direccion.strip() if es_domicilio else "",
@@ -701,26 +690,35 @@ def _carta(comp, cat, ajustes):
         st.markdown('<div class="warn">Completa los acompañamientos de cada Plato del Día '
                     'antes de enviar.</div>', unsafe_allow_html=True)
 
-    # Pago en efectivo: resalta el saldo a pagar (y el cambio) en una tarjeta prominente
-    # justo antes del botón de envío, para que el cliente tenga el monto exacto listo.
-    if gate.get("metodo_pago") == "efectivo":
-        paga = int(gate.get("paga_con") or 0)
-        if paga >= total and paga > 0:
-            cc_sub = (f'<div class="cc-sub">Pagas con ${fmt_money(paga)} · '
-                      f'tu cambio: ${fmt_money(paga - total)}</div>')
-        elif paga > 0:
-            cc_sub = (f'<div class="cc-sub">Indicaste ${fmt_money(paga)} · '
-                      f'ten listo ${fmt_money(total)} en efectivo</div>')
+    # Pago AL FINAL, ya con el total a la vista: el cliente elige método y, si es efectivo,
+    # indica con cuánto paga y ve su cambio antes de enviar. (Antes esto se preguntaba en la
+    # puerta de entrada, sin que supiera todavía el valor de su pedido.)
+    st.markdown('<div class="c-section">💳 ¿Cómo vas a pagar?</div>', unsafe_allow_html=True)
+    metodo_lbl = st.radio("Método de pago", ["💵 Efectivo", "💳 Transferencia"],
+                          horizontal=True, label_visibility="collapsed", key="c_metodo")
+    es_efectivo = metodo_lbl == "💵 Efectivo"
+    metodo_pago = "efectivo" if es_efectivo else "transferencia"
+    paga_con = 0
+    if es_efectivo:
+        paga_con = int(st.number_input("¿Con cuánto vas a pagar? (para tu cambio)",
+                                       min_value=0, step=1000, key="c_paga_con") or 0)
+        if paga_con >= total and paga_con > 0:
+            cc_sub = (f'<div class="cc-sub">Pagas con ${fmt_money(paga_con)} · '
+                      f'tu cambio: ${fmt_money(paga_con - total)}</div>')
+        elif paga_con > 0:
+            cc_sub = (f'<div class="cc-sub">Te faltan ${fmt_money(total - paga_con)} · '
+                      f'ten listo al menos ${fmt_money(total)}</div>')
         else:
-            cc_sub = '<div class="cc-sub">Ten listo el monto exacto en efectivo</div>'
+            cc_sub = '<div class="cc-sub">Escribe con cuánto pagas para ver tu cambio</div>'
         st.markdown(
             f'<div class="cash-card"><div class="cc-label">💵 Pago en efectivo · Total a pagar</div>'
             f'<div class="cc-total">${fmt_money(total)}</div>{cc_sub}</div>',
             unsafe_allow_html=True,
         )
 
+    falta_efectivo = es_efectivo and paga_con <= 0
     if st.button(f"Enviar pedido · ${fmt_money(total)}", type="primary",
-                 use_container_width=True, disabled=not ok_pd):
+                 use_container_width=True, disabled=(not ok_pd or falta_efectivo)):
         ahora = time.time()
         if ahora - st.session_state.get("ultimo_envio", 0) < COOLDOWN_SEG:
             st.toast("Espera unos segundos antes de enviar otro pedido.", icon="⏳")
@@ -731,7 +729,7 @@ def _carta(comp, cat, ajustes):
                 gate["nombre"], items, total,
                 tipo_entrega=gate["tipo_entrega"], cliente_nombre=gate["nombre"],
                 cliente_telefono=gate["telefono"], direccion=gate["direccion"],
-                metodo_pago=gate["metodo_pago"], paga_con=gate["paga_con"],
+                metodo_pago=metodo_pago, paga_con=paga_con,
                 fee=fee, nota_general=(notas or "").strip(),
             )
             upsert_cliente(gate["telefono"], gate["nombre"], gate["direccion"] or None)
@@ -744,6 +742,8 @@ def _carta(comp, cat, ajustes):
             for k in [k for k in st.session_state if str(k).startswith("pd_")]:
                 del st.session_state[k]
             st.session_state.pop("notas_generales", None)
+            st.session_state.pop("c_metodo", None)
+            st.session_state.pop("c_paga_con", None)
             st.session_state["pd_qty"] = 0
             st.rerun(scope="app")
 
