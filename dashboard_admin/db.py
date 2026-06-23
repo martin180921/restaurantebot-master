@@ -6,6 +6,8 @@ import streamlit as st
 import pandas as pd
 import os
 
+from utils.items import parse_items
+
 load_dotenv()
 
 
@@ -219,6 +221,18 @@ def _ensure_schema():
             "ALTER TABLE menu ADD COLUMN IF NOT EXISTS categoria VARCHAR(20) NOT NULL DEFAULT 'a_la_carta'"
         ))
         conn.execute(text("ALTER TABLE menu ADD COLUMN IF NOT EXISTS descripcion TEXT"))
+        # ── INVENTARIO DIARIO (stock por componente y por plato) ─────────────
+        # 'stock' = porciones/unidades disponibles HOY. Modelo de dos niveles:
+        #   menu_componentes.stock → cada micro-opción del Plato del Día (cada sopa,
+        #     cada proteína, cada acompañamiento) lleva su propio contador.
+        #   menu.stock             → cada plato a la carta / especial / bebida como
+        #     unidad completa (1 a 1).
+        # NULL = SIN control (ilimitado): el ítem se comporta como hasta ahora (no se
+        # oculta ni se bloquea). Un número activa el control: al crear un pedido se
+        # descuenta y al cancelarlo (antes de 'listo') se reintegra. El administrador
+        # fija las cantidades cada mañana en 🍔 Menú → 📦 Inventario.
+        conn.execute(text("ALTER TABLE menu_componentes ADD COLUMN IF NOT EXISTS stock INTEGER"))
+        conn.execute(text("ALTER TABLE menu ADD COLUMN IF NOT EXISTS stock INTEGER"))
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS ajustes (
                 clave VARCHAR(50) PRIMARY KEY,
@@ -531,7 +545,7 @@ def cargar_componentes():
     cargar_componentes.clear() tras cada escritura para reflejar los cambios al vuelo."""
     with engine.connect() as conn:
         res = conn.execute(text(
-            "SELECT id, grupo, nombre, activo, orden, agotado_hasta "
+            "SELECT id, grupo, nombre, activo, orden, agotado_hasta, stock "
             "FROM menu_componentes ORDER BY grupo, orden, id"
         ))
         return pd.DataFrame(res.fetchall(), columns=res.keys())
@@ -548,15 +562,152 @@ def disponibles(df):
     return df[(df["activo"] == True) & (ag.isna() | (ag < hoy))]
 
 
+# ════════════════════════════════════════════════════════════════════════════════
+# INVENTARIO DIARIO — control de existencias por componente y por plato
+# ════════════════════════════════════════════════════════════════════════════════
+# Dos modelos coexisten (ver el comentario del esquema en _ensure_schema):
+#   · Plato del Día → cada micro-componente (sopa, proteína, acompañamiento…) tiene su
+#     propio contador en menu_componentes.stock.
+#   · A la carta / especiales / bebidas → cada plato es UNA unidad en menu.stock.
+# stock NULL = SIN control (ilimitado): no se descuenta, no se oculta ni se bloquea.
+# Umbral de "quedan pocos" para la alerta de cocina del mesero.
+STOCK_BAJO = 3
+
+
+def stock_int(valor):
+    """int del stock, o None si no lleva control (NULL/NaN/no numérico). El None es
+    significativo: distingue 'ilimitado' de '0 (agotado)'."""
+    if valor is None:
+        return None
+    try:
+        if pd.isna(valor):
+            return None
+    except (TypeError, ValueError):
+        pass
+    try:
+        return int(valor)
+    except (TypeError, ValueError):
+        return None
+
+
+def agotado_por_stock(valor) -> bool:
+    """True solo si la opción lleva control y se quedó en 0 (o menos). Las de stock
+    NULL (ilimitadas) nunca están 'agotadas por stock'."""
+    s = stock_int(valor)
+    return s is not None and s <= 0
+
+
+def inventario_de_items(items):
+    """Pura: cuenta las unidades a mover por un pedido. Devuelve (comp_qty, menu_qty):
+      comp_qty → {(grupo, nombre_en_minúsculas): unidades}  (componentes del Plato del Día)
+      menu_qty → {menu_id: unidades}                         (a la carta / especiales / bebidas)
+    El Plato del Día descuenta su entrada/principio/proteína (si no son 'Ninguno') y cada
+    acompañamiento elegido (con repetición). Los demás ítems descuentan su menu_id. La
+    cantidad del ítem multiplica las unidades. Tolerante a items legados / basura."""
+    comp_qty, menu_qty = {}, {}
+    for it in parse_items(items):
+        cant = int(it.get("cantidad", 1) or 1)
+        if cant <= 0:
+            continue
+        tipo = str(it.get("tipo") or "item").lower()
+        if tipo == "plato_dia":
+            cfg = it.get("config") or {}
+            for g in ("entrada", "principio", "proteina"):
+                v = cfg.get(g)
+                if v:
+                    k = (g, str(v).strip().lower())
+                    comp_qty[k] = comp_qty.get(k, 0) + cant
+            for a in (cfg.get("acompanamientos") or []):
+                if a:
+                    k = ("acompanamiento", str(a).strip().lower())
+                    comp_qty[k] = comp_qty.get(k, 0) + cant
+        else:
+            mid = it.get("id")
+            try:
+                mid = int(mid)
+            except (TypeError, ValueError):
+                continue
+            menu_qty[mid] = menu_qty.get(mid, 0) + cant
+    return comp_qty, menu_qty
+
+
+def aplicar_inventario(conn, items, signo: int) -> None:
+    """Aplica el efecto de un pedido sobre el inventario DENTRO de una transacción dada
+    ('conn' debe ser la misma del INSERT/cancelación → atómico). signo=-1 descuenta (al
+    crear el pedido), signo=+1 reintegra (al cancelar antes de 'listo'). Solo toca filas
+    con stock NO NULL (rastreadas); GREATEST(0, …) impide negativos. No lanza: un fallo
+    de inventario no debe abortar la operación principal."""
+    comp_qty, menu_qty = inventario_de_items(items)
+    try:
+        for (grupo, nombre_l), n in comp_qty.items():
+            conn.execute(text(
+                "UPDATE menu_componentes SET stock = GREATEST(0, stock + :delta) "
+                "WHERE grupo = :g AND LOWER(nombre) = :n AND stock IS NOT NULL"
+            ), {"delta": int(signo) * int(n), "g": grupo, "n": nombre_l})
+        for mid, n in menu_qty.items():
+            conn.execute(text(
+                "UPDATE menu SET stock = GREATEST(0, stock + :delta) "
+                "WHERE id = :id AND stock IS NOT NULL"
+            ), {"delta": int(signo) * int(n), "id": int(mid)})
+    except Exception:
+        pass
+
+
+def resumen_disponibilidad_componentes() -> dict:
+    """Para la alerta de cocina del Plato del Día (mesero). Sobre los componentes
+    ofrecibles hoy y CON control de stock, separa los agotados (0) de los que quedan
+    pocos (1..STOCK_BAJO). {'agotados': [{grupo,nombre}], 'bajos': [{grupo,nombre,stock}]}
+    en el orden de los grupos (entrada → principio → proteína → acompañamiento)."""
+    agotados, bajos = [], []
+    df = cargar_componentes()
+    if df.empty:
+        return {"agotados": agotados, "bajos": bajos}
+    disp = disponibles(df)
+    orden = {g: i for i, g in enumerate(GRUPOS_COMPONENTE)}
+    filas = sorted(disp.to_dict("records"),
+                   key=lambda r: (orden.get(r.get("grupo"), 99), r.get("orden", 0)))
+    for r in filas:
+        s = stock_int(r.get("stock"))
+        if s is None:
+            continue
+        if s <= 0:
+            agotados.append({"grupo": r["grupo"], "nombre": str(r["nombre"])})
+        elif s <= STOCK_BAJO:
+            bajos.append({"grupo": r["grupo"], "nombre": str(r["nombre"]), "stock": s})
+    return {"agotados": agotados, "bajos": bajos}
+
+
+def guardar_inventario(comp_stock: dict, menu_stock: dict) -> None:
+    """Inicializa/sobrescribe los contadores de stock del día (lo llama 🍔 Menú →
+    📦 Inventario al guardar el formulario). Las claves son ids; el valor es el stock
+    (int) o None para dejar el ítem SIN control (ilimitado). Atómico; invalida cachés."""
+    with engine.begin() as conn:
+        for cid, val in (comp_stock or {}).items():
+            conn.execute(text("UPDATE menu_componentes SET stock = :s WHERE id = :id"),
+                         {"s": (None if val is None else int(val)), "id": int(cid)})
+        for mid, val in (menu_stock or {}).items():
+            conn.execute(text("UPDATE menu SET stock = :s WHERE id = :id"),
+                         {"s": (None if val is None else int(val)), "id": int(mid)})
+    cargar_componentes.clear()
+    cargar_catalogo.clear()
+    cargar_menu.clear()
+    flash("Inventario del día guardado", "📦")
+
+
 def componentes_activos_por_grupo() -> dict:
-    """{grupo: [{id, nombre}]} con SOLO los componentes ofrecibles hoy, en orden.
-    Lo consume el configurador del Plato del Día (POS y app cliente)."""
+    """{grupo: [{id, nombre, stock}]} con SOLO los componentes ofrecibles hoy, en orden.
+    'stock' = porciones que quedan (int) o None si la opción no lleva control. NO se
+    ocultan las opciones agotadas (stock 0): el configurador las muestra deshabilitadas
+    para no esconder nunca el Plato del Día. Lo consume el configurador (POS y cliente)."""
     out = {g: [] for g in GRUPOS_COMPONENTE}
     df = cargar_componentes()
     if df.empty:
         return out
     for _, r in disponibles(df).iterrows():
-        out.setdefault(r["grupo"], []).append({"id": int(r["id"]), "nombre": str(r["nombre"])})
+        out.setdefault(r["grupo"], []).append({
+            "id": int(r["id"]), "nombre": str(r["nombre"]),
+            "stock": stock_int(r.get("stock")),
+        })
     return out
 
 
@@ -567,7 +718,7 @@ def cargar_catalogo():
     hace cada vista. menu.py llama cargar_catalogo.clear() tras cada escritura."""
     with engine.connect() as conn:
         res = conn.execute(text(
-            "SELECT id, nombre, precio, activo, orden, agotado_hasta, categoria, descripcion "
+            "SELECT id, nombre, precio, activo, orden, agotado_hasta, categoria, descripcion, stock "
             "FROM menu ORDER BY categoria, orden, id"
         ))
         return pd.DataFrame(res.fetchall(), columns=res.keys())

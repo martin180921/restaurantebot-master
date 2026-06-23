@@ -214,6 +214,13 @@ def init_db():
         ))
         conn.execute(text("ALTER TABLE menu ADD COLUMN IF NOT EXISTS descripcion TEXT"))
 
+        # Inventario diario (aditivo): 'stock' por componente del Plato del Día y por
+        # plato/bebida a la carta. NULL = sin control (ilimitado). El panel lo descuenta
+        # al crear el pedido y lo reintegra si se cancela antes de 'listo'; el admin fija
+        # las cantidades cada mañana en 🍔 Menú → 📦 Inventario.
+        conn.execute(text("ALTER TABLE menu_componentes ADD COLUMN IF NOT EXISTS stock INTEGER"))
+        conn.execute(text("ALTER TABLE menu ADD COLUMN IF NOT EXISTS stock INTEGER"))
+
         # Ajustes clave/valor: precios planos (Plato del Día y Especiales), recargo
         # de entrega (Domicilio/Para Llevar) y nº de acompañamientos a elegir.
         conn.execute(text("""

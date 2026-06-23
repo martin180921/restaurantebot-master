@@ -19,7 +19,9 @@ import html
 from db import (engine, cargar_mesas_activas, componentes_activos_por_grupo,
                 cargar_catalogo, disponibles, precio_plato_dia,
                 num_acompanamientos, fmt_money, flash, drain_toasts,
-                fee_entrega, upsert_cliente)
+                fee_entrega, upsert_cliente, aplicar_inventario,
+                resumen_disponibilidad_componentes, agotado_por_stock,
+                stock_int, STOCK_BAJO, GRUPO_LABEL)
 from utils.print_jobs import enqueue_comanda
 
 
@@ -39,6 +41,9 @@ def crear_pedido_manual(mesa_id: int, mesa_nombre: str, items: list, total: int,
             "mesa_id": mesa_id,
             "ng":      (nota_general or None),
         }).scalar_one()
+        # Descuento inmediato del inventario (mismo txn que el INSERT → atómico): evita
+        # vender dos veces lo que ya está en cocina. Solo afecta ítems con stock rastreado.
+        aplicar_inventario(conn, items, -1)
     # Flujo de cocina simplificado: ya no hay "Iniciar preparación", así que la comanda
     # se imprime al confirmar el pedido. Tolera fallos: no debe romper la creación.
     enqueue_comanda(int(nuevo_id))
@@ -71,6 +76,8 @@ def crear_pedido_entrega(tipo: str, items: list, total: int, *, cliente_nombre,
             "mp": metodo_pago, "pc": int(paga_con or 0), "fee": int(fee or 0),
             "ng": (nota_general or None),
         }).scalar_one()
+        # Descuento de inventario en el mismo txn (igual que en los pedidos de mesa).
+        aplicar_inventario(conn, items, -1)
     enqueue_comanda(int(nuevo_id))
     # Alimenta la base de clientes (para autocompletar futuros pedidos). Tolerante.
     if telefono:
@@ -84,14 +91,20 @@ def crear_pedido_entrega(tipo: str, items: list, total: int, *, cliente_nombre,
 
 # ── Helpers de catálogo ─────────────────────────────────────────────────────────
 def _catalogo_seccion(df_cat, categoria):
-    """[{id, nombre, precio, descripcion}] ofrecibles hoy de una categoría."""
+    """[{id, nombre, precio, descripcion, stock}] ofrecibles hoy de una categoría.
+    OCULTACIÓN ESTRICTA del a la carta: un plato con control de stock que llega a 0
+    desaparece por completo de la carta del mesero (no se muestra ni en gris)."""
     if df_cat is None or df_cat.empty:
         return []
     sub = disponibles(df_cat[df_cat["categoria"] == categoria])
     out = []
     for _, r in sub.iterrows():
+        s = stock_int(r.get("stock"))
+        if s is not None and s <= 0:
+            continue
         out.append({"id": int(r["id"]), "nombre": r["nombre"],
-                    "precio": int(r["precio"]), "descripcion": r.get("descripcion")})
+                    "precio": int(r["precio"]), "descripcion": r.get("descripcion"),
+                    "stock": s})
     return out
 
 
@@ -120,18 +133,104 @@ def _cfg_text(it) -> str:
 # se llavean por uid (pdpos_<uid>_*) y no por índice posicional.
 # "Ninguno" encabeza entrada/principio/proteína: si se elige, ese paso se guarda como
 # None → utils.items lo omite (no imprime ni inserta nada para ese slot) y no exige el
-# ingrediente. El valor por defecto sigue siendo el primer componente real (index=1).
+# ingrediente. Entrada/principio/proteína se eligen con BOTONES (no st.radio) para poder
+# deshabilitar individualmente las opciones agotadas y mostrar las porciones restantes;
+# el valor por defecto es el primer componente DISPONIBLE (ver _selector_grupo).
 NINGUNO = "Ninguno"
 
 
 def _eliminar_plato_dia(uid) -> None:
     """Quita una instancia de Plato del Día del carrito y purga el estado de sus
-    widgets (radios/steppers/nota) para que no quede 'pegado' a un uid reutilizado."""
+    widgets (selectores/steppers/nota) para que no quede 'pegado' a un uid reutilizado."""
     insts = st.session_state.get("pd_instancias", [])
     if uid in insts:
         insts.remove(uid)
     for k in [k for k in st.session_state if str(k).startswith(f"pdpos_{uid}_")]:
         del st.session_state[k]
+
+
+def _stock_suffix(stock) -> str:
+    """' (12 disp.)' si lleva control; ' · Agotado' en 0; '' si es ilimitado (None)."""
+    if stock is None:
+        return ""
+    return f" ({int(stock)} disp.)" if int(stock) > 0 else " · Agotado"
+
+
+def _default_grupo_sel(opciones) -> str:
+    """Selección por defecto de un grupo: la primera opción DISPONIBLE (con stock o
+    ilimitada). Si todas están agotadas, cae en 'Ninguno' (deja el plato válido)."""
+    for o in opciones:
+        if not agotado_por_stock(o.get("stock")):
+            return o["nombre"]
+    return NINGUNO
+
+
+def _selector_grupo(uid, grupo, opciones, label):
+    """Selector de UNA opción (entrada/principio/proteína) en botones — no st.radio —
+    para poder deshabilitar individualmente las opciones agotadas (los radios de
+    Streamlit no permiten desactivar opciones sueltas) y mostrar las porciones que
+    quedan. 'Ninguno' siempre disponible. Devuelve el nombre elegido, o None (Ninguno)."""
+    key = f"pdpos_{uid}_{grupo}"
+    if key not in st.session_state:
+        st.session_state[key] = _default_grupo_sel(opciones)
+    sel = st.session_state.get(key)
+    st.markdown(f'<div style="font-size:0.75rem; color:#6b7280; margin-top:6px;">{label}</div>',
+                unsafe_allow_html=True)
+    botones = [{"nombre": NINGUNO, "stock": None, "disabled": False}]
+    for o in opciones:
+        botones.append({"nombre": o["nombre"], "stock": o.get("stock"),
+                        "disabled": agotado_por_stock(o.get("stock"))})
+    por_fila = 3
+    for inicio in range(0, len(botones), por_fila):
+        fila = botones[inicio:inicio + por_fila]
+        cols = st.columns(len(fila))
+        for col, b in zip(cols, fila):
+            with col:
+                nombre = b["nombre"]
+                activo = (sel == nombre)
+                etiqueta = f"{'● ' if activo else ''}{nombre}{_stock_suffix(b['stock'])}"
+                if st.button(etiqueta, key=f"pdpos_{uid}_{grupo}_opt_{nombre}",
+                             use_container_width=True, disabled=b["disabled"],
+                             type=("primary" if activo else "secondary")):
+                    st.session_state[key] = nombre
+                    st.rerun(scope="fragment")
+    return None if sel == NINGUNO else sel
+
+
+def _render_alerta_cocina():
+    """Tablero proactivo de disponibilidad SOBRE el botón de armar el Plato del Día:
+    avisa qué micro-componentes están agotados (0) y cuáles quedan pocos (≤STOCK_BAJO),
+    para que el mesero lo sepa ANTES de acercarse a la mesa. No oculta nunca el plato."""
+    r = resumen_disponibilidad_componentes()
+    ago, bajos = r["agotados"], r["bajos"]
+    if not ago and not bajos:
+        return
+    bloques = []
+    if ago:
+        chips = " ".join(
+            f'<span style="display:inline-block; background:#fee2e2; color:#991b1b; '
+            f'border:1px solid #fecaca; border-radius:999px; padding:2px 10px; margin:2px; '
+            f'font-size:0.78rem; font-weight:600;">'
+            f'{html.escape(GRUPO_LABEL.get(a["grupo"], a["grupo"]))}: {html.escape(a["nombre"])}</span>'
+            for a in ago)
+        bloques.append(f'<div style="margin-bottom:4px;">'
+                       f'<b style="color:#991b1b;">🚫 Agotado:</b> {chips}</div>')
+    if bajos:
+        chips = " ".join(
+            f'<span style="display:inline-block; background:#fef3c7; color:#92400e; '
+            f'border:1px solid #fde68a; border-radius:999px; padding:2px 10px; margin:2px; '
+            f'font-size:0.78rem; font-weight:600;">'
+            f'{html.escape(b["nombre"])} ({int(b["stock"])})</span>'
+            for b in bajos)
+        bloques.append(f'<div><b style="color:#92400e;">⚠️ Quedan pocos:</b> {chips}</div>')
+    st.markdown(
+        '<div style="background:#fffbeb; border:1px solid #fde68a; border-radius:12px; '
+        'padding:0.7rem 0.9rem; margin-bottom:0.8rem;">'
+        '<div style="font-family:\'Syne\',sans-serif; font-weight:700; font-size:0.85rem; '
+        'color:#1a1a1a; margin-bottom:6px;">🔔 Alerta de cocina · Plato del Día</div>'
+        + "".join(bloques) + '</div>',
+        unsafe_allow_html=True,
+    )
 
 
 def _seccion_plato_dia(comp, precio, n):
@@ -144,6 +243,9 @@ def _seccion_plato_dia(comp, precio, n):
                     unsafe_allow_html=True)
         return [], True
 
+    # Alerta proactiva de cocina (agotados / quedan pocos) ANTES de armar el plato.
+    _render_alerta_cocina()
+
     st.caption(f"${fmt_money(precio)} c/u · elige {n} acompañamientos (puedes repetir)")
 
     instancias = st.session_state.setdefault("pd_instancias", [])
@@ -151,10 +253,6 @@ def _seccion_plato_dia(comp, precio, n):
         st.session_state["pd_seq"] = int(st.session_state.get("pd_seq", 0)) + 1
         instancias.append(st.session_state["pd_seq"])
         st.rerun(scope="fragment")
-
-    ent_opts = [NINGUNO] + [e["nombre"] for e in comp["entrada"]]
-    pri_opts = [NINGUNO] + [p["nombre"] for p in comp["principio"]]
-    pro_opts = [NINGUNO] + [p["nombre"] for p in comp["proteina"]]
 
     plates, ok = [], True
     for pos, uid in enumerate(list(instancias)):
@@ -169,16 +267,10 @@ def _seccion_plato_dia(comp, precio, n):
                 _eliminar_plato_dia(uid)
                 st.rerun(scope="fragment")
 
-        st.markdown('<div style="font-size:0.75rem; color:#6b7280;">Entrada</div>', unsafe_allow_html=True)
-        entrada = st.radio("Entrada", ent_opts, index=1,
-                           key=f"pdpos_{uid}_entrada", label_visibility="collapsed", horizontal=True)
-        st.markdown('<div style="font-size:0.75rem; color:#6b7280;">Principio</div>', unsafe_allow_html=True)
-        principio = st.radio("Principio", pri_opts, index=1,
-                             key=f"pdpos_{uid}_principio", label_visibility="collapsed", horizontal=True)
-        st.markdown('<div style="font-size:0.75rem; color:#6b7280;">Carnes o Proteína</div>',
-                    unsafe_allow_html=True)
-        proteina = st.radio("Proteína", pro_opts, index=1,
-                            key=f"pdpos_{uid}_proteina", label_visibility="collapsed", horizontal=True)
+        # Selectores con porciones restantes; las opciones en 0 quedan deshabilitadas.
+        entrada   = _selector_grupo(uid, "entrada",   comp["entrada"],   "Entrada")
+        principio = _selector_grupo(uid, "principio", comp["principio"], "Principio")
+        proteina  = _selector_grupo(uid, "proteina",  comp["proteina"],  "Carnes o Proteína")
 
         cuentas = st.session_state.setdefault(f"pdpos_{uid}_acomp", {})
         elegidos = sum(cuentas.values())
@@ -186,10 +278,14 @@ def _seccion_plato_dia(comp, precio, n):
                     f'Acompañamientos ({elegidos}/{n})</div>', unsafe_allow_html=True)
         for a in comp["acompanamiento"]:
             aid = str(a["id"])
+            stock_a = a.get("stock")
+            agot = agotado_por_stock(stock_a)
             c = int(cuentas.get(aid, 0))
             ac1, ac2, ac3, ac4 = st.columns([3, 1, 1, 1])
             with ac1:
-                st.markdown(f'<div style="padding:4px 0; font-size:0.88rem;">{html.escape(str(a["nombre"]))}</div>',
+                color = "#9ca3af" if agot else "#1a1a1a"
+                st.markdown(f'<div style="padding:4px 0; font-size:0.88rem; color:{color};">'
+                            f'{html.escape(str(a["nombre"]))}{_stock_suffix(stock_a)}</div>',
                             unsafe_allow_html=True)
             with ac2:
                 if st.button("−", key=f"pdpos_{uid}_acm_{aid}", use_container_width=True):
@@ -202,8 +298,11 @@ def _seccion_plato_dia(comp, precio, n):
                 st.markdown(f'<div style="text-align:center; padding:4px 0; font-weight:600;">{c}</div>',
                             unsafe_allow_html=True)
             with ac4:
+                # Tope: ya se eligieron n, o el componente está agotado, o ya se tomaron
+                # todas sus porciones rastreadas en este plato.
+                tope_stock = (stock_a is not None and c >= int(stock_a))
                 if st.button("+", key=f"pdpos_{uid}_acp_{aid}", use_container_width=True,
-                             disabled=elegidos >= n):
+                             disabled=(elegidos >= n or agot or tope_stock)):
                     cuentas[aid] = c + 1
                     st.rerun(scope="fragment")
 
@@ -221,10 +320,8 @@ def _seccion_plato_dia(comp, precio, n):
         plates.append({
             "tipo": "plato_dia", "nombre": "Plato del Día", "precio": int(precio),
             "cantidad": 1,
-            "config": {"entrada": None if entrada == NINGUNO else entrada,
-                       "principio": None if principio == NINGUNO else principio,
-                       "proteina": None if proteina == NINGUNO else proteina,
-                       "acompanamientos": acomp_list},
+            "config": {"entrada": entrada, "principio": principio,
+                       "proteina": proteina, "acompanamientos": acomp_list},
             "nota": (nota or "").strip(),
         })
     return plates, ok
@@ -251,7 +348,8 @@ def _seccion_catalogo(productos, tipo, titulo, con_desc=False):
             st.markdown(
                 f'<div style="padding:6px 0;"><span style="font-size:0.9rem; color:#1a1a1a;">'
                 f'{html.escape(str(p["nombre"]))}</span>{desc}'
-                f'<div style="font-size:0.82rem; color:#6b7280;">${fmt_money(p["precio"])}</div></div>',
+                f'<div style="font-size:0.82rem; color:#6b7280;">${fmt_money(p["precio"])}'
+                f'{_stock_suffix(p.get("stock"))}</div></div>',
                 unsafe_allow_html=True,
             )
         with c_qty:
@@ -267,7 +365,9 @@ def _seccion_catalogo(productos, tipo, titulo, con_desc=False):
                 st.markdown(f'<div style="text-align:center; padding:4px 0; font-weight:600;">{qty}</div>',
                             unsafe_allow_html=True)
             with pl:
-                if st.button("+", key=f"mas_{key}", use_container_width=True):
+                # No se puede pedir más de lo que queda en stock (si lleva control).
+                tope = (p.get("stock") is not None and qty >= int(p["stock"]))
+                if st.button("+", key=f"mas_{key}", use_container_width=True, disabled=tope):
                     carrito[key] = qty + 1
                     st.rerun(scope="fragment")
         if qty > 0:

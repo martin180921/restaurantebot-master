@@ -75,6 +75,9 @@ def _ensure_schema():
                     agotado_hasta DATE
                 )
             """))
+            # Inventario diario: stock por componente y por plato (NULL = ilimitado).
+            conn.execute(text("ALTER TABLE menu_componentes ADD COLUMN IF NOT EXISTS stock INTEGER"))
+            conn.execute(text("ALTER TABLE menu ADD COLUMN IF NOT EXISTS stock INTEGER"))
             conn.execute(text("""
                 CREATE TABLE IF NOT EXISTS ajustes (
                     clave VARCHAR(50) PRIMARY KEY,
@@ -133,28 +136,39 @@ def _clean_tel(valor) -> str:
 
 
 # ── Lecturas (cacheadas; la carta cambia poco) ─────────────────────────────────
+def _stock_val(v):
+    """int del stock o None (ilimitado). El None distingue 'sin control' de '0'."""
+    return None if v is None else int(v)
+
+
 @st.cache_data(ttl=30)
 def cargar_componentes_activos() -> dict:
-    """{grupo: [{id, nombre}]} de componentes ofrecibles hoy (activo + no agotado)."""
+    """{grupo: [{id, nombre, stock}]} de componentes ofrecibles hoy (activo + no agotado).
+    Los componentes NO se ocultan por stock 0 (el Plato del Día no se esconde nunca); el
+    configurador marca los agotados. 'stock' = porciones restantes o None (ilimitado)."""
     with engine.connect() as conn:
         rows = conn.execute(text(
-            "SELECT id, grupo, nombre FROM menu_componentes "
+            "SELECT id, grupo, nombre, stock FROM menu_componentes "
             "WHERE activo = TRUE AND (agotado_hasta IS NULL OR agotado_hasta < CURRENT_DATE) "
             "ORDER BY grupo, orden, id"
         )).mappings().all()
     out = {"entrada": [], "principio": [], "proteina": [], "acompanamiento": []}
     for r in rows:
-        out.setdefault(r["grupo"], []).append({"id": int(r["id"]), "nombre": r["nombre"]})
+        out.setdefault(r["grupo"], []).append(
+            {"id": int(r["id"]), "nombre": r["nombre"], "stock": _stock_val(r["stock"])})
     return out
 
 
 @st.cache_data(ttl=30)
 def cargar_catalogo() -> dict:
-    """{categoria: [{id, nombre, precio, descripcion}]} ofrecible hoy."""
+    """{categoria: [{id, nombre, precio, descripcion, stock}]} ofrecible hoy. OCULTACIÓN
+    ESTRICTA del a la carta: los platos con control de stock en 0 se excluyen aquí mismo
+    (stock IS NULL OR stock > 0) → desaparecen de la carta pública."""
     with engine.connect() as conn:
         rows = conn.execute(text(
-            "SELECT id, nombre, precio, categoria, descripcion FROM menu "
+            "SELECT id, nombre, precio, categoria, descripcion, stock FROM menu "
             "WHERE activo = TRUE AND (agotado_hasta IS NULL OR agotado_hasta < CURRENT_DATE) "
+            "AND (stock IS NULL OR stock > 0) "
             "ORDER BY categoria, orden, id"
         )).mappings().all()
     out = {"especial": [], "a_la_carta": [], "bebida": []}
@@ -162,6 +176,7 @@ def cargar_catalogo() -> dict:
         out.setdefault(r["categoria"], []).append({
             "id": int(r["id"]), "nombre": r["nombre"],
             "precio": int(r["precio"]), "descripcion": r["descripcion"],
+            "stock": _stock_val(r["stock"]),
         })
     return out
 
@@ -206,11 +221,55 @@ def upsert_cliente(telefono: str, nombre=None, direccion=None):
         pass
 
 
+def _descontar_inventario(conn, items) -> None:
+    """Descuenta el stock del pedido en el MISMO txn que el INSERT (atómico). Solo toca
+    filas con stock NO NULL (rastreadas): componentes del Plato del Día por (grupo,
+    nombre) — entrada/principio/proteína + cada acompañamiento elegido — y los platos a
+    la carta por menu_id × cantidad. GREATEST(0, …) evita negativos. No lanza: un fallo
+    de inventario no debe tumbar el pedido del cliente."""
+    comp_qty, menu_qty = {}, {}
+    for it in (items or []):
+        if not isinstance(it, dict):
+            continue
+        cant = int(it.get("cantidad", 1) or 1)
+        if cant <= 0:
+            continue
+        if str(it.get("tipo") or "item").lower() == "plato_dia":
+            cfg = it.get("config") or {}
+            for g in ("entrada", "principio", "proteina"):
+                v = cfg.get(g)
+                if v:
+                    k = (g, str(v).strip().lower())
+                    comp_qty[k] = comp_qty.get(k, 0) + cant
+            for a in (cfg.get("acompanamientos") or []):
+                if a:
+                    k = ("acompanamiento", str(a).strip().lower())
+                    comp_qty[k] = comp_qty.get(k, 0) + cant
+        else:
+            try:
+                mid = int(it.get("id"))
+            except (TypeError, ValueError):
+                continue
+            menu_qty[mid] = menu_qty.get(mid, 0) + cant
+    try:
+        for (grupo, nombre_l), n in comp_qty.items():
+            conn.execute(text(
+                "UPDATE menu_componentes SET stock = GREATEST(0, stock - :n) "
+                "WHERE grupo = :g AND LOWER(nombre) = :nom AND stock IS NOT NULL"
+            ), {"n": int(n), "g": grupo, "nom": nombre_l})
+        for mid, n in menu_qty.items():
+            conn.execute(text(
+                "UPDATE menu SET stock = GREATEST(0, stock - :n) WHERE id = :id AND stock IS NOT NULL"
+            ), {"n": int(n), "id": int(mid)})
+    except Exception:
+        pass
+
+
 def guardar_pedido(numero_cliente, items, total, *, tipo_entrega, cliente_nombre,
                    cliente_telefono, direccion, metodo_pago, paga_con, fee,
                    nota_general) -> int:
     with engine.begin() as conn:
-        return int(conn.execute(text("""
+        nuevo_id = int(conn.execute(text("""
             INSERT INTO pedidos
               (numero_cliente, items, total, estado, tipo_entrega, cliente_nombre,
                cliente_telefono, direccion, metodo_pago, paga_con, fee, nota_general)
@@ -223,6 +282,9 @@ def guardar_pedido(numero_cliente, items, total, *, tipo_entrega, cliente_nombre
             "ct": cliente_telefono, "dir": (direccion or None), "mp": metodo_pago,
             "pc": int(paga_con or 0), "fee": int(fee or 0), "ng": (nota_general or None),
         }).scalar())
+        # Descuento inmediato del inventario (mismo txn): evita revender lo ya pedido.
+        _descontar_inventario(conn, items)
+        return nuevo_id
 
 
 def estado_pedido(pid: int):
@@ -461,6 +523,26 @@ def _pantalla_gate():
 # ══════════════════════════════════════════════════════════════════════════════
 # Carta (4 secciones) — corre como fragment para reruns locales en los +/-
 # ══════════════════════════════════════════════════════════════════════════════
+def _disp_suffix(stock) -> str:
+    """' (12 disp.)' si lleva control; ' · Agotado' en 0; '' si es ilimitado (None)."""
+    if stock is None:
+        return ""
+    return f" ({int(stock)} disp.)" if int(stock) > 0 else " · Agotado"
+
+
+def _agotado(opcion) -> bool:
+    """True si un componente lleva control de stock y está en 0."""
+    s = opcion.get("stock")
+    return s is not None and int(s) <= 0
+
+
+def _sanea_radio(key: str, opciones) -> None:
+    """Si el valor guardado de un radio ya no está entre las opciones (p. ej. su opción
+    se agotó), lo limpia para que Streamlit no reviente con 'default not in options'."""
+    if key in st.session_state and st.session_state[key] not in opciones:
+        del st.session_state[key]
+
+
 def _stepper(key: str, qty: int, *, permitir_mas=True):
     """Fila −/cant/+ reutilizable. Devuelve la nueva cantidad (mutando session)."""
     c_minus, c_qty, c_plus = st.columns([1, 1, 1])
@@ -496,11 +578,13 @@ def _seccion_catalogo(productos, tipo, con_desc=False):
                     if con_desc and p.get("descripcion") else "")
             st.markdown(
                 f'<div style="padding:8px 0;"><span class="c-name">{html.escape(str(p["nombre"]))}</span>'
-                f'{desc}<div class="c-price">${fmt_money(p["precio"])}</div></div>',
+                f'{desc}<div class="c-price">${fmt_money(p["precio"])}{_disp_suffix(p.get("stock"))}</div></div>',
                 unsafe_allow_html=True,
             )
         with c_step:
-            _stepper(key, qty)
+            # No se puede pedir más de lo que queda (si el plato lleva control de stock).
+            tope = (p.get("stock") is not None and qty >= int(p["stock"]))
+            _stepper(key, qty, permitir_mas=not tope)
         if qty > 0:
             elegidos.append({"tipo": tipo, "id": pid, "nombre": p["nombre"],
                              "precio": int(p["precio"]), "cantidad": qty})
@@ -515,6 +599,16 @@ def _seccion_plato_dia(comp, precio, n):
     if faltan:
         st.markdown('<div class="c-empty">El Plato del Día no está disponible hoy.</div>',
                     unsafe_allow_html=True)
+        return [], True
+
+    # Opciones DISPONIBLES (excluye las agotadas: stock 0). Si un grupo obligatorio queda
+    # sin opciones, no hay combinación válida → Plato del Día no disponible por ahora.
+    disp_ent = [e for e in comp["entrada"] if not _agotado(e)]
+    disp_pri = [p for p in comp["principio"] if not _agotado(p)]
+    disp_pro = [p for p in comp["proteina"] if not _agotado(p)]
+    if not (disp_ent and disp_pri and disp_pro):
+        st.markdown('<div class="c-empty">El Plato del Día no está disponible por ahora '
+                    '(algún ingrediente se agotó).</div>', unsafe_allow_html=True)
         return [], True
 
     st.markdown(f'<div class="c-price">${fmt_money(precio)} cada uno · elige {n} acompañamientos '
@@ -538,24 +632,35 @@ def _seccion_plato_dia(comp, precio, n):
                 st.session_state["pd_qty"] = qty + 1
                 st.rerun(scope="fragment")
 
-    entradas = comp["entrada"]
-    principios = comp["principio"]
-    proteinas = comp["proteina"]
     acomps = comp["acompanamiento"]
+    # Mapas nombre→stock para mostrar las porciones restantes junto a cada opción.
+    stock_ent = {e["nombre"]: e.get("stock") for e in disp_ent}
+    stock_pri = {p["nombre"]: p.get("stock") for p in disp_pri}
+    stock_pro = {p["nombre"]: p.get("stock") for p in disp_pro}
+    nom_ent = [e["nombre"] for e in disp_ent]
+    nom_pri = [p["nombre"] for p in disp_pri]
+    nom_pro = [p["nombre"] for p in disp_pro]
 
     plates, ok = [], True
     for i in range(qty):
         st.markdown(f'<div class="plate-card"><div class="plate-title">Plato #{i+1}</div></div>',
                     unsafe_allow_html=True)
+        # Sanea la selección guardada si su opción se agotó (evita el crash de Streamlit).
+        _sanea_radio(f"pd_{i}_entrada", nom_ent)
+        _sanea_radio(f"pd_{i}_principio", nom_pri)
+        _sanea_radio(f"pd_{i}_proteina", nom_pro)
         st.markdown('<div class="conf-label">Entrada</div>', unsafe_allow_html=True)
-        entrada = st.radio("Entrada", [e["nombre"] for e in entradas],
-                           key=f"pd_{i}_entrada", label_visibility="collapsed")
+        entrada = st.radio("Entrada", nom_ent, key=f"pd_{i}_entrada",
+                           format_func=lambda nm: f"{nm}{_disp_suffix(stock_ent.get(nm))}",
+                           label_visibility="collapsed")
         st.markdown('<div class="conf-label">Principio</div>', unsafe_allow_html=True)
-        principio = st.radio("Principio", [p["nombre"] for p in principios],
-                             key=f"pd_{i}_principio", label_visibility="collapsed")
+        principio = st.radio("Principio", nom_pri, key=f"pd_{i}_principio",
+                             format_func=lambda nm: f"{nm}{_disp_suffix(stock_pri.get(nm))}",
+                             label_visibility="collapsed")
         st.markdown('<div class="conf-label">Carnes o Proteína</div>', unsafe_allow_html=True)
-        proteina = st.radio("Proteína", [p["nombre"] for p in proteinas],
-                            key=f"pd_{i}_proteina", label_visibility="collapsed")
+        proteina = st.radio("Proteína", nom_pro, key=f"pd_{i}_proteina",
+                            format_func=lambda nm: f"{nm}{_disp_suffix(stock_pro.get(nm))}",
+                            label_visibility="collapsed")
 
         cuentas = st.session_state.setdefault(f"pd_{i}_acomp", {})
         elegidos_n = sum(cuentas.values())
@@ -563,10 +668,14 @@ def _seccion_plato_dia(comp, precio, n):
                     f'<span class="acc-count">({elegidos_n}/{n})</span></div>', unsafe_allow_html=True)
         for a in acomps:
             aid = str(a["id"])
+            stock_a = a.get("stock")
+            agot = _agotado(a)
             c = int(cuentas.get(aid, 0))
             c_an, c_as = st.columns([3, 2])
             with c_an:
-                st.markdown(f'<div style="padding:6px 0;" class="c-name">{html.escape(str(a["nombre"]))}</div>',
+                color = "#aaa" if agot else "#1a1a1a"
+                st.markdown(f'<div style="padding:6px 0; color:{color};" class="c-name">'
+                            f'{html.escape(str(a["nombre"]))}{_disp_suffix(stock_a)}</div>',
                             unsafe_allow_html=True)
             with c_as:
                 cm2, cq2, cp2 = st.columns([1, 1, 1])
@@ -580,7 +689,9 @@ def _seccion_plato_dia(comp, precio, n):
                 with cq2:
                     st.markdown(f'<div class="c-qty">{c}</div>', unsafe_allow_html=True)
                 with cp2:
-                    if st.button("+", key=f"pd_{i}_acp_{aid}", disabled=elegidos_n >= n):
+                    tope_stock = (stock_a is not None and c >= int(stock_a))
+                    if st.button("+", key=f"pd_{i}_acp_{aid}",
+                                 disabled=(elegidos_n >= n or agot or tope_stock)):
                         cuentas[aid] = c + 1
                         st.rerun(scope="fragment")
 

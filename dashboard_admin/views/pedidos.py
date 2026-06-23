@@ -11,7 +11,8 @@ import auth
 import audit
 import empleados
 from db import (engine, fmt_money, fecha_corta, flash, drain_toasts,
-                saldo_pedido, cobrado_pedido, _es_pagado, _a_entero)
+                saldo_pedido, cobrado_pedido, _es_pagado, _a_entero,
+                aplicar_inventario)
 from utils.print_jobs import enqueue_recibo, enqueue_comanda
 from utils.items import (formatear_items_html, lineas_por_categoria,
                          parse_items, etiqueta_item)
@@ -160,7 +161,7 @@ def cancelar_pedido(pedido_id: int, motivo: str = ""):
     total_canc = 0
     with engine.begin() as conn:
         row = conn.execute(text(
-            "SELECT total, COALESCE(total_pagado, 0) AS tp, pagado, "
+            "SELECT total, items, COALESCE(total_pagado, 0) AS tp, pagado, "
             "COALESCE(cobro_iniciado, FALSE) AS ci, estado "
             "FROM pedidos WHERE id = :id FOR UPDATE"
         ), {"id": pedido_id}).mappings().first()
@@ -175,6 +176,11 @@ def cancelar_pedido(pedido_id: int, motivo: str = ""):
                      "cancelled_at = NOW() WHERE id = :id"),
                 {"m": (motivo or "").strip() or None, "id": pedido_id}
             )
+            # Reversa de inventario SOLO si se cancela ANTES de 'listo': lo que aún no se
+            # cocinó vuelve al stock. Un pedido ya 'listo'/'entregado' NO se reintegra (la
+            # comida ya se preparó). Mismo txn que la cancelación → atómico.
+            if row["estado"] in ("pendiente", "en preparacion"):
+                aplicar_inventario(conn, row["items"], +1)
     if bloqueado:
         # Defensa en profundidad: la UI ya oculta el botón, pero si se llega aquí avisamos.
         flash("🔒 No se puede cancelar: la cuenta ya entró a caja.", "🔒")

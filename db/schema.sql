@@ -43,7 +43,9 @@ CREATE TABLE IF NOT EXISTS menu (
     orden         INTEGER      NOT NULL DEFAULT 0,
     agotado_hasta DATE,
     categoria     VARCHAR(20)  NOT NULL DEFAULT 'a_la_carta',
-    descripcion   TEXT
+    descripcion   TEXT,
+    -- Inventario diario: unidades disponibles hoy. NULL = sin control (ilimitado).
+    stock         INTEGER
 );
 
 -- Componentes del Plato del Día (grupos: entrada / principio / proteina /
@@ -54,7 +56,9 @@ CREATE TABLE IF NOT EXISTS menu_componentes (
     nombre        VARCHAR(100) NOT NULL,
     activo        BOOLEAN      NOT NULL DEFAULT TRUE,
     orden         INTEGER      NOT NULL DEFAULT 0,
-    agotado_hasta DATE
+    agotado_hasta DATE,
+    -- Inventario diario: porciones disponibles hoy de esta opción. NULL = ilimitado.
+    stock         INTEGER
 );
 
 -- Ajustes clave/valor: precios planos, recargo de entrega y nº de acompañamientos.
@@ -262,6 +266,8 @@ CREATE TABLE IF NOT EXISTS agentes_estado (
 ALTER TABLE menu    ADD COLUMN IF NOT EXISTS agotado_hasta DATE;
 ALTER TABLE menu    ADD COLUMN IF NOT EXISTS categoria VARCHAR(20) NOT NULL DEFAULT 'a_la_carta';
 ALTER TABLE menu    ADD COLUMN IF NOT EXISTS descripcion TEXT;
+ALTER TABLE menu             ADD COLUMN IF NOT EXISTS stock INTEGER;  -- inventario diario (NULL = ilimitado)
+ALTER TABLE menu_componentes ADD COLUMN IF NOT EXISTS stock INTEGER;  -- inventario diario por componente
 ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS mesa_id INTEGER REFERENCES mesas(id);
 ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS motivo_cancelacion TEXT;
 ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP;

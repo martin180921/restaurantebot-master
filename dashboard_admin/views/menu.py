@@ -24,7 +24,8 @@ import auth
 from db import (engine, cargar_menu, cargar_componentes, cargar_catalogo,
                 cargar_ajustes, fmt_money, flash, disponibles,
                 componentes_activos_por_grupo, precio_plato_dia, num_acompanamientos,
-                GRUPOS_COMPONENTE, GRUPO_LABEL, precio_especiales)
+                GRUPOS_COMPONENTE, GRUPO_LABEL, precio_especiales,
+                guardar_inventario, stock_int, STOCK_BAJO)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────────
@@ -55,6 +56,23 @@ def _clear_menu_caches():
     plana heredada que aún usa el POS hasta su rediseño)."""
     cargar_catalogo.clear()
     cargar_menu.clear()
+
+
+def _stock_chip(stock) -> str:
+    """Chip de existencias para las tarjetas: '📦 N' verde (>umbral) / ámbar (≤umbral) /
+    rojo (0). Vacío si la opción no lleva control de stock (ilimitada). El stock diario
+    se fija en la pestaña 📦 Inventario."""
+    s = stock_int(stock)
+    if s is None:
+        return ""
+    if s <= 0:
+        bg, fg = "#fee2e2", "#991b1b"
+    elif s <= STOCK_BAJO:
+        bg, fg = "#fef3c7", "#92400e"
+    else:
+        bg, fg = "#dcfce7", "#15803d"
+    return (f'<span class="badge" style="background:{bg}; color:{fg}; border:1px solid {bg};">'
+            f'📦 {s}</span>')
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -311,7 +329,7 @@ def _componente_card(row, grupo: str):
         f'<div class="{card_cls}" style="padding:0.6rem 0.8rem; margin-bottom:0.4rem;">'
         f'<div style="display:flex; justify-content:space-between; align-items:center;">'
         f'<div class="menu-nombre" style="font-size:0.9rem;">{html.escape(str(nombre))}</div>'
-        f'<div>{estado}</div></div></div>',
+        f'<div>{_stock_chip(row.get("stock"))}{estado}</div></div></div>',
         unsafe_allow_html=True,
     )
     b1, b2, b3, b4 = st.columns(4)
@@ -409,7 +427,7 @@ def _item_card(row, categoria: str, con_precio: bool):
             f'<div class="{card_cls}">'
             f'<div style="display:flex; justify-content:space-between; align-items:center;">'
             f'<div><div class="menu-nombre">{html.escape(str(nombre))}</div>{sub_html}</div>'
-            f'<div style="text-align:right;">{badge}</div></div></div>',
+            f'<div style="text-align:right;">{_stock_chip(row.get("stock"))}{badge}</div></div></div>',
             unsafe_allow_html=True,
         )
     with col_btns:
@@ -535,6 +553,103 @@ def _render_ajustes():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Pestaña 6 · Inventario del día (stock por componente y por plato)
+# ══════════════════════════════════════════════════════════════════════════════
+# Pantalla de montaje diario: cada mañana el administrador fija cuántas porciones hay
+# de cada micro-componente del Plato del Día (cada sopa, proteína, acompañamiento…) y
+# cuántas unidades de cada plato a la carta / especial / bebida. Al guardar se inicializan
+# o sobrescriben los contadores en vivo. Marcar "Ilimitado" deja el ítem SIN control
+# (no se descuenta ni se oculta). Va en un st.form para no recargar en cada tecla.
+def _actual_txt(stock) -> str:
+    """Texto del stock vivo de una fila ('actual: N' / 'actual: ilimitado')."""
+    s = stock_int(stock)
+    return "actual: ilimitado" if s is None else f"actual: {s}"
+
+
+def _fila_inventario(scope: str, oid: int, nombre, stock_actual):
+    """Una fila del formulario: nombre + 'Ilimitado' + 'Cantidad'. Devuelve el par
+    (ilimitado, cantidad) tal como quedan los widgets (se lee en el submit)."""
+    s = stock_int(stock_actual)
+    c_n, c_u, c_q = st.columns([3, 1.4, 1.6])
+    with c_n:
+        st.markdown(
+            f'<div style="padding:6px 0;"><span style="font-size:0.9rem; color:#1a1a1a;">'
+            f'{html.escape(str(nombre))}</span>'
+            f'<div style="font-size:0.72rem; color:#9ca3af;">{_actual_txt(stock_actual)}</div></div>',
+            unsafe_allow_html=True,
+        )
+    with c_u:
+        ilimitado = st.checkbox("Ilimitado", value=(s is None),
+                                key=f"inv_{scope}_unl_{oid}")
+    with c_q:
+        cantidad = st.number_input("Cantidad", min_value=0, step=1,
+                                   value=int(s) if s is not None else 0,
+                                   key=f"inv_{scope}_qty_{oid}", label_visibility="collapsed")
+    return ilimitado, int(cantidad or 0)
+
+
+def _render_inventario():
+    st.markdown(
+        '<div style="background:#f9fafb; border:1px solid #e5e7eb; border-radius:10px; '
+        'padding:0.8rem 1rem; font-size:0.85rem; color:#374151; margin-bottom:1rem;">'
+        '📦 Fija el <b>stock del día</b>. Cada componente del Plato del Día se cuenta por '
+        'separado (50 sopas, 50 ensaladas, 50 res, 50 pollo…) y cada plato a la carta como '
+        'una unidad. Al guardar se <b>sobrescriben</b> los contadores en vivo. Marca '
+        '<b>Ilimitado</b> para no controlar un ítem.</div>',
+        unsafe_allow_html=True,
+    )
+
+    df_comp = cargar_componentes()
+    df_cat = cargar_catalogo()
+    comp_vals, menu_vals = {}, {}
+
+    with st.form("form_inventario_dia"):
+        st.markdown('<div class="section-title">🍛 Plato del Día · por componente</div>',
+                    unsafe_allow_html=True)
+        if df_comp is None or df_comp.empty:
+            st.caption("No hay componentes del Plato del Día. Créalos en la pestaña 🍽️ Plato del Día.")
+        else:
+            for grupo in GRUPOS_COMPONENTE:
+                sub = df_comp[df_comp["grupo"] == grupo]
+                if sub.empty:
+                    continue
+                st.markdown(f'<div style="font-weight:700; font-size:0.85rem; color:#374151; '
+                            f'margin:0.6rem 0 0.2rem;">{html.escape(GRUPO_LABEL.get(grupo, grupo))}</div>',
+                            unsafe_allow_html=True)
+                for _, row in sub.iterrows():
+                    cid = int(row["id"])
+                    comp_vals[cid] = _fila_inventario("comp", cid, row["nombre"], row.get("stock"))
+
+        st.markdown('<div class="section-title" style="margin-top:1rem;">🍽️ Platos a la carta · '
+                    'por unidad</div>', unsafe_allow_html=True)
+        hay_cat = False
+        for categoria, label in [("especial", "⭐ Especiales"),
+                                 ("a_la_carta", "📋 A la carta"),
+                                 ("bebida", "🥤 Bebidas")]:
+            sub = df_cat[df_cat["categoria"] == categoria] if not df_cat.empty else df_cat
+            if sub is None or sub.empty:
+                continue
+            hay_cat = True
+            st.markdown(f'<div style="font-weight:700; font-size:0.85rem; color:#374151; '
+                        f'margin:0.6rem 0 0.2rem;">{label}</div>', unsafe_allow_html=True)
+            for _, row in sub.iterrows():
+                mid = int(row["id"])
+                menu_vals[mid] = _fila_inventario("menu", mid, row["nombre"], row.get("stock"))
+        if not hay_cat:
+            st.caption("No hay platos a la carta. Agrégalos en sus pestañas.")
+
+        st.markdown("<div style='height:6px;'></div>", unsafe_allow_html=True)
+        guardado = st.form_submit_button("📦 Guardar inventario del día", type="primary",
+                                         use_container_width=True)
+
+    if guardado:
+        comp_stock = {cid: (None if unl else qty) for cid, (unl, qty) in comp_vals.items()}
+        menu_stock = {mid: (None if unl else qty) for mid, (unl, qty) in menu_vals.items()}
+        guardar_inventario(comp_stock, menu_stock)
+        st.rerun()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # SECCIÓN: MENÚ
 # ══════════════════════════════════════════════════════════════════════════════
 # ══════════════════════════════════════════════════════════════════════════════
@@ -605,8 +720,9 @@ def render():
         _render_readonly()
         return
 
-    t1, t2, t3, t4, t5 = st.tabs([
-        "🍽️ Plato del Día", "⭐ Especiales", "📋 A la carta", "🥤 Bebidas", "⚙️ Ajustes",
+    t1, t2, t3, t4, t5, t6 = st.tabs([
+        "🍽️ Plato del Día", "⭐ Especiales", "📋 A la carta", "🥤 Bebidas",
+        "📦 Inventario", "⚙️ Ajustes",
     ])
     with t1:
         _render_plato_dia()
@@ -617,4 +733,6 @@ def render():
     with t4:
         _render_catalogo_tab("bebida", "Bebidas", con_precio=True)
     with t5:
+        _render_inventario()
+    with t6:
         _render_ajustes()
