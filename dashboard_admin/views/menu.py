@@ -25,7 +25,7 @@ from db import (engine, cargar_menu, cargar_componentes, cargar_catalogo,
                 cargar_ajustes, fmt_money, flash, disponibles,
                 componentes_activos_por_grupo, precio_plato_dia, num_acompanamientos,
                 GRUPOS_COMPONENTE, GRUPO_LABEL, precio_especiales,
-                guardar_inventario, stock_int, STOCK_BAJO)
+                guardar_inventario, stock_int, STOCK_BAJO, agotado_por_stock)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────────
@@ -316,10 +316,16 @@ def _componente_card(row, grupo: str):
     cid = int(row["id"])
     nombre = row["nombre"]
     activo = bool(row["activo"])
-    agotado = _agotado_hoy(row.get("agotado_hasta"))
-    card_cls = "menu-card" if (activo and not agotado) else "menu-card inactivo"
-    if agotado:
+    # "Agotado" se muestra por dos vías: 86 manual del día (agotado_hasta) o stock en 0.
+    # El badge/atenuado refleja ambas; el botón 86/♻ (b2) solo gestiona el 86 MANUAL
+    # (el ♻ solo deshace eso; el stock se ajusta en 📦 Inventario).
+    agotado_dia = _agotado_hoy(row.get("agotado_hasta"))
+    sin_stock = agotado_por_stock(row.get("stock"))
+    card_cls = "menu-card" if (activo and not (agotado_dia or sin_stock)) else "menu-card inactivo"
+    if agotado_dia:
         estado = '<span class="badge badge-agotado">🚫 Hoy</span>'
+    elif sin_stock:
+        estado = '<span class="badge badge-agotado">🚫 Sin stock</span>'
     elif activo:
         estado = '<span class="badge badge-activo">●</span>'
     else:
@@ -339,7 +345,7 @@ def _componente_card(row, grupo: str):
             toggle_componente(cid, activo)
             st.rerun()
     with b2:
-        if agotado:
+        if agotado_dia:
             if st.button("♻", key=f"unago_comp_{cid}", help="Disponible de nuevo",
                          use_container_width=True):
                 quitar_agotado_componente(cid)
@@ -405,13 +411,18 @@ def _item_card(row, categoria: str, con_precio: bool):
     nombre = row["nombre"]
     precio = int(row["precio"])
     activo = bool(row["activo"])
-    agotado = _agotado_hoy(row.get("agotado_hasta"))
+    # Agotado por 86 manual (agotado_hasta) o por stock en 0. El badge/atenuado refleja
+    # ambas; el botón 86/♻ (b2) gestiona solo el 86 manual (el stock va en 📦 Inventario).
+    agotado_dia = _agotado_hoy(row.get("agotado_hasta"))
+    sin_stock = agotado_por_stock(row.get("stock"))
     desc = _txt(row.get("descripcion"))
-    card_cls = "menu-card" if (activo and not agotado) else "menu-card inactivo"
+    card_cls = "menu-card" if (activo and not (agotado_dia or sin_stock)) else "menu-card inactivo"
     badge = ('<span class="badge badge-activo">● Activo</span>' if activo
              else '<span class="badge badge-inactivo">○ Inactivo</span>')
-    if agotado:
+    if agotado_dia:
         badge += ' <span class="badge badge-agotado">🚫 Hoy</span>'
+    elif sin_stock:
+        badge += ' <span class="badge badge-agotado">🚫 Sin stock</span>'
 
     if con_precio:
         sub_html = f'<div class="menu-precio">${fmt_money(precio)}</div>'
@@ -439,7 +450,7 @@ def _item_card(row, categoria: str, con_precio: bool):
                 toggle_item(iid, activo)
                 st.rerun()
         with b2:
-            if agotado:
+            if agotado_dia:
                 if st.button("♻", key=f"unago_{categoria}_{iid}", help="Disponible de nuevo",
                              use_container_width=True):
                     quitar_agotado_item(iid)
@@ -588,6 +599,18 @@ def _fila_inventario(scope: str, oid: int, nombre, stock_actual):
     return ilimitado, int(cantidad or 0)
 
 
+def _resumen_inv(sub) -> str:
+    """Resumen para el título de un acordeón (se ve sin desplegar): cuántas opciones
+    llevan control y cuántas están agotadas. Ej: '2/3 con control · 1 agotado'."""
+    total = len(sub)
+    con = sum(1 for _, r in sub.iterrows() if stock_int(r.get("stock")) is not None)
+    agot = sum(1 for _, r in sub.iterrows() if agotado_por_stock(r.get("stock")))
+    txt = f"{con}/{total} con control"
+    if agot:
+        txt += f" · {agot} agotado"
+    return txt
+
+
 def _render_inventario():
     st.markdown(
         '<div style="background:#f9fafb; border:1px solid #e5e7eb; border-radius:10px; '
@@ -609,16 +632,17 @@ def _render_inventario():
         if df_comp is None or df_comp.empty:
             st.caption("No hay componentes del Plato del Día. Créalos en la pestaña 🍽️ Plato del Día.")
         else:
+            # Un acordeón por grupo (colapsado): mantiene la pantalla compacta y solo se
+            # despliega hacia abajo el grupo que el admin toca. El título lleva el resumen.
             for grupo in GRUPOS_COMPONENTE:
                 sub = df_comp[df_comp["grupo"] == grupo]
                 if sub.empty:
                     continue
-                st.markdown(f'<div style="font-weight:700; font-size:0.85rem; color:#374151; '
-                            f'margin:0.6rem 0 0.2rem;">{html.escape(GRUPO_LABEL.get(grupo, grupo))}</div>',
-                            unsafe_allow_html=True)
-                for _, row in sub.iterrows():
-                    cid = int(row["id"])
-                    comp_vals[cid] = _fila_inventario("comp", cid, row["nombre"], row.get("stock"))
+                with st.expander(f"{GRUPO_LABEL.get(grupo, grupo)} · {_resumen_inv(sub)}",
+                                 expanded=False):
+                    for _, row in sub.iterrows():
+                        cid = int(row["id"])
+                        comp_vals[cid] = _fila_inventario("comp", cid, row["nombre"], row.get("stock"))
 
         st.markdown('<div class="section-title" style="margin-top:1rem;">🍽️ Platos a la carta · '
                     'por unidad</div>', unsafe_allow_html=True)
@@ -630,11 +654,10 @@ def _render_inventario():
             if sub is None or sub.empty:
                 continue
             hay_cat = True
-            st.markdown(f'<div style="font-weight:700; font-size:0.85rem; color:#374151; '
-                        f'margin:0.6rem 0 0.2rem;">{label}</div>', unsafe_allow_html=True)
-            for _, row in sub.iterrows():
-                mid = int(row["id"])
-                menu_vals[mid] = _fila_inventario("menu", mid, row["nombre"], row.get("stock"))
+            with st.expander(f"{label} · {_resumen_inv(sub)}", expanded=False):
+                for _, row in sub.iterrows():
+                    mid = int(row["id"])
+                    menu_vals[mid] = _fila_inventario("menu", mid, row["nombre"], row.get("stock"))
         if not hay_cat:
             st.caption("No hay platos a la carta. Agrégalos en sus pestañas.")
 
