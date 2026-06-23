@@ -306,6 +306,15 @@ html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
 .c-total { display: flex; justify-content: space-between; font-weight: 700;
            font-size: 1.1rem; color: #1a1a1a; border-top: 1px solid #eee;
            margin-top: 6px; padding-top: 8px; }
+/* Aviso de pago en efectivo: tarjeta destacada con el saldo a pagar, justo antes
+   del botón de envío (solo si el cliente eligió Efectivo en la puerta). */
+.cash-card { background: #16a34a; color: #fff; border-radius: 14px;
+             padding: 0.9rem 1.1rem; margin: 0.2rem 0 0.9rem 0;
+             box-shadow: 0 8px 24px rgba(22,163,74,0.28); }
+.cash-card .cc-label { font-size: 0.74rem; color: #dcfce7; font-weight: 600;
+             text-transform: uppercase; letter-spacing: 1px; }
+.cash-card .cc-total { font-size: 1.9rem; font-weight: 800; line-height: 1.15; margin-top: 2px; }
+.cash-card .cc-sub { font-size: 0.88rem; color: #dcfce7; margin-top: 6px; }
 .stSelectbox > div > div, .stTextInput > div > div > input,
 .stTextArea textarea, .stNumberInput > div > div > input {
     background: #fff !important; border-radius: 10px !important;
@@ -691,6 +700,24 @@ def _carta(comp, cat, ajustes):
     if not ok_pd:
         st.markdown('<div class="warn">Completa los acompañamientos de cada Plato del Día '
                     'antes de enviar.</div>', unsafe_allow_html=True)
+
+    # Pago en efectivo: resalta el saldo a pagar (y el cambio) en una tarjeta prominente
+    # justo antes del botón de envío, para que el cliente tenga el monto exacto listo.
+    if gate.get("metodo_pago") == "efectivo":
+        paga = int(gate.get("paga_con") or 0)
+        if paga >= total and paga > 0:
+            cc_sub = (f'<div class="cc-sub">Pagas con ${fmt_money(paga)} · '
+                      f'tu cambio: ${fmt_money(paga - total)}</div>')
+        elif paga > 0:
+            cc_sub = (f'<div class="cc-sub">Indicaste ${fmt_money(paga)} · '
+                      f'ten listo ${fmt_money(total)} en efectivo</div>')
+        else:
+            cc_sub = '<div class="cc-sub">Ten listo el monto exacto en efectivo</div>'
+        st.markdown(
+            f'<div class="cash-card"><div class="cc-label">💵 Pago en efectivo · Total a pagar</div>'
+            f'<div class="cc-total">${fmt_money(total)}</div>{cc_sub}</div>',
+            unsafe_allow_html=True,
+        )
 
     if st.button(f"Enviar pedido · ${fmt_money(total)}", type="primary",
                  use_container_width=True, disabled=not ok_pd):

@@ -15,6 +15,7 @@ session_state, así que el refresco en vivo (st.fragment run_every) lo conserva.
 import streamlit as st
 import pandas as pd
 import html
+import time
 
 import auth
 from db import fmt_money, cargar_mesas_activas, saldo_pedido
@@ -36,6 +37,19 @@ CARD_TINT = {
     AZUL:  ("#dbeafe", "#bfdbfe", "#1e3a8a"),  # Por cobrar  → azul claro
     ROJO:  ("#fee2e2", "#fecaca", "#7f1d1d"),  # Atención    → rojo claro
 }
+
+# Seguimiento en vivo de cambios de mesa: tras mover una cuenta, la tarjeta-preview de
+# la mesa DESTINO muestra "(origen ➡️ destino)" en su texto inferior durante esta ventana
+# (segundos). El monitor refresca cada 30 s, así que el rastro se ve unos refrescos y
+# luego se borra solo (ver poda en _monitor_en_vivo).
+TRANSFER_WINDOW = 120  # s
+
+
+def _mesa_corto(nombre) -> str:
+    """Etiqueta corta de una mesa para la metadata de transferencia: los dígitos del
+    nombre ('Mesa 5' → '5') o, si no los hay, el nombre tal cual ('Terraza')."""
+    s = str(nombre or "").strip()
+    return "".join(c for c in s if c.isdigit()) or s
 
 
 # ── Cobro ───────────────────────────────────────────────────────────────────────
@@ -124,8 +138,17 @@ def _dialog_cambiar_mesa(origen_id: int, origen_nombre: str, ids, mesas_libres, 
         if st.button("🔀 Mover cuenta", key=f"cm_confirm_{uid}", type="primary",
                      use_container_width=True):
             destino_id = opciones[destino_label]
+            destino_nombre = next((m["nombre"] for m in mesas_libres
+                                   if int(m["id"]) == int(destino_id)), destino_label)
             movidos = pedidos.mover_mesa(ids, destino_id)
             st.session_state["mesa_activa"] = destino_id  # sigue al cliente a la nueva mesa
+            # Rastro en vivo del cambio: la tarjeta-preview de la mesa destino mostrará
+            # "(origen ➡️ destino)" durante TRANSFER_WINDOW (ver _monitor_en_vivo).
+            st.session_state.setdefault("mesa_transfers", {})[int(destino_id)] = {
+                "origen": _mesa_corto(origen_nombre),
+                "destino": _mesa_corto(destino_nombre),
+                "ts": time.time(),
+            }
             pedidos.flash(
                 f"{movidos} pedido(s) movido(s) · {origen_nombre} → {destino_label}", "🔀"
             )
@@ -331,6 +354,15 @@ def _monitor_en_vivo():
 
     DOT = {VERDE: "🟢", AMBAR: "🟠", AZUL: "🔵", ROJO: "🔴"}
     POR_FILA = 4  # tarjetas por fila; el resto se envuelve a la siguiente
+    # Poda los rastros de transferencia vencidos (más viejos que TRANSFER_WINDOW): la
+    # metadata "(origen ➡️ destino)" se borra sola y el estado no crece sin fin.
+    now = time.time()
+    _transfers = st.session_state.get("mesa_transfers")
+    if _transfers:
+        st.session_state["mesa_transfers"] = {
+            k: v for k, v in _transfers.items() if now - v.get("ts", 0) <= TRANSFER_WINDOW
+        }
+    transfers = st.session_state.get("mesa_transfers", {})
     for inicio in range(0, len(activas), POR_FILA):
         fila = activas[inicio:inicio + POR_FILA]
         cols = st.columns(POR_FILA, gap="small")
@@ -344,6 +376,11 @@ def _monitor_en_vivo():
                 espera = _espera_mesa(sub)
                 chip = f" · ⏱ {espera}m" if espera > 0 else ""
                 resumen = f"{len(sub)} {etiqueta} · ${fmt_money(saldo)}{chip}"
+                # Rastro de cambio de mesa en vivo: si esta mesa recibió una cuenta hace
+                # poco, añade "(origen ➡️ destino)" al texto inferior de su preview.
+                tr = transfers.get(mid)
+                if tr:
+                    resumen += f" ({tr.get('origen', '?')} ➡️ {tr.get('destino', '?')})"
                 if st.button(f"{DOT[color]}  {nombre}\n\n{resumen}", key=f"mesabtn_{mid}",
                              use_container_width=True):
                     st.session_state["mesa_activa"] = mid

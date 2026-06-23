@@ -9,8 +9,9 @@ su propio módulo dentro de views/ para poder trabajarlas de forma independiente
     - views/nuevo_pedido.py   → creación manual de pedidos
     - views/menu.py           → CRUD del menú
     - views/mesas.py          → gestión de mesas
-    - views/resumen.py        → cierre de caja y ventas por día
     - views/caja.py           → arqueo de caja (apertura/cierre de turno)
+    - views/resumen.py, cancelaciones.py, reporte_personal.py → pestañas del entorno de
+      Administración (🔐, solo admin, al fondo del menú lateral; ver _render_admin)
 """
 import streamlit as st
 from dotenv import load_dotenv
@@ -506,10 +507,11 @@ st.markdown("""
 # run siguiente, antes de pintar la vista). Ver pedidos.flash()/drain_toasts().
 pedidos.drain_toasts()
 
-# Resumen ya no es una vista propia: vive como pestaña dentro de Caja. Si una sesión
-# traía 'resumen' como vista activa, la reapuntamos a Caja.
+# Resumen ya no es una vista propia: vive como pestaña dentro de Administración. Si una
+# sesión traía 'resumen' como vista activa, la reapuntamos a 'admin'; el saneo por rol de
+# más abajo la corrige si el rol no la permite (p. ej. caja → su vista de aterrizaje).
 if st.session_state.get("current_view") == "resumen":
-    st.session_state["current_view"] = "caja"
+    st.session_state["current_view"] = "admin"
 
 # Vista activa por defecto / saneada al rol: si la vista guardada no existe o el rol
 # no la permite (cambio de rol, parámetro forzado), caemos a la de aterrizaje del rol.
@@ -526,7 +528,24 @@ NAV_LABELS = {
     "nuevo":   "➕ Nuevo pedido",
     "caja":    "💰 Caja",
     "meseros": "👤 Personal",
+    "admin":   "🔐 Administración",
 }
+
+
+def _render_admin():
+    """Entorno de Administración (SOLO admin), aislado del flujo operativo de Caja:
+    reúne los reportes y registros sensibles en pestañas limpias — Resumen de ventas,
+    Cancelaciones y Personal (marcaje de turno). El acceso lo gobierna la matriz de rol
+    (solo ADMIN tiene la vista 'admin'); require_view ya lo valida en _dispatch, así que
+    aquí no hace falta otro candado."""
+    tab_resumen, tab_cancel, tab_personal = st.tabs(
+        ["📊 Resumen", "🚫 Cancelaciones", "👥 Personal"])
+    with tab_resumen:
+        resumen.render()
+    with tab_cancel:
+        cancelaciones.render()
+    with tab_personal:
+        reporte_personal.render()
 
 
 def _dispatch(view: str):
@@ -534,21 +553,10 @@ def _dispatch(view: str):
     profundidad) ANTES de renderizar nada."""
     auth.require_view(view, role)
     if view == "caja":
-        # Caja + Resumen. La pestaña Resumen (métricas de venta) SOLO se instancia si
-        # el rol puede ver ingresos; caja la pierde por completo (no se crea el tab).
-        if auth.can("see_revenue"):
-            tab_caja, tab_resumen, tab_cancel, tab_personal = st.tabs(
-                ["💰 Caja", "📊 Resumen", "🚫 Cancelaciones", "👥 Personal"])
-            with tab_caja:
-                caja.render()
-            with tab_resumen:
-                resumen.render()
-            with tab_cancel:
-                cancelaciones.render()
-            with tab_personal:
-                reporte_personal.render()
-        else:
-            caja.render()
+        # Caja = SOLO el arqueo/cierre operativo. Resumen, Cancelaciones y Personal se
+        # movieron al entorno de Administración (🔐, al fondo del menú) → la caja queda
+        # limpia para el cajero.
+        caja.render()
     elif view == "monitor":
         monitor_mesas.render()
     elif view == "menu":
@@ -559,6 +567,8 @@ def _dispatch(view: str):
         nuevo_pedido.render()
     elif view == "meseros":
         meseros.render()
+    elif view == "admin":
+        _render_admin()
 
 
 def _nav_item(label: str, view: str):

@@ -114,6 +114,26 @@ def _cfg_text(it) -> str:
 
 
 # ── Secciones del configurador ──────────────────────────────────────────────────
+# Cada Plato del Día del carrito es una INSTANCIA con id único de seguimiento:
+# st.session_state["pd_instancias"] = [uid, ...] y pd_seq genera los uids. Así cada
+# plato se borra individualmente (🗑) sin descuadrar a los demás, porque sus widgets
+# se llavean por uid (pdpos_<uid>_*) y no por índice posicional.
+# "Ninguno" encabeza entrada/principio/proteína: si se elige, ese paso se guarda como
+# None → utils.items lo omite (no imprime ni inserta nada para ese slot) y no exige el
+# ingrediente. El valor por defecto sigue siendo el primer componente real (index=1).
+NINGUNO = "Ninguno"
+
+
+def _eliminar_plato_dia(uid) -> None:
+    """Quita una instancia de Plato del Día del carrito y purga el estado de sus
+    widgets (radios/steppers/nota) para que no quede 'pegado' a un uid reutilizado."""
+    insts = st.session_state.get("pd_instancias", [])
+    if uid in insts:
+        insts.remove(uid)
+    for k in [k for k in st.session_state if str(k).startswith(f"pdpos_{uid}_")]:
+        del st.session_state[k]
+
+
 def _seccion_plato_dia(comp, precio, n):
     """Configurador del Plato del Día. Devuelve (items, ok)."""
     st.markdown('<div class="section-title">🍛 Plato del Día</div>', unsafe_allow_html=True)
@@ -126,41 +146,41 @@ def _seccion_plato_dia(comp, precio, n):
 
     st.caption(f"${fmt_money(precio)} c/u · elige {n} acompañamientos (puedes repetir)")
 
-    qty = int(st.session_state.get("pd_qty_pos", 0))
-    c1, c2, c3, c4 = st.columns([3, 1, 1, 1])
-    with c1:
-        st.markdown('<div style="padding:6px 0; font-size:0.9rem;">¿Cuántos platos del día?</div>',
-                    unsafe_allow_html=True)
-    with c2:
-        if st.button("−", key="pdpos_qty_minus", use_container_width=True):
-            st.session_state["pd_qty_pos"] = max(0, qty - 1)
-            st.rerun(scope="fragment")
-    with c3:
-        st.markdown(f'<div style="text-align:center; padding:6px 0; font-weight:700;">{qty}</div>',
-                    unsafe_allow_html=True)
-    with c4:
-        if st.button("+", key="pdpos_qty_plus", use_container_width=True):
-            st.session_state["pd_qty_pos"] = qty + 1
-            st.rerun(scope="fragment")
+    instancias = st.session_state.setdefault("pd_instancias", [])
+    if st.button("➕ Agregar plato del día", key="pdpos_add", use_container_width=True):
+        st.session_state["pd_seq"] = int(st.session_state.get("pd_seq", 0)) + 1
+        instancias.append(st.session_state["pd_seq"])
+        st.rerun(scope="fragment")
+
+    ent_opts = [NINGUNO] + [e["nombre"] for e in comp["entrada"]]
+    pri_opts = [NINGUNO] + [p["nombre"] for p in comp["principio"]]
+    pro_opts = [NINGUNO] + [p["nombre"] for p in comp["proteina"]]
 
     plates, ok = [], True
-    for i in range(qty):
-        st.markdown(f'<div style="border-left:3px solid #1a1a1a; padding:2px 0 2px 10px; '
-                    f'margin:10px 0 4px 0; font-weight:700; font-size:0.9rem;">Plato #{i+1}</div>',
-                    unsafe_allow_html=True)
+    for pos, uid in enumerate(list(instancias)):
+        c_tit, c_del = st.columns([5, 1])
+        with c_tit:
+            st.markdown(f'<div style="border-left:3px solid #1a1a1a; padding:2px 0 2px 10px; '
+                        f'margin:10px 0 4px 0; font-weight:700; font-size:0.9rem;">Plato #{pos+1}</div>',
+                        unsafe_allow_html=True)
+        with c_del:
+            if st.button("🗑", key=f"pdpos_{uid}_del", use_container_width=True,
+                         help="Quitar este plato del día"):
+                _eliminar_plato_dia(uid)
+                st.rerun(scope="fragment")
 
         st.markdown('<div style="font-size:0.75rem; color:#6b7280;">Entrada</div>', unsafe_allow_html=True)
-        entrada = st.radio("Entrada", [e["nombre"] for e in comp["entrada"]],
-                           key=f"pdpos_{i}_entrada", label_visibility="collapsed", horizontal=True)
+        entrada = st.radio("Entrada", ent_opts, index=1,
+                           key=f"pdpos_{uid}_entrada", label_visibility="collapsed", horizontal=True)
         st.markdown('<div style="font-size:0.75rem; color:#6b7280;">Principio</div>', unsafe_allow_html=True)
-        principio = st.radio("Principio", [p["nombre"] for p in comp["principio"]],
-                             key=f"pdpos_{i}_principio", label_visibility="collapsed", horizontal=True)
+        principio = st.radio("Principio", pri_opts, index=1,
+                             key=f"pdpos_{uid}_principio", label_visibility="collapsed", horizontal=True)
         st.markdown('<div style="font-size:0.75rem; color:#6b7280;">Carnes o Proteína</div>',
                     unsafe_allow_html=True)
-        proteina = st.radio("Proteína", [p["nombre"] for p in comp["proteina"]],
-                            key=f"pdpos_{i}_proteina", label_visibility="collapsed", horizontal=True)
+        proteina = st.radio("Proteína", pro_opts, index=1,
+                            key=f"pdpos_{uid}_proteina", label_visibility="collapsed", horizontal=True)
 
-        cuentas = st.session_state.setdefault(f"pdpos_{i}_acomp", {})
+        cuentas = st.session_state.setdefault(f"pdpos_{uid}_acomp", {})
         elegidos = sum(cuentas.values())
         st.markdown(f'<div style="font-size:0.75rem; color:#6b7280; margin-top:6px;">'
                     f'Acompañamientos ({elegidos}/{n})</div>', unsafe_allow_html=True)
@@ -172,7 +192,7 @@ def _seccion_plato_dia(comp, precio, n):
                 st.markdown(f'<div style="padding:4px 0; font-size:0.88rem;">{html.escape(str(a["nombre"]))}</div>',
                             unsafe_allow_html=True)
             with ac2:
-                if st.button("−", key=f"pdpos_{i}_acm_{aid}", use_container_width=True):
+                if st.button("−", key=f"pdpos_{uid}_acm_{aid}", use_container_width=True):
                     if c > 0:
                         cuentas[aid] = c - 1
                         if cuentas[aid] == 0:
@@ -182,12 +202,12 @@ def _seccion_plato_dia(comp, precio, n):
                 st.markdown(f'<div style="text-align:center; padding:4px 0; font-weight:600;">{c}</div>',
                             unsafe_allow_html=True)
             with ac4:
-                if st.button("+", key=f"pdpos_{i}_acp_{aid}", use_container_width=True,
+                if st.button("+", key=f"pdpos_{uid}_acp_{aid}", use_container_width=True,
                              disabled=elegidos >= n):
                     cuentas[aid] = c + 1
                     st.rerun(scope="fragment")
 
-        nota = st.text_input("Nota", key=f"pdpos_{i}_nota", label_visibility="collapsed",
+        nota = st.text_input("Nota", key=f"pdpos_{uid}_nota", label_visibility="collapsed",
                              placeholder="Nota para este plato (opcional)")
 
         acomp_list = []
@@ -196,12 +216,14 @@ def _seccion_plato_dia(comp, precio, n):
         if elegidos != n:
             ok = False
             st.markdown(f'<p style="color:#b45309; font-size:0.8rem;">Elige exactamente {n} '
-                        f'acompañamientos para el Plato #{i+1}.</p>', unsafe_allow_html=True)
+                        f'acompañamientos para el Plato #{pos+1}.</p>', unsafe_allow_html=True)
 
         plates.append({
             "tipo": "plato_dia", "nombre": "Plato del Día", "precio": int(precio),
             "cantidad": 1,
-            "config": {"entrada": entrada, "principio": principio, "proteina": proteina,
+            "config": {"entrada": None if entrada == NINGUNO else entrada,
+                       "principio": None if principio == NINGUNO else principio,
+                       "proteina": None if proteina == NINGUNO else proteina,
                        "acompanamientos": acomp_list},
             "nota": (nota or "").strip(),
         })
@@ -267,7 +289,8 @@ def _form_fragment():
     drain_toasts()
 
     st.session_state.setdefault("carrito_manual", {})
-    st.session_state.setdefault("pd_qty_pos", 0)
+    st.session_state.setdefault("pd_instancias", [])
+    st.session_state.setdefault("pd_seq", 0)
 
     mesas       = cargar_mesas_activas()
     mesa_ids    = [int(m["id"]) for m in mesas]
@@ -426,7 +449,8 @@ def _limpiar_pedido():
     """Resetea el carrito, la cantidad, la config de platos del día y los datos de
     entrega (cliente/dirección/pago). Conserva el TIPO de pedido seleccionado."""
     st.session_state["carrito_manual"] = {}
-    st.session_state["pd_qty_pos"] = 0
+    st.session_state["pd_instancias"] = []
+    st.session_state["pd_seq"] = 0
     for k in [k for k in st.session_state if str(k).startswith("pdpos_")]:
         del st.session_state[k]
     for k in ("nota_general_pos", "ent_nombre", "ent_tel", "ent_dir",

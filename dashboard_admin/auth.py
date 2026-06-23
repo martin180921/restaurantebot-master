@@ -38,7 +38,10 @@ _ENV = {
 # con require_view() (defensa en profundidad: current_view vive en session_state y
 # podría quedar "pegado" en una vista prohibida tras un cambio de rol).
 ROLE_VIEWS = {
-    ADMIN:  ["monitor", "menu", "mesas", "nuevo", "caja", "meseros"],
+    # 'admin' (Administración) va al FINAL → su ítem de navegación queda al fondo del
+    # menú lateral. Entorno SOLO-ADMIN, aislado del flujo operativo: agrupa Resumen de
+    # ventas, Cancelaciones y Personal (marcaje de turno) en pestañas.
+    ADMIN:  ["monitor", "menu", "mesas", "nuevo", "caja", "meseros", "admin"],
     CAJA:   ["monitor", "menu", "mesas", "nuevo", "caja", "meseros"],
     MESERO: ["nuevo", "mesas", "monitor", "menu"],  # sin caja ni gestión de meseros
 }
