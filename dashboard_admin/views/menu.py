@@ -17,6 +17,10 @@ db.flash() y la invalidación de caché (cargar_*.clear()) tras cada escritura.
 import streamlit as st
 from sqlalchemy import text
 import html
+import io
+import csv
+import numbers
+import unicodedata
 import pandas as pd
 from datetime import date
 
@@ -715,6 +719,345 @@ def _render_inventario():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Pestaña 7 · Importar menú desde Excel / CSV (con fusión al inventario)
+# ══════════════════════════════════════════════════════════════════════════════
+# Sube un .xlsx/.csv con una fila por ítem. La columna 'seccion' enruta cada fila a su
+# panel (componentes del Plato del Día vs catálogo a la carta/especiales/bebidas) y se
+# mapean nombre/descr/precio/stock de una sola vez. El upsert es NO destructivo: una
+# celda de stock en blanco NUNCA toca el contador (un re-import de solo precios conserva
+# el inventario), no duplica filas (identidad por nombre dentro de su sección) y no rompe
+# el seguimiento en curso. Acceso: admin + caja (capacidad edit_menu).
+
+# seccion (normalizada) → (clase, destino). 'comp' = menu_componentes.grupo;
+# 'menu' = menu.categoria.
+SECCION_MAP = {
+    "entrada": ("comp", "entrada"), "entradas": ("comp", "entrada"),
+    "principio": ("comp", "principio"), "principios": ("comp", "principio"),
+    "proteina": ("comp", "proteina"), "proteinas": ("comp", "proteina"),
+    "carne": ("comp", "proteina"), "carnes": ("comp", "proteina"),
+    "acompanamiento": ("comp", "acompanamiento"), "acompanamientos": ("comp", "acompanamiento"),
+    "acomp": ("comp", "acompanamiento"), "guarnicion": ("comp", "acompanamiento"),
+    "especial": ("menu", "especial"), "especiales": ("menu", "especial"),
+    "a la carta": ("menu", "a_la_carta"), "a_la_carta": ("menu", "a_la_carta"),
+    "carta": ("menu", "a_la_carta"), "plato": ("menu", "a_la_carta"),
+    "plato a la carta": ("menu", "a_la_carta"), "fuerte": ("menu", "a_la_carta"),
+    "bebida": ("menu", "bebida"), "bebidas": ("menu", "bebida"),
+    "jugo": ("menu", "bebida"), "gaseosa": ("menu", "bebida"), "drink": ("menu", "bebida"),
+}
+# Alias aceptados por columna (normalizados: sin acentos, en minúscula).
+COL_ALIAS = {
+    "seccion":     ("seccion", "categoria", "tipo", "grupo", "seccion/categoria"),
+    "nombre":      ("nombre", "name", "plato", "producto", "item", "articulo"),
+    "descripcion": ("descripcion", "desc", "detalle"),
+    "precio":      ("precio", "price", "valor", "costo"),
+    "stock":       ("stock", "cantidad", "existencias", "inventario", "disponibles",
+                    "cantidad disponible"),
+    "activo":      ("activo", "active", "disponible", "habilitado"),
+}
+DEST_LABEL = {
+    "entrada": "Entrada", "principio": "Principio", "proteina": "Proteína",
+    "acompanamiento": "Acompañamientos", "especial": "Especiales",
+    "a_la_carta": "A la carta", "bebida": "Bebidas",
+}
+
+
+def _norm(s) -> str:
+    """minúsculas + sin acentos + sin espacios extremos, para casar encabezados/secciones."""
+    s = str("" if s is None else s).strip().lower()
+    return "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
+
+
+def _parse_int(v):
+    """int >= 0 desde celda numérica o texto ('25.000'/'$25,000' → 25000); None si está
+    en blanco. Distingue número (uso directo) de texto (quita separadores de miles)."""
+    if v is None:
+        return None
+    try:
+        if pd.isna(v):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, numbers.Number):
+        try:
+            return max(0, int(round(float(v))))
+        except (TypeError, ValueError):
+            return None
+    s = str(v).strip().replace("$", "").replace(" ", "")
+    if s == "":
+        return None
+    s = s.replace(".", "").replace(",", "")
+    try:
+        return max(0, int(s))
+    except ValueError:
+        return None
+
+
+def _parse_activo(v) -> bool:
+    """Activo por defecto; solo 'no/false/0/inactivo/n/off' lo desactivan."""
+    try:
+        if v is None or pd.isna(v):
+            return True
+    except (TypeError, ValueError):
+        pass
+    return _norm(v) not in ("no", "false", "0", "inactivo", "n", "off")
+
+
+def _celda_texto(v):
+    """str limpia o None (para descripción)."""
+    try:
+        if v is None or pd.isna(v):
+            return None
+    except (TypeError, ValueError):
+        pass
+    s = str(v).strip()
+    return s or None
+
+
+def _mapear_columnas(df) -> dict:
+    """{rol: nombre_real_de_columna} resolviendo alias por encabezado normalizado."""
+    norm_cols = {_norm(c): c for c in df.columns}
+    out = {}
+    for rol, alias in COL_ALIAS.items():
+        for a in alias:
+            if a in norm_cols:
+                out[rol] = norm_cols[a]
+                break
+    return out
+
+
+def _parse_filas(df):
+    """(filas_validas, errores). Cada fila: {kind, destino, nombre, descripcion, precio,
+    stock, activo, fila}. Salta filas sin nombre; reporta secciones desconocidas."""
+    cols = _mapear_columnas(df)
+    if "seccion" not in cols or "nombre" not in cols:
+        return [], ["Faltan columnas obligatorias: 'seccion' y 'nombre'. "
+                    "Descarga la plantilla para ver el formato."]
+    filas, errores = [], []
+    for i, row in df.iterrows():
+        nfila = int(i) + 2  # +2: fila de encabezado + base 1
+        nombre = _celda_texto(row[cols["nombre"]])
+        if not nombre:
+            continue  # fila vacía → se ignora en silencio
+        sec_raw = row[cols["seccion"]]
+        sec = _norm(sec_raw)
+        if sec not in SECCION_MAP:
+            errores.append(f"Fila {nfila}: sección desconocida «{_celda_texto(sec_raw) or ''}» "
+                           f"(ítem «{nombre}»).")
+            continue
+        kind, destino = SECCION_MAP[sec]
+        filas.append({
+            "kind": kind, "destino": destino, "nombre": nombre,
+            "descripcion": _celda_texto(row[cols["descripcion"]]) if "descripcion" in cols else None,
+            "precio": _parse_int(row[cols["precio"]]) if "precio" in cols else None,
+            "stock":  _parse_int(row[cols["stock"]]) if "stock" in cols else None,
+            "activo": _parse_activo(row[cols["activo"]]) if "activo" in cols else True,
+            "fila": nfila,
+        })
+    return filas, errores
+
+
+def _leer_dataframe(archivo):
+    """Lee el archivo subido a DataFrame. .csv nativo (con fallback latin-1); .xlsx vía
+    openpyxl (ImportError si falta la librería → lo maneja la vista)."""
+    nombre = (getattr(archivo, "name", "") or "").lower()
+    if nombre.endswith(".csv"):
+        try:
+            return pd.read_csv(archivo, dtype=str)
+        except UnicodeDecodeError:
+            archivo.seek(0)
+            return pd.read_csv(archivo, dtype=str, encoding="latin-1")
+    return pd.read_excel(archivo)
+
+
+def _calc_stock(actual, valor, sumar: bool, existe: bool):
+    """Stock resultante de un upsert:
+      · valor None (celda en blanco) → NO tocar (deja el actual; NULL/ilimitado si es nuevo).
+      · sumar=False (sobrescribir)   → valor (inicializa el contador).
+      · sumar=True  (reabastecer)    → actual + valor para los existentes con contador; el
+                                       valor tal cual para nuevos o los que estaban ilimitados.
+    Nunca 'borra' un contador: una celda en blanco preserva el estado vivo del inventario."""
+    if valor is None:
+        return actual if existe else None
+    if sumar and existe and actual is not None:
+        return int(actual) + int(valor)
+    return int(valor)
+
+
+def importar_menu(filas, modo_stock: str = "sobrescribir") -> dict:
+    """Aplica el import en UNA transacción (atómico). Upsert por identidad:
+    componentes por (grupo, LOWER(nombre)); catálogo por (categoria, LOWER(nombre)).
+    No duplica filas ni rompe el inventario; el stock se fusiona según _calc_stock.
+    Devuelve un resumen con conteos y omitidos."""
+    res = {"comp_nuevos": 0, "comp_act": 0, "menu_nuevos": 0, "menu_act": 0,
+           "omitidos": []}
+    sumar = (modo_stock == "sumar")
+    with engine.begin() as conn:
+        for f in filas:
+            nombre = f["nombre"]
+            if f["kind"] == "comp":
+                grupo = f["destino"]
+                ex = conn.execute(text(
+                    "SELECT id, stock FROM menu_componentes "
+                    "WHERE grupo = :g AND LOWER(nombre) = LOWER(:n)"
+                ), {"g": grupo, "n": nombre}).mappings().first()
+                nuevo_stock = _calc_stock(ex["stock"] if ex else None, f["stock"], sumar, bool(ex))
+                if ex:
+                    conn.execute(text(
+                        "UPDATE menu_componentes SET activo = :a, stock = :s WHERE id = :id"
+                    ), {"a": f["activo"], "s": nuevo_stock, "id": ex["id"]})
+                    res["comp_act"] += 1
+                else:
+                    mx = conn.execute(text(
+                        "SELECT COALESCE(MAX(orden), 0) FROM menu_componentes WHERE grupo = :g"
+                    ), {"g": grupo}).scalar()
+                    conn.execute(text(
+                        "INSERT INTO menu_componentes (grupo, nombre, activo, orden, stock) "
+                        "VALUES (:g, :n, :a, :o, :s)"
+                    ), {"g": grupo, "n": nombre, "a": f["activo"], "o": int(mx) + 1, "s": nuevo_stock})
+                    res["comp_nuevos"] += 1
+            else:
+                categoria = f["destino"]
+                ex = conn.execute(text(
+                    "SELECT id, stock FROM menu WHERE categoria = :c AND LOWER(nombre) = LOWER(:n)"
+                ), {"c": categoria, "n": nombre}).mappings().first()
+                # Especiales: precio plano de la categoría; el resto usa el del archivo.
+                precio = precio_especiales() if categoria == "especial" else f["precio"]
+                if not ex and categoria != "especial" and (precio is None or precio <= 0):
+                    res["omitidos"].append(
+                        f"Fila {f['fila']}: «{nombre}» sin precio válido (requerido para "
+                        f"un plato/bebida nuevo).")
+                    continue
+                nuevo_stock = _calc_stock(ex["stock"] if ex else None, f["stock"], sumar, bool(ex))
+                if ex:
+                    sets = ["activo = :a", "stock = :s"]
+                    params = {"a": f["activo"], "s": nuevo_stock, "id": ex["id"]}
+                    if categoria == "especial":
+                        sets.append("precio = :p"); params["p"] = int(precio)
+                    elif precio is not None:           # precio en blanco → conserva el actual
+                        sets.append("precio = :p"); params["p"] = int(precio)
+                    if f["descripcion"] is not None:   # descr en blanco → conserva la actual
+                        sets.append("descripcion = :d"); params["d"] = f["descripcion"]
+                    conn.execute(text(f"UPDATE menu SET {', '.join(sets)} WHERE id = :id"), params)
+                    res["menu_act"] += 1
+                else:
+                    mx = conn.execute(text(
+                        "SELECT COALESCE(MAX(orden), 0) FROM menu WHERE categoria = :c"
+                    ), {"c": categoria}).scalar()
+                    conn.execute(text(
+                        "INSERT INTO menu (nombre, precio, activo, orden, categoria, descripcion, stock) "
+                        "VALUES (:n, :p, :a, :o, :c, :d, :s)"
+                    ), {"n": nombre, "p": int(precio or 0), "a": f["activo"], "o": int(mx) + 1,
+                        "c": categoria, "d": f["descripcion"], "s": nuevo_stock})
+                    res["menu_nuevos"] += 1
+    _clear_menu_caches()
+    cargar_componentes.clear()
+    return res
+
+
+def _plantilla_csv() -> bytes:
+    """Plantilla de ejemplo descargable (utf-8-sig para que Excel abra los acentos)."""
+    filas = [
+        ["seccion", "nombre", "descripcion", "precio", "stock", "activo"],
+        ["entrada", "Sopa del día", "", "", "50", "si"],
+        ["principio", "Frijol", "", "", "40", "si"],
+        ["proteina", "Pollo", "", "", "40", "si"],
+        ["acompanamiento", "Arroz", "", "", "100", "si"],
+        ["especial", "Bandeja Paisa", "Frijol, arroz, carne, chicharrón, huevo", "", "20", "si"],
+        ["a_la_carta", "Hamburguesa clásica", "", "25000", "30", "si"],
+        ["bebida", "Limonada natural", "", "5000", "", "si"],
+    ]
+    buf = io.StringIO()
+    csv.writer(buf).writerows(filas)
+    return buf.getvalue().encode("utf-8-sig")
+
+
+def _render_importar():
+    # Resultado del import previo (sobrevive al reset del uploader): se muestra y se limpia.
+    prev = st.session_state.pop("import_resultado", None)
+    if prev:
+        nuevos = prev["comp_nuevos"] + prev["menu_nuevos"]
+        act = prev["comp_act"] + prev["menu_act"]
+        st.success(f"✅ Importación completada · {nuevos} ítem(s) nuevo(s) · {act} actualizado(s).")
+        if prev["omitidos"]:
+            with st.expander(f"⚠️ {len(prev['omitidos'])} fila(s) omitida(s)"):
+                for o in prev["omitidos"]:
+                    st.markdown(f"- {html.escape(o)}")
+
+    st.markdown(
+        '<div style="background:#f9fafb; border:1px solid #e5e7eb; border-radius:10px; '
+        'padding:0.8rem 1rem; font-size:0.85rem; color:#374151; margin-bottom:1rem;">'
+        '📥 Sube el menú en <b>.xlsx</b> o <b>.csv</b>, una fila por ítem. La columna '
+        '<b>seccion</b> enruta cada fila a su panel y se cargan nombre, descripción, precio '
+        'y stock de una vez. Si una fila ya existe (mismo nombre en su sección) se '
+        '<b>actualiza</b> sin duplicar; una celda de <b>stock en blanco no cambia</b> el '
+        'inventario en curso.<br><span style="color:#6b7280;">Secciones válidas: entrada · '
+        'principio · proteina · acompanamiento · especial · a_la_carta · bebida.</span></div>',
+        unsafe_allow_html=True,
+    )
+
+    st.download_button("⬇️ Descargar plantilla (.csv)", data=_plantilla_csv(),
+                       file_name="plantilla_menu.csv", mime="text/csv",
+                       use_container_width=False)
+
+    nonce = int(st.session_state.get("import_nonce", 0))
+    archivo = st.file_uploader("Archivo del menú (.xlsx o .csv)", type=["xlsx", "csv"],
+                               key=f"import_file_{nonce}")
+    if archivo is None:
+        return
+
+    try:
+        df = _leer_dataframe(archivo)
+    except ImportError:
+        st.error("No se pudo leer el .xlsx (falta la librería openpyxl en el servidor). "
+                 "Mientras tanto, sube el menú en formato .csv.")
+        return
+    except Exception as e:  # archivo corrupto / formato inesperado
+        st.error(f"No se pudo leer el archivo: {html.escape(str(e))}")
+        return
+
+    if df is None or df.empty:
+        st.warning("El archivo no tiene filas.")
+        return
+
+    filas, errores = _parse_filas(df)
+
+    st.markdown('<div class="section-title">Vista previa</div>', unsafe_allow_html=True)
+    st.dataframe(df, use_container_width=True, height=240)
+
+    if errores:
+        st.warning("Avisos:\n" + "\n".join(f"- {e}" for e in errores))
+
+    if not filas:
+        st.error("No hay filas válidas para importar. Revisa la columna 'seccion' y 'nombre'.")
+        return
+
+    # Conteo por destino (qué panel recibe qué).
+    conteo = {}
+    for f in filas:
+        conteo[f["destino"]] = conteo.get(f["destino"], 0) + 1
+    chips = " ".join(
+        f'<span class="badge badge-activo">{DEST_LABEL.get(d, d)}: {n}</span>'
+        for d, n in sorted(conteo.items()))
+    st.markdown(f'<div style="margin:6px 0 10px;">{chips}</div>', unsafe_allow_html=True)
+
+    st.caption("Stock al importar")
+    modo = st.radio("Stock al importar", ["Sobrescribir (inicializar)", "Sumar (reabastecer)"],
+                    horizontal=True, label_visibility="collapsed", key="import_modo_stock")
+    modo_stock = "sumar" if modo.startswith("Sumar") else "sobrescribir"
+    st.caption("Sobrescribir fija el stock al número del archivo; Sumar lo añade al actual. "
+               "En ambos casos, una celda vacía deja el contador como está.")
+
+    if st.button(f"📥 Importar {len(filas)} ítem(s)", type="primary",
+                 use_container_width=True, key="btn_importar_menu"):
+        res = importar_menu(filas, modo_stock)
+        st.session_state["import_resultado"] = res
+        st.session_state["import_nonce"] = nonce + 1   # limpia el uploader y la vista previa
+        st.rerun()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # SECCIÓN: MENÚ
 # ══════════════════════════════════════════════════════════════════════════════
 # ══════════════════════════════════════════════════════════════════════════════
@@ -805,9 +1148,9 @@ def render():
         _render_readonly()
         return
 
-    t1, t2, t3, t4, t5, t6 = st.tabs([
+    t1, t2, t3, t4, t5, t6, t7 = st.tabs([
         "🍽️ Plato del Día", "⭐ Especiales", "📋 A la carta", "🥤 Bebidas",
-        "📦 Inventario", "⚙️ Ajustes",
+        "📦 Inventario", "📥 Importar", "⚙️ Ajustes",
     ])
     with t1:
         _render_plato_dia()
@@ -820,4 +1163,6 @@ def render():
     with t5:
         _render_inventario()
     with t6:
+        _render_importar()
+    with t7:
         _render_ajustes()
