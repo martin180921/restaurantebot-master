@@ -364,6 +364,47 @@ div[data-testid="stColumn"] [class*="st-key-ticket_"] .stButton > button:hover {
     background: #4b5563 !important; border-color: #4b5563 !important; color: #ffffff !important;
 }
 
+/* ── Legibilidad universal del texto de los botones ───────────────────────────
+   En este Streamlit la etiqueta vive en un <p>/<span> interno que NO siempre hereda
+   el color del <button> (por eso la nav ya fijaba `button p` aparte). Si un botón
+   tiene fondo oscuro pero su texto interno quedó oscuro, las palabras desaparecen
+   (negro sobre negro). Forzamos que el texto interno herede SIEMPRE el color del
+   botón → contraste correcto en toda variante, sin parchear caso por caso. */
+.stButton button p, .stButton button span,
+.stDownloadButton button p, .stDownloadButton button span,
+.stFormSubmitButton button p, .stFormSubmitButton button span {
+    color: inherit !important;
+}
+
+/* Botones de DESCARGA y de ENVÍO DE FORMULARIO: no son .stButton, así que el reset
+   global no los tocaba (quedaban con el tema por defecto → texto poco legible según
+   el navegador). Les damos el mismo lenguaje y contraste garantizado:
+   primario = fondo negro + texto blanco; secundario = claro + texto oscuro. */
+.stDownloadButton > button, .stFormSubmitButton > button {
+    border-radius: 8px !important; font-family: 'DM Sans', sans-serif !important;
+    font-weight: 600 !important; transition: all 0.15s !important;
+}
+.stDownloadButton > button[kind="primary"],
+.stFormSubmitButton > button[kind="primary"],
+.stFormSubmitButton > button[kind="primaryFormSubmit"] {
+    background: #1a1a1a !important; color: #ffffff !important; border: 1px solid #1a1a1a !important;
+}
+.stDownloadButton > button[kind="primary"]:hover,
+.stFormSubmitButton > button[kind="primary"]:hover,
+.stFormSubmitButton > button[kind="primaryFormSubmit"]:hover {
+    background: #374151 !important; color: #ffffff !important; border-color: #374151 !important;
+}
+.stDownloadButton > button[kind="secondary"],
+.stFormSubmitButton > button[kind="secondary"],
+.stFormSubmitButton > button[kind="secondaryFormSubmit"] {
+    background: #ffffff !important; color: #374151 !important; border: 1px solid #d1d5db !important;
+}
+.stDownloadButton > button[kind="secondary"]:hover,
+.stFormSubmitButton > button[kind="secondary"]:hover,
+.stFormSubmitButton > button[kind="secondaryFormSubmit"]:hover {
+    background: #f3f4f6 !important; color: #111827 !important; border-color: #9ca3af !important;
+}
+
 /* Navigation as pill buttons */
 div[data-testid="stRadio"] > label { display: none !important; }
 div[data-testid="stRadio"] > div {

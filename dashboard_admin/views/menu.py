@@ -973,6 +973,149 @@ def _plantilla_csv() -> bytes:
     return buf.getvalue().encode("utf-8-sig")
 
 
+# Opciones del desplegable de 'seccion' (texto amigable; el parser las normaliza a las
+# claves de SECCION_MAP: «Proteína»→proteina, «A la carta»→a la carta, etc.).
+PLANTILLA_SECCIONES = ["Entrada", "Principio", "Proteína", "Acompañamiento",
+                       "Especiales", "A la carta", "Bebidas"]
+# Ejemplos (uno por sección) que se precargan en la hoja, en estilo tenue para que el
+# cliente los reemplace. [Sección, Nombre, Descripción, Precio, Stock, Activo].
+PLANTILLA_EJEMPLOS = [
+    ["Entrada", "Sopa del día", None, None, 50, "Sí"],
+    ["Principio", "Frijol", None, None, 40, "Sí"],
+    ["Proteína", "Pollo a la plancha", None, None, 40, "Sí"],
+    ["Acompañamiento", "Arroz blanco", None, None, 100, "Sí"],
+    ["Especiales", "Bandeja Paisa", "Frijol, arroz, carne, chicharrón, huevo, plátano",
+     None, 20, "Sí"],
+    ["A la carta", "Hamburguesa clásica", "Carne 150g, queso y papas", 25000, 30, "Sí"],
+    ["Bebidas", "Limonada natural", "Vaso 16oz", 5000, None, "Sí"],
+]
+
+
+def _plantilla_xlsx() -> bytes:
+    """Plantilla Excel rica: encabezados con estilo, desplegables (Sección / Activo),
+    comentarios de ayuda, formato de precio/stock, ejemplos por sección y una hoja de
+    Instrucciones. Mantiene las columnas que el importador entiende. Requiere openpyxl."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.worksheet.datavalidation import DataValidation
+    from openpyxl.comments import Comment
+    from openpyxl.utils import get_column_letter
+
+    AZUL, AZUL_CLARO, GRIS, GRIS_TXT = "1E293B", "F1F5F9", "F8FAFC", "64748B"
+    wb = Workbook()
+
+    # ── Hoja 1 · Menú (la que llena el cliente) ─────────────────────────────────
+    ws = wb.active
+    ws.title = "Menú"
+    encabezados = ["Sección", "Nombre", "Descripción", "Precio", "Stock", "Activo"]
+    ws.append(encabezados)
+
+    fill_h = PatternFill("solid", fgColor=AZUL)
+    font_h = Font(bold=True, color="FFFFFF", size=11)
+    center = Alignment(horizontal="center", vertical="center")
+    borde = Border(bottom=Side(style="thin", color="CBD5E1"))
+    for col in range(1, len(encabezados) + 1):
+        c = ws.cell(row=1, column=col)
+        c.fill, c.font, c.alignment, c.border = fill_h, font_h, center, borde
+    ws.row_dimensions[1].height = 24
+    ws.freeze_panes = "A2"
+    for i, w in enumerate([16, 30, 44, 12, 10, 10], start=1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+
+    ayudas = {
+        1: ("Sección del menú (elige de la lista). Entrada · Principio · Proteína · "
+            "Acompañamiento van al PLATO DEL DÍA. Especiales · A la carta · Bebidas van a la carta."),
+        2: "Nombre del ítem. Si ya existe en esa sección, se ACTUALIZA (no se duplica).",
+        3: "Opcional. Lo que incluye (sobre todo útil en Especiales).",
+        4: ("Precio en pesos, solo el número (ej: 25000). A la carta y Bebidas: obligatorio "
+            "si es nuevo. Especiales usan el precio plano de Ajustes. Componentes: sin precio."),
+        5: "Cantidad de hoy. VACÍO = ilimitado / no cambia el contador. 0 = agotado.",
+        6: "Sí = se ofrece · No = inactivo.",
+    }
+    for col, txt in ayudas.items():
+        cm = Comment(txt, "Plantilla")
+        cm.width, cm.height = 280, 130
+        ws.cell(row=1, column=col).comment = cm
+
+    # Ejemplos en estilo tenue (el cliente los reemplaza).
+    font_ej = Font(italic=True, color=GRIS_TXT)
+    fill_ej = PatternFill("solid", fgColor=GRIS)
+    for fila in PLANTILLA_EJEMPLOS:
+        ws.append(fila)
+    n_ej = len(PLANTILLA_EJEMPLOS)
+    for row in range(2, 2 + n_ej):
+        for col in range(1, 7):
+            ws.cell(row=row, column=col).font = font_ej
+            ws.cell(row=row, column=col).fill = fill_ej
+    nota = Comment("Filas de ejemplo: edítalas o bórralas y escribe tu propio menú.", "Plantilla")
+    nota.width, nota.height = 260, 80
+    ws.cell(row=2, column=2).comment = nota
+
+    # Formato numérico + relleno alterno para muchas filas vacías listas para llenar.
+    ultima = 400
+    for row in range(2, ultima + 1):
+        ws.cell(row=row, column=4).number_format = "#,##0"
+        ws.cell(row=row, column=5).number_format = "0"
+
+    # Desplegables (validación de datos) en Sección y Activo.
+    dv_sec = DataValidation(type="list",
+                            formula1='"' + ",".join(PLANTILLA_SECCIONES) + '"',
+                            allow_blank=True)
+    dv_sec.errorTitle, dv_sec.error = "Sección inválida", "Elige una sección de la lista."
+    dv_sec.promptTitle, dv_sec.prompt = "Sección", "Elige a qué panel va este ítem."
+    ws.add_data_validation(dv_sec)
+    dv_sec.add(f"A2:A{ultima}")
+
+    dv_act = DataValidation(type="list", formula1='"Sí,No"', allow_blank=True)
+    ws.add_data_validation(dv_act)
+    dv_act.add(f"F2:F{ultima}")
+
+    # ── Hoja 2 · Instrucciones ──────────────────────────────────────────────────
+    ws2 = wb.create_sheet("Instrucciones")
+    ws2.column_dimensions["A"].width = 115
+    wrap = Alignment(wrap_text=True, vertical="top")
+    f_title = Font(bold=True, size=16, color=AZUL)
+    f_h = Font(bold=True, size=12, color=AZUL)
+    f_p = Font(size=11, color="334155")
+    lineas = [
+        ("t", "📥 Cómo llenar la plantilla del menú"),
+        ("p", "Llena la hoja «Menú»: una fila por cada plato, ingrediente o bebida. "
+              "Al subirla verás una vista previa antes de guardar."),
+        ("h", "Sección (obligatoria · lista desplegable)"),
+        ("p", "• Entrada / Principio / Proteína / Acompañamiento → componentes del Plato del Día."),
+        ("p", "• Especiales → platos especiales (precio plano definido en Ajustes)."),
+        ("p", "• A la carta → platos sueltos con su propio precio."),
+        ("p", "• Bebidas → bebidas con su propio precio."),
+        ("h", "Nombre (obligatorio)"),
+        ("p", "Si el nombre ya existe en esa sección, se ACTUALIZA; no se crea un duplicado."),
+        ("h", "Descripción (opcional)"),
+        ("p", "Lo que incluye el plato. Recomendado en Especiales."),
+        ("h", "Precio"),
+        ("p", "Solo el número, en pesos (ej: 25000). Obligatorio para A la carta y Bebidas "
+              "nuevas. Especiales lo ignoran (usan el precio plano). Componentes no llevan precio."),
+        ("h", "Stock (inventario del día)"),
+        ("p", "• Un número = porciones/unidades disponibles hoy."),
+        ("p", "• Vacío = ilimitado y NO cambia el contador actual (ideal para actualizar solo precios)."),
+        ("p", "• 0 = agotado."),
+        ("h", "Activo"),
+        ("p", "Sí = se ofrece · No = queda inactivo."),
+        ("h", "Al subir"),
+        ("p", "• «Sobrescribir» fija el stock al número del archivo · «Sumar» lo añade al actual."),
+        ("p", "• Una celda de stock vacía nunca borra el inventario en curso."),
+        ("p", "• Borra o reemplaza las filas de ejemplo de la hoja «Menú»."),
+    ]
+    for r, (kind, txt) in enumerate(lineas, start=1):
+        c = ws2.cell(row=r, column=1, value=txt)
+        c.alignment = wrap
+        c.font = f_title if kind == "t" else (f_h if kind == "h" else f_p)
+        if kind == "t":
+            ws2.row_dimensions[r].height = 26
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
 def _render_importar():
     # Resultado del import previo (sobrevive al reset del uploader): se muestra y se limpia.
     prev = st.session_state.pop("import_resultado", None)
@@ -997,9 +1140,24 @@ def _render_importar():
         unsafe_allow_html=True,
     )
 
-    st.download_button("⬇️ Descargar plantilla (.csv)", data=_plantilla_csv(),
-                       file_name="plantilla_menu.csv", mime="text/csv",
-                       use_container_width=False)
+    # Plantilla rica en Excel (desplegables + ejemplos + hoja de instrucciones); .csv simple
+    # como respaldo (y por si el servidor aún no tiene openpyxl).
+    dcol1, dcol2 = st.columns(2)
+    with dcol1:
+        try:
+            st.download_button(
+                "⬇️ Descargar plantilla Excel", data=_plantilla_xlsx(),
+                file_name="plantilla_menu.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True, type="primary",
+                help="Excel guiado: listas desplegables, ejemplos y hoja de instrucciones.")
+        except Exception:
+            st.caption("Plantilla Excel no disponible en este servidor; usa la versión .csv →")
+    with dcol2:
+        st.download_button(
+            "⬇️ Plantilla simple (.csv)", data=_plantilla_csv(),
+            file_name="plantilla_menu.csv", mime="text/csv", use_container_width=True,
+            help="Misma estructura en texto plano, por si prefieres CSV.")
 
     nonce = int(st.session_state.get("import_nonce", 0))
     archivo = st.file_uploader("Archivo del menú (.xlsx o .csv)", type=["xlsx", "csv"],
