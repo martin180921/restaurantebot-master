@@ -426,6 +426,20 @@ div[data-testid="stRadio"] > div > label:has(input:checked) {
     background: #1a1a1a !important; border-color: #1a1a1a !important;
     color: #ffffff !important; font-weight: 600 !important;
 }
+/* El texto de cada píldora vive en un <p>/markdown interno que NO hereda el color del
+   <label>; sin esto, la píldora SELECCIONADA (fondo negro) mostraba su texto en negro
+   = invisible ("Mesa", "Por estado"…). Forzamos que el texto interno herede el color
+   del label: gris si está inactivo, blanco si está seleccionado. */
+div[data-testid="stRadio"] > div > label p,
+div[data-testid="stRadio"] > div > label span,
+div[data-testid="stRadio"] > div > label [data-testid="stMarkdownContainer"] {
+    color: inherit !important;
+}
+div[data-testid="stRadio"] > div > label:has(input:checked) p,
+div[data-testid="stRadio"] > div > label:has(input:checked) span,
+div[data-testid="stRadio"] > div > label:has(input:checked) [data-testid="stMarkdownContainer"] {
+    color: #ffffff !important;
+}
 
 .stTabs [data-baseweb="tab-list"] {
     background: transparent; border-bottom: 1px solid #e5e7eb; gap: 0;
