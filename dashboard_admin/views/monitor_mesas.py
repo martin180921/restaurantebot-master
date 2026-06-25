@@ -696,27 +696,31 @@ def _web_card(row, idx: int):
     fee_html = (f'<div style="font-size:0.72rem; color:#9ca3af;">incl. envío ${fmt_money(fee)}</div>'
                 if fee else "")
 
-    st.markdown(f"""
-    <div class="order-card mon-card"{borde}>
-      <div style="display:flex; justify-content:space-between; align-items:flex-start;">
-        <div>
-          <span class="badge" style="background:{bg}; color:{fg}; border:1px solid {bg};">{etiqueta}</span>
-          <div class="order-id" style="margin-top:6px;">Pedido #{pid}</div>
-          <div class="order-num">{contacto}</div>
-          {dir_html}
-          <div class="order-items">{items}</div>
-          <div style="font-size:0.78rem; color:#6b7280; margin-top:4px;">{pago_html}</div>
-          {nota_html}
-          <div class="order-fecha">{fecha}</div>
-        </div>
-        <div style="text-align:right;">
-          {pedidos.badge_html(estado)}
-          <div class="order-total" style="margin-top:8px;">${fmt_money(total)}</div>
-          {fee_html}{chip}
-        </div>
-      </div>
-    </div>
-    """, unsafe_allow_html=True)
+    # Una SOLA cadena sin saltos de línea ni sangría: una interpolación vacía (sin nota,
+    # sin dirección…) dejaba una línea en blanco que cerraba el bloque HTML y Markdown
+    # pintaba el resto como bloque de código (HTML crudo visible). Concatenar lo evita.
+    st.markdown(
+        f'<div class="order-card mon-card"{borde}>'
+        f'<div style="display:flex; justify-content:space-between; align-items:flex-start;">'
+        f'<div>'
+        f'<span class="badge" style="background:{bg}; color:{fg}; border:1px solid {bg};">{etiqueta}</span>'
+        f'<div class="order-id" style="margin-top:6px;">Pedido #{pid}</div>'
+        f'<div class="order-num">{contacto}</div>'
+        f'{dir_html}'
+        f'<div class="order-items">{items}</div>'
+        f'<div style="font-size:0.78rem; color:#6b7280; margin-top:4px;">{pago_html}</div>'
+        f'{nota_html}'
+        f'<div class="order-fecha">{fecha}</div>'
+        f'</div>'
+        f'<div style="text-align:right;">'
+        f'{pedidos.badge_html(estado)}'
+        f'<div class="order-total" style="margin-top:8px;">${fmt_money(total)}</div>'
+        f'{fee_html}{chip}'
+        f'</div>'
+        f'</div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
 
     b1, b2, b3, b4, b5, b6 = st.columns(6)
     with b1:
