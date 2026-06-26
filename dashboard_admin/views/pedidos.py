@@ -510,12 +510,15 @@ def urgencia(mins, estado):
 
 # ── Origen del pedido (U6) ──────────────────────────────────────────────────────
 def icono_cliente(row, mesa_nombres=None):
-    """(emoji, etiqueta) según el origen: 🪑 mesa (en local) o 📱 teléfono."""
+    """(emoji, etiqueta) según el origen: 📲 auto-servicio QR de mesa, 🪑 mesa (mesero)
+    o 📱 teléfono. El QR (tipo_entrega='mesa_qr') se marca distinto para que cocina y
+    meseros sepan que el comensal pidió solo desde su mesa (req #4)."""
     mid = row.get("mesa_id")
     cliente = str(row.get("numero_cliente", "—") or "—")
+    es_qr = str(row.get("tipo_entrega") or "") == "mesa_qr"
     if mid is not None and not pd.isna(mid):
-        nombre = (mesa_nombres or {}).get(int(mid))
-        return ("🪑", nombre or cliente)
+        nombre = (mesa_nombres or {}).get(int(mid)) or cliente
+        return ("📲", f"QR · {nombre}") if es_qr else ("🪑", nombre)
     if cliente.lower().startswith("mesa"):
         return ("🪑", cliente)
     return ("📱", cliente)

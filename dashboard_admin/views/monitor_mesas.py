@@ -529,11 +529,19 @@ def _detalle_pedido(row, idx: int):
                   f'Abonado ${fmt_money(abonado)} de ${fmt_money(total_p)}</div>'
                   if abonado > 0 else "")
 
+    # Auto-servicio por QR: chip distintivo junto al n.º de pedido para que el mesero sepa
+    # que lo pidió el propio comensal desde la mesa (req #4).
+    es_qr = str(row.get("tipo_entrega") or "") == "mesa_qr"
+    qr_chip = ('<span style="display:inline-block; background:#e9e7fb; color:#4b43b0; '
+               'border:1px solid #d6d2f5; border-radius:999px; padding:1px 8px; '
+               'font-size:0.68rem; font-weight:700; margin-left:6px; vertical-align:middle;">'
+               '📲 QR auto-servicio</span>') if es_qr else ""
+
     st.markdown(f"""
     <div class="order-card mon-card"{borde}>
       <div style="display:flex; justify-content:space-between; align-items:flex-start;">
         <div>
-          <div class="order-id">Pedido #{num_dia}</div>
+          <div class="order-id">Pedido #{num_dia}{qr_chip}</div>
           <div class="order-items">{items}</div>
           <div class="order-fecha">{fecha}</div>
         </div>
