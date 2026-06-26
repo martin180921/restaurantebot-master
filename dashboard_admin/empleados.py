@@ -111,6 +111,22 @@ def desactivar_empleado(emp_id: int) -> bool:
         return False
 
 
+def eliminar_empleado(emp_id: int) -> bool:
+    """Borrado PERMANENTE de un empleado (hard-delete). Borra primero sus sesiones de turno
+    (FK sesiones_empleado.empleado_id → empleados.id) y luego el perfil. La auditoría
+    conserva su nombre (es un snapshot de texto, sin FK), así que el historial no se pierde.
+    Irreversible. Devuelve True si se borró el perfil."""
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM sesiones_empleado WHERE empleado_id = :id"),
+                         {"id": int(emp_id)})
+            res = conn.execute(text("DELETE FROM empleados WHERE id = :id"),
+                               {"id": int(emp_id)})
+        return (res.rowcount or 0) > 0
+    except Exception:
+        return False
+
+
 def regenerar_pin(emp_id: int) -> tuple:
     """Asigna un PIN nuevo (6 dígitos) a un empleado activo. Devuelve (pin, error)."""
     try:

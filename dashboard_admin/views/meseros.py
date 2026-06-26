@@ -54,6 +54,27 @@ def _dialog_nuevo_empleado():
             st.rerun()
 
 
+# ── Modal: borrado permanente de empleado ────────────────────────────────────────
+@st.dialog("🗑 Eliminar empleado")
+def _dialog_eliminar_empleado(eid: int, nombre: str, rol: str):
+    st.markdown(
+        f"¿Seguro que quieres **eliminar de forma permanente** a "
+        f"**{html.escape(nombre)}** ({_ROL_LABEL.get(rol, rol)})?  \n"
+        "Esta acción **no se puede deshacer**. Su historial en la auditoría se conserva."
+    )
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("🗑 Sí, eliminar", key=f"confirm_del_{eid}", type="primary",
+                     use_container_width=True):
+            if empleados.eliminar_empleado(eid):
+                audit.registrar("empleado_eliminado", "empleado", eid, {"nombre": nombre})
+                flash(f"Empleado eliminado · {nombre}", "🗑")
+            st.rerun()
+    with c2:
+        if st.button("Volver", key=f"cancel_del_{eid}", use_container_width=True):
+            st.rerun()
+
+
 def _mostrar_pin_generado():
     """Muestra (una vez) el PIN recién creado/regenerado y un aviso de error si lo hubo."""
     err = st.session_state.pop("_emp_msg", None)
@@ -170,13 +191,18 @@ def render():
                     st.session_state["_emp_pin"] = (nombre, rol, pin)
                 st.rerun()
         with col_baja:
-            if puede_gestionar and activo and st.button("⏹ Baja", key=f"baja_{eid}",
-                                                        use_container_width=True,
-                                                        help="Dar de baja el perfil (permanente)"):
-                if empleados.desactivar_empleado(eid):
-                    audit.registrar("empleado_baja", "empleado", eid, {"nombre": nombre})
-                    flash(f"Empleado dado de baja · {nombre}", "⏹")
-                st.rerun()
+            if puede_gestionar and activo:
+                if st.button("⏹ Baja", key=f"baja_{eid}", use_container_width=True,
+                             help="Dar de baja el perfil (desactiva su acceso; reversible borrándolo o recreándolo)"):
+                    if empleados.desactivar_empleado(eid):
+                        audit.registrar("empleado_baja", "empleado", eid, {"nombre": nombre})
+                        flash(f"Empleado dado de baja · {nombre}", "⏹")
+                    st.rerun()
+            elif puede_gestionar and not activo:
+                # Perfil ya inactivo: ofrecemos el borrado PERMANENTE (con confirmación).
+                if st.button("🗑 Eliminar", key=f"del_{eid}", use_container_width=True,
+                             help="Borrar el perfil de forma permanente"):
+                    _dialog_eliminar_empleado(eid, nombre, rol)
 
     # ── Accesos de turno efímeros (legado, opcional) ────────────────────────────
     st.markdown("<br>", unsafe_allow_html=True)
