@@ -637,7 +637,8 @@ div[data-testid="stRadio"] label[data-baseweb="radio"] {
 
 # ── Estado de sesión ───────────────────────────────────────────────────────────
 st.session_state.setdefault("cart", {})            # {f"{tipo}:{id}": qty}
-st.session_state.setdefault("mesa_id", None)       # mesa bloqueada (auto-servicio)
+st.session_state.setdefault("gate", None)          # datos de la puerta delivery
+st.session_state.setdefault("mesa_id", None)       # mesa bloqueada (auto-servicio QR)
 st.session_state.setdefault("mesa_nombre", None)
 st.session_state.setdefault("pedido_enviado", None)
 st.session_state.setdefault("pedido_pendiente", None)  # snapshot en revisión (pre-envío)
