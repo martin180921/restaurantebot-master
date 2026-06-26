@@ -31,8 +31,11 @@ def crear_pedido_manual(mesa_id: int, mesa_nombre: str, items: list, total: int,
     with engine.begin() as conn:
         nuevo_id = conn.execute(text("""
             INSERT INTO pedidos
-              (numero_cliente, items, total, estado, mesa_id, tipo_entrega, nota_general)
-            VALUES (:numero, :items, :total, 'pendiente', :mesa_id, 'mesa', :ng)
+              (num_dia, numero_cliente, items, total, estado, mesa_id, tipo_entrega, nota_general)
+            VALUES (
+              (SELECT COALESCE(MAX(num_dia), 0) + 1 FROM pedidos WHERE fecha::date = CURRENT_DATE),
+              :numero, :items, :total, 'pendiente', :mesa_id, 'mesa', :ng
+            )
             RETURNING id
         """), {
             "numero":  mesa_nombre,
@@ -65,9 +68,12 @@ def crear_pedido_entrega(tipo: str, items: list, total: int, *, cliente_nombre,
     with engine.begin() as conn:
         nuevo_id = conn.execute(text("""
             INSERT INTO pedidos
-              (numero_cliente, items, total, estado, tipo_entrega, cliente_nombre,
+              (num_dia, numero_cliente, items, total, estado, tipo_entrega, cliente_nombre,
                cliente_telefono, direccion, metodo_pago, paga_con, fee, nota_general)
-            VALUES (:nc, :items, :total, 'pendiente', :te, :cn, :ct, :dir, :mp, :pc, :fee, :ng)
+            VALUES (
+              (SELECT COALESCE(MAX(num_dia), 0) + 1 FROM pedidos WHERE fecha::date = CURRENT_DATE),
+              :nc, :items, :total, 'pendiente', :te, :cn, :ct, :dir, :mp, :pc, :fee, :ng
+            )
             RETURNING id
         """), {
             "nc": numero, "items": json.dumps(items, ensure_ascii=False),

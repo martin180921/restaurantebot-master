@@ -510,6 +510,7 @@ def _detalle_mesa(mid: int, nombre: str, sub: pd.DataFrame, color: str,
 
 def _detalle_pedido(row, idx: int):
     pid     = int(row["id"])
+    num_dia = row.get("num_dia") or pid   # número diario; fallback al id global (pre-migración)
     estado  = row.get("estado", "pendiente")
     items   = pedidos.formatear_items(row.get("items", []))
     total_p = int(row.get("total", 0) or 0)
@@ -532,7 +533,7 @@ def _detalle_pedido(row, idx: int):
     <div class="order-card mon-card"{borde}>
       <div style="display:flex; justify-content:space-between; align-items:flex-start;">
         <div>
-          <div class="order-id">Pedido #{pid}</div>
+          <div class="order-id">Pedido #{num_dia}</div>
           <div class="order-items">{items}</div>
           <div class="order-fecha">{fecha}</div>
         </div>
@@ -556,7 +557,7 @@ def _detalle_pedido(row, idx: int):
                 "💵 Cobrar", key=f"cobrar_{uid}", use_container_width=True,
                 help="Cobrar este pedido (efectivo/transferencia, abono parcial)",
                 disabled=saldo <= 0):
-            _pedir_dialogo("cobrar", ids=[int(pid)], titulo=f"Pedido #{pid}",
+            _pedir_dialogo("cobrar", ids=[int(pid)], titulo=f"Pedido #{num_dia}",
                            saldo=int(saldo), uid=uid)
     with b4:
         # Descuento / cortesía: solo cajero/admin y con saldo; el modal exige PIN de admin.
@@ -656,6 +657,7 @@ def _web_en_vivo():
 
 def _web_card(row, idx: int):
     pid      = int(row["id"])
+    num_dia  = row.get("num_dia") or pid
     estado   = row.get("estado", "pendiente")
     tipo     = str(row.get("tipo_entrega") or "")
     etiqueta, bg, fg = TIPO_BADGE.get(tipo, ("Web", "#e5e7eb", "#374151"))
@@ -704,7 +706,7 @@ def _web_card(row, idx: int):
         f'<div style="display:flex; justify-content:space-between; align-items:flex-start;">'
         f'<div>'
         f'<span class="badge" style="background:{bg}; color:{fg}; border:1px solid {bg};">{etiqueta}</span>'
-        f'<div class="order-id" style="margin-top:6px;">Pedido #{pid}</div>'
+        f'<div class="order-id" style="margin-top:6px;">Pedido #{num_dia}</div>'
         f'<div class="order-num">{contacto}</div>'
         f'{dir_html}'
         f'<div class="order-items">{items}</div>'
@@ -736,7 +738,7 @@ def _web_card(row, idx: int):
         if auth.can("cobrar") and st.button(
                 "💵 Cobrar", key=f"cobrar_{uid}", use_container_width=True,
                 disabled=saldo <= 0):
-            _pedir_dialogo("cobrar", ids=[int(pid)], titulo=f"Pedido #{pid}",
+            _pedir_dialogo("cobrar", ids=[int(pid)], titulo=f"Pedido #{num_dia}",
                            saldo=int(saldo), uid=uid)
     with b4:
         if auth.can("cobrar") and saldo > 0 and st.button(

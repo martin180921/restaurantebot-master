@@ -522,7 +522,7 @@ def icono_cliente(row, mesa_nombres=None):
 
 
 # ── Ticket de cocina ───────────────────────────────────────────────────────────
-def generar_ticket_html(pid, cliente, items_raw, total_p, fecha, estado):
+def generar_ticket_html(pid, cliente, items_raw, total_p, fecha, estado, num_dia=None):
     """Genera el HTML del ticket termico para imprimir."""
     # Modelo por secciones (utils.items): agrupa por categoría con sus componentes
     # indentados debajo. Retro-compatible: los items legados (sin 'tipo') caen en
@@ -542,6 +542,7 @@ def generar_ticket_html(pid, cliente, items_raw, total_p, fecha, estado):
         lineas_items = '<div class="it">—</div>'
 
     # C2: cliente y estado se escapan antes de inyectarse en el ticket.
+    num_dia_display = int(num_dia) if num_dia else pid
     cliente    = html.escape(str(cliente))
     fecha_str  = html.escape(str(fecha)) if fecha else fecha_corta(datetime.now())
     estado_str = html.escape(str(estado).upper())
@@ -571,7 +572,7 @@ def generar_ticket_html(pid, cliente, items_raw, total_p, fecha, estado):
     <div class="sub">Control de Cocina</div>
   </div>
   <div class="divider"></div>
-  <div class="label">Pedido</div><div class="value">#{pid}</div>
+  <div class="label">Pedido</div><div class="value">#{num_dia_display}</div>
   <div class="label" style="margin-top:4px;">Cliente</div><div class="value">{cliente}</div>
   <div class="label" style="margin-top:4px;">Fecha</div><div class="value">{fecha_str}</div>
   <div class="estado-badge">{estado_str}</div>
@@ -627,6 +628,7 @@ def _maybe_print_ticket(df: pd.DataFrame) -> None:
     ticket_html = generar_ticket_html(
         int(r["id"]), r.get("numero_cliente", "—"), r.get("items", []),
         r.get("total", 0), formatear_fecha(r.get("fecha")), r.get("estado", "pendiente"),
+        num_dia=r.get("num_dia"),
     )
     _emit_print(ticket_html, int(tid))
 
@@ -948,6 +950,7 @@ def render_pedidos(dataframe: pd.DataFrame, tab_key: str = "all", mesa_nombres=N
         return
     for _, row in dataframe.iterrows():
         pid     = row["id"]
+        num_dia = row.get("num_dia") or pid   # fallback al id global para pedidos pre-migración
         estado  = row.get("estado", "pendiente")
         emoji, etiqueta = icono_cliente(row, mesa_nombres)   # U6
         items   = formatear_items(row.get("items", []))
@@ -965,7 +968,7 @@ def render_pedidos(dataframe: pd.DataFrame, tab_key: str = "all", mesa_nombres=N
         <div class="order-card"{borde}>
           <div style="display:flex; justify-content:space-between; align-items:flex-start;">
             <div>
-              <div class="order-id">Pedido #{pid}</div>
+              <div class="order-id">Pedido #{num_dia}</div>
               <div class="order-num">{emoji} {html.escape(str(etiqueta))}</div>
               <div class="order-items">{items}</div>
               <div class="order-fecha">{fecha}</div>

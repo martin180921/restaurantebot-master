@@ -290,6 +290,11 @@ def _ensure_schema():
         ]:
             conn.execute(text(f"ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS {_col} {_ddl}"))
 
+        # num_dia: contador diario del pedido (1, 2, 3… se reinicia cada día). Lo fija
+        # nuevo_pedido al insertar con MAX(num_dia)+1 WHERE fecha::date = CURRENT_DATE.
+        # NULL en pedidos creados antes de esta columna → se muestra el id global.
+        conn.execute(text("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS num_dia INTEGER"))
+
         # Índices del tablero en vivo: el SELECT activo filtra por estado, saldo y fecha
         # de hoy; sin estos cae en seq-scan de toda la tabla bajo carga (ver pedidos.py).
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_pedidos_estado ON pedidos (estado)"))
