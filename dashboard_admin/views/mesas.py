@@ -1,10 +1,20 @@
-"""Vista de Mesas: gestión dinámica (alta, renombrar, activar y borrar) de mesas."""
+"""Vista de Mesas: gestión dinámica (alta, renombrar, activar y borrar) de mesas, más
+la generación de los códigos QR de auto-servicio (uno por mesa → ?table=<id>)."""
 import streamlit as st
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 import html
+import io
+import os
 
-from db import engine, flash
+# segno genera el PNG del QR en Python puro (sin Pillow). Import defensivo: si aún no
+# está instalado (deploy en curso), la pestaña de Mesas sigue funcionando sin los QR.
+try:
+    import segno
+except ImportError:
+    segno = None
+
+from db import engine, flash, cargar_ajustes
 
 
 # ── Esquema defensivo ──────────────────────────────────────────────────────────
@@ -110,12 +120,89 @@ def _dialog_eliminar_mesa(mid: int, nombre: str):
             st.rerun()
 
 
+# ── Códigos QR de auto-servicio ─────────────────────────────────────────────────
+# Cada mesa tiene un QR que abre la app de clientes con su mesa ya fijada
+# (?table=<id>). La URL pública de la app se guarda en ajustes['app_cliente_url']
+# (o se hereda del env APP_CLIENTE_URL) para construir los enlaces.
+def _base_url() -> str:
+    """URL pública de la app de clientes (sin barra final). Ajuste guardado o env."""
+    url = (cargar_ajustes().get("app_cliente_url") or os.getenv("APP_CLIENTE_URL") or "")
+    return url.strip().rstrip("/")
+
+
+def _guardar_base_url(url: str) -> None:
+    with engine.begin() as conn:
+        conn.execute(text(
+            "INSERT INTO ajustes (clave, valor) VALUES ('app_cliente_url', :v) "
+            "ON CONFLICT (clave) DO UPDATE SET valor = EXCLUDED.valor"
+        ), {"v": (url or "").strip().rstrip("/")})
+    cargar_ajustes.clear()
+    flash("URL pública guardada", "✅")
+
+
+def _link_mesa(base: str, mesa_id: int) -> str:
+    return f"{base}/?table={int(mesa_id)}"
+
+
+@st.cache_data(ttl=3600)
+def _qr_png(url: str) -> bytes:
+    """PNG del QR para 'url' (cacheado: el QR de una mesa no cambia)."""
+    buf = io.BytesIO()
+    segno.make(url, error="m").save(buf, kind="png", scale=8, border=2)
+    return buf.getvalue()
+
+
+def _seccion_qr(mesas):
+    """Generador de QR por mesa: configura la URL pública y descarga cada código."""
+    with st.expander("🔳 Códigos QR de las mesas (auto-servicio)", expanded=False):
+        if segno is None:
+            st.warning("Falta la librería 'segno' para generar los QR. Ya está en "
+                       "requirements.txt; vuelve a desplegar el panel.")
+            return
+
+        st.markdown("El QR de cada mesa abre la carta con la mesa ya seleccionada. "
+                    "Primero indica la **URL pública de la app de clientes**:")
+        url_in = st.text_input("URL pública de la app de clientes", value=_base_url(),
+                               placeholder="https://tu-app.up.railway.app", key="qr_base_url")
+        if st.button("💾 Guardar URL", key="qr_save_url"):
+            _guardar_base_url(url_in)
+            st.rerun()
+
+        base = _base_url()
+        if not base:
+            st.info("Configura la URL pública arriba para generar los códigos QR.")
+            return
+
+        activas = [m for m in mesas if m["activa"]]
+        if not activas:
+            st.info("No hay mesas activas. Crea una para generar su QR.")
+            return
+
+        st.caption("Descarga el QR de cada mesa, imprímelo y pégalo en la mesa correspondiente.")
+        cols = st.columns(3)
+        for i, m in enumerate(activas):
+            mid, nombre = int(m["id"]), str(m["nombre"])
+            link = _link_mesa(base, mid)
+            png = _qr_png(link)
+            with cols[i % 3]:
+                st.markdown(f'<div style="font-weight:600; color:#26262b; margin-top:8px;">'
+                            f'🪑 {html.escape(nombre)}</div>', unsafe_allow_html=True)
+                st.image(png, width=160)
+                slug = "".join(c if c.isalnum() else "_" for c in nombre) or f"mesa_{mid}"
+                st.download_button("⬇️ Descargar", data=png, file_name=f"qr_{slug}.png",
+                                   mime="image/png", key=f"qr_dl_{mid}",
+                                   use_container_width=True)
+                st.caption(link)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # SECCIÓN: MESAS
 # ══════════════════════════════════════════════════════════════════════════════
 def render():
     _ensure_schema()
     mesas = cargar_mesas()
+
+    _seccion_qr(mesas)
 
     col_lista, col_form = st.columns([2, 1])
 
