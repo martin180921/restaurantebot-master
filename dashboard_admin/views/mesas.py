@@ -128,12 +128,12 @@ def render():
         with ca:
             st.markdown(f'<div class="metric-card"><div class="metric-value metric-green">{activas}</div><div class="metric-label">Activas</div></div>', unsafe_allow_html=True)
         with ci:
-            st.markdown(f'<div class="metric-card"><div class="metric-value" style="color:#9ca3af">{inactivas}</div><div class="metric-label">Inactivas</div></div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="metric-card"><div class="metric-value" style="color:#a3a39b">{inactivas}</div><div class="metric-label">Inactivas</div></div>', unsafe_allow_html=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
 
         if not mesas:
-            st.markdown('<p style="color:#9ca3af; font-size:0.85rem;">Aún no hay mesas. Crea la primera en el panel de la derecha.</p>', unsafe_allow_html=True)
+            st.markdown('<p style="color:#a3a39b; font-size:0.85rem;">Aún no hay mesas. Crea la primera en el panel de la derecha.</p>', unsafe_allow_html=True)
         else:
             for idx, row in enumerate(mesas):
                 mid             = int(row["id"])
@@ -213,10 +213,10 @@ def render():
 
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown("""
-        <div style="background:#f9fafb; border:1px solid #e5e7eb; border-radius:10px; padding:1rem; font-size:0.78rem; color:#6b7280;">
-          <div style="color:#374151; font-weight:600; margin-bottom:6px;">💡 Cómo funciona</div>
+        <div style="background:#fafaf8; border:1px solid #ececec; border-radius:10px; padding:1rem; font-size:0.78rem; color:#6b6b64;">
+          <div style="color:#45443e; font-weight:600; margin-bottom:6px;">💡 Cómo funciona</div>
           Crea tantas mesas como necesites.<br><br>
-          <b style="color:#4b5563;">Desactivar</b> oculta la mesa para nuevos pedidos sin borrarla.<br>
-          <b style="color:#4b5563;">Eliminar</b> la borra; si ya tiene pedidos, se archiva para conservar el historial.
+          <b style="color:#56554e;">Desactivar</b> oculta la mesa para nuevos pedidos sin borrarla.<br>
+          <b style="color:#56554e;">Eliminar</b> la borra; si ya tiene pedidos, se archiva para conservar el historial.
         </div>
         """, unsafe_allow_html=True)

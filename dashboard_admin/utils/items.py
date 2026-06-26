@@ -20,6 +20,7 @@ CAT_LABEL = {
     "plato_dia": "PLATO DEL DIA",
     "especial":  "ESPECIALES",
     "item":      "A LA CARTA",
+    "adicional": "ADICIONALES",
     "bebida":    "BEBIDAS",
 }
 # Etiqueta de cada paso de configuración del Plato del Día.
@@ -28,9 +29,10 @@ GRUPO_LABEL = {
     "principio": "Principio",
     "proteina":  "Proteína",
     "acompanamiento": "Acompañamientos",
+    "bebida":    "Bebida",
 }
 # Orden canónico de las categorías en cualquier ticket.
-ORDEN_CAT = ["plato_dia", "especial", "item", "bebida"]
+ORDEN_CAT = ["plato_dia", "especial", "item", "adicional", "bebida"]
 
 
 def parse_items(raw):
@@ -78,6 +80,9 @@ def componentes_lineas(item):
     acomp = _agrupa_acomp(cfg.get("acompanamientos"))
     if acomp:
         out.append([GRUPO_LABEL["acompanamiento"], acomp])
+    beb = cfg.get("bebida")
+    if beb:
+        out.append([GRUPO_LABEL["bebida"], str(beb)])
     nota = str(item.get("nota") or "").strip()
     if nota:
         out.append(["Nota", nota])

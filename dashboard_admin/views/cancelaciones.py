@@ -12,7 +12,7 @@ import pandas as pd
 import html
 
 import auth
-from db import engine, fmt_money, fecha_larga
+from db import engine, fmt_money, fecha_larga, titulo_seccion
 from views import pedidos
 
 
@@ -47,13 +47,13 @@ def render():
         st.error("🔒 Acceso denegado")
         st.stop()
 
-    st.markdown('<div class="section-title">🚫 Cancelaciones · historial por día</div>',
+    st.markdown(titulo_seccion('🚫 Cancelaciones · historial por día'),
                 unsafe_allow_html=True)
 
     df = cargar_cancelados()
     if df.empty:
         st.markdown(
-            '<p style="color:#9ca3af; font-size:0.9rem; padding:1.5rem 0; text-align:center;">'
+            '<p style="color:#a3a39b; font-size:0.9rem; padding:1.5rem 0; text-align:center;">'
             'No hay pedidos cancelados registrados.</p>',
             unsafe_allow_html=True,
         )
@@ -117,7 +117,7 @@ def _fila_cancelada(row):
         f'border-radius:8px; padding:8px 12px; font-size:0.82rem; color:#7f1d1d;">'
         f'<b>Motivo:</b> {html.escape(motivo)}</div>'
         if motivo else
-        '<div style="margin-top:6px; font-size:0.8rem; color:#9ca3af; font-style:italic;">'
+        '<div style="margin-top:6px; font-size:0.8rem; color:#a3a39b; font-style:italic;">'
         'Sin motivo registrado.</div>'
     )
 

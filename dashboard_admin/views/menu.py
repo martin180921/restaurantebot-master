@@ -25,7 +25,7 @@ import pandas as pd
 from datetime import date
 
 import auth
-from db import (engine, cargar_menu, cargar_componentes, cargar_catalogo,
+from db import (engine, titulo_seccion, cargar_menu, cargar_componentes, cargar_catalogo,
                 cargar_ajustes, fmt_money, flash, disponibles,
                 componentes_activos_por_grupo, precio_plato_dia, num_acompanamientos,
                 GRUPOS_COMPONENTE, GRUPO_LABEL, precio_especiales,
@@ -324,8 +324,8 @@ def _dialog_stock(scope: str, oid: int, nombre: str, stock_actual):
 def _render_plato_dia():
     from db import precio_plato_dia, num_acompanamientos
     st.markdown(
-        f'<div style="background:#f9fafb; border:1px solid #e5e7eb; border-radius:10px; '
-        f'padding:0.8rem 1rem; font-size:0.85rem; color:#374151; margin-bottom:1rem;">'
+        f'<div style="background:#fafaf8; border:1px solid #ececec; border-radius:10px; '
+        f'padding:0.8rem 1rem; font-size:0.85rem; color:#45443e; margin-bottom:1rem;">'
         f'💡 Precio plano del Plato del Día: <b>${fmt_money(precio_plato_dia())}</b> · '
         f'el cliente elige <b>{num_acompanamientos()}</b> acompañamientos. '
         f'Cambia ambos en ⚙️ Ajustes.</div>',
@@ -349,7 +349,7 @@ def _render_grupo(sub, grupo: str):
                    "Desactiva o marca 86 una sopa para ocultarla del día.")
 
     if sub.empty:
-        st.markdown('<p style="color:#9ca3af; font-size:0.82rem;">Sin opciones.</p>',
+        st.markdown('<p style="color:#a3a39b; font-size:0.82rem;">Sin opciones.</p>',
                     unsafe_allow_html=True)
     else:
         for _, row in sub.iterrows():
@@ -447,7 +447,7 @@ def _render_catalogo_tab(categoria: str, label: str, con_precio: bool):
                        "Cámbialo en ⚙️ Ajustes (se aplica a todas por igual).")
 
         if sub is None or sub.empty:
-            st.markdown('<p style="color:#9ca3af; font-size:0.85rem;">No hay platos en esta sección.</p>',
+            st.markdown('<p style="color:#a3a39b; font-size:0.85rem;">No hay platos en esta sección.</p>',
                         unsafe_allow_html=True)
         else:
             for _, row in sub.iterrows():
@@ -598,9 +598,9 @@ def _render_ajustes():
         st.rerun()
 
     st.markdown(
-        '<div style="background:#f9fafb; border:1px solid #e5e7eb; border-radius:10px; '
-        'padding:1rem; font-size:0.78rem; color:#6b7280; margin-top:1rem;">'
-        '<div style="color:#374151; font-weight:600; margin-bottom:6px;">💡 Cómo se aplican</div>'
+        '<div style="background:#fafaf8; border:1px solid #ececec; border-radius:10px; '
+        'padding:1rem; font-size:0.78rem; color:#6b6b64; margin-top:1rem;">'
+        '<div style="color:#45443e; font-weight:600; margin-bottom:6px;">💡 Cómo se aplican</div>'
         'El <b>Plato del Día</b> cuesta lo mismo sin importar la combinación elegida.<br>'
         'Las <b>Especiales</b> comparten un único precio: al cambiarlo, se actualizan todas.<br>'
         'El <b>recargo de entrega</b> se suma una vez a cada pedido de Domicilio o Para Llevar.'
@@ -630,9 +630,9 @@ def _fila_inventario(scope: str, oid: int, nombre, stock_actual):
     c_n, c_u, c_q = st.columns([3, 1.4, 1.6])
     with c_n:
         st.markdown(
-            f'<div style="padding:6px 0;"><span style="font-size:0.9rem; color:#1a1a1a;">'
+            f'<div style="padding:6px 0;"><span style="font-size:0.9rem; color:#26262b;">'
             f'{html.escape(str(nombre))}</span>'
-            f'<div style="font-size:0.72rem; color:#9ca3af;">{_actual_txt(stock_actual)}</div></div>',
+            f'<div style="font-size:0.72rem; color:#a3a39b;">{_actual_txt(stock_actual)}</div></div>',
             unsafe_allow_html=True,
         )
     with c_u:
@@ -659,8 +659,8 @@ def _resumen_inv(sub) -> str:
 
 def _render_inventario():
     st.markdown(
-        '<div style="background:#f9fafb; border:1px solid #e5e7eb; border-radius:10px; '
-        'padding:0.8rem 1rem; font-size:0.85rem; color:#374151; margin-bottom:1rem;">'
+        '<div style="background:#fafaf8; border:1px solid #ececec; border-radius:10px; '
+        'padding:0.8rem 1rem; font-size:0.85rem; color:#45443e; margin-bottom:1rem;">'
         '📦 Fija el <b>stock del día</b>. Cada componente del Plato del Día se cuenta por '
         'separado (50 sopas, 50 ensaladas, 50 res, 50 pollo…) y cada plato a la carta como '
         'una unidad. Al guardar se <b>sobrescriben</b> los contadores en vivo. Marca '
@@ -673,7 +673,7 @@ def _render_inventario():
     comp_vals, menu_vals = {}, {}
 
     with st.form("form_inventario_dia"):
-        st.markdown('<div class="section-title">🍛 Plato del Día · por componente</div>',
+        st.markdown(titulo_seccion('🍛 Plato del Día · por componente'),
                     unsafe_allow_html=True)
         if df_comp is None or df_comp.empty:
             st.caption("No hay componentes del Plato del Día. Créalos en la pestaña 🍽️ Plato del Día.")
@@ -690,8 +690,8 @@ def _render_inventario():
                         cid = int(row["id"])
                         comp_vals[cid] = _fila_inventario("comp", cid, row["nombre"], row.get("stock"))
 
-        st.markdown('<div class="section-title" style="margin-top:1rem;">🍽️ Platos a la carta · '
-                    'por unidad</div>', unsafe_allow_html=True)
+        st.markdown(titulo_seccion('🍽️ Platos a la carta · por unidad', style="margin-top:1rem;"),
+                    unsafe_allow_html=True)
         hay_cat = False
         for categoria, label in [("especial", "⭐ Especiales"),
                                  ("a_la_carta", "📋 A la carta"),
@@ -741,6 +741,8 @@ SECCION_MAP = {
     "a la carta": ("menu", "a_la_carta"), "a_la_carta": ("menu", "a_la_carta"),
     "carta": ("menu", "a_la_carta"), "plato": ("menu", "a_la_carta"),
     "plato a la carta": ("menu", "a_la_carta"), "fuerte": ("menu", "a_la_carta"),
+    "adicional": ("menu", "adicional"), "adicionales": ("menu", "adicional"),
+    "extra": ("menu", "adicional"), "extras": ("menu", "adicional"),
     "bebida": ("menu", "bebida"), "bebidas": ("menu", "bebida"),
     "jugo": ("menu", "bebida"), "gaseosa": ("menu", "bebida"), "drink": ("menu", "bebida"),
 }
@@ -757,7 +759,7 @@ COL_ALIAS = {
 DEST_LABEL = {
     "entrada": "Entrada", "principio": "Principio", "proteina": "Proteína",
     "acompanamiento": "Acompañamientos", "especial": "Especiales",
-    "a_la_carta": "A la carta", "bebida": "Bebidas",
+    "a_la_carta": "A la carta", "adicional": "Adicionales", "bebida": "Bebidas",
 }
 
 
@@ -1129,13 +1131,13 @@ def _render_importar():
                     st.markdown(f"- {html.escape(o)}")
 
     st.markdown(
-        '<div style="background:#f9fafb; border:1px solid #e5e7eb; border-radius:10px; '
-        'padding:0.8rem 1rem; font-size:0.85rem; color:#374151; margin-bottom:1rem;">'
+        '<div style="background:#fafaf8; border:1px solid #ececec; border-radius:10px; '
+        'padding:0.8rem 1rem; font-size:0.85rem; color:#45443e; margin-bottom:1rem;">'
         '📥 Sube el menú en <b>.xlsx</b> o <b>.csv</b>, una fila por ítem. La columna '
         '<b>seccion</b> enruta cada fila a su panel y se cargan nombre, descripción, precio '
         'y stock de una vez. Si una fila ya existe (mismo nombre en su sección) se '
         '<b>actualiza</b> sin duplicar; una celda de <b>stock en blanco no cambia</b> el '
-        'inventario en curso.<br><span style="color:#6b7280;">Secciones válidas: entrada · '
+        'inventario en curso.<br><span style="color:#6b6b64;">Secciones válidas: entrada · '
         'principio · proteina · acompanamiento · especial · a_la_carta · bebida.</span></div>',
         unsafe_allow_html=True,
     )
@@ -1224,7 +1226,7 @@ def _render_importar():
 def _render_readonly():
     """Carta de SOLO consulta para el mesero: secciones, platos disponibles HOY y
     precios. Sin pestañas de edición ni modales de crear/editar/eliminar/86."""
-    st.markdown('<div class="section-title">🍔 Carta (solo lectura)</div>',
+    st.markdown(titulo_seccion('🍔 Carta (solo lectura)'),
                 unsafe_allow_html=True)
 
     def _cards(rows):
@@ -1249,8 +1251,8 @@ def _render_readonly():
 
     # 🍽️ Plato del Día (precio plano + componentes disponibles por grupo)
     st.markdown(
-        f'<div style="background:#f9fafb; border:1px solid #e5e7eb; border-radius:10px; '
-        f'padding:0.7rem 1rem; font-size:0.85rem; color:#374151; margin:0.5rem 0 1rem 0;">'
+        f'<div style="background:#fafaf8; border:1px solid #ececec; border-radius:10px; '
+        f'padding:0.7rem 1rem; font-size:0.85rem; color:#45443e; margin:0.5rem 0 1rem 0;">'
         f'🍽️ <b>Plato del Día</b> · ${fmt_money(precio_plato_dia())} · '
         f'elige {num_acompanamientos()} acompañamientos</div>',
         unsafe_allow_html=True,
@@ -1265,7 +1267,7 @@ def _render_readonly():
         if s <= 0:
             return (f'<span style="color:#b91c1c; text-decoration:line-through;">'
                     f'{nom} (agotado)</span>')
-        color = "#b45309" if s <= STOCK_BAJO else "#6b7280"
+        color = "#b45309" if s <= STOCK_BAJO else "#6b6b64"
         return f'{nom} <span style="color:{color}; font-weight:600;">({s})</span>'
 
     por_grupo = componentes_activos_por_grupo()
@@ -1275,9 +1277,9 @@ def _render_readonly():
             continue
         nombres = " · ".join(_opt_label(o) for o in opciones)
         st.markdown(
-            f'<div style="margin-bottom:0.6rem;"><span style="font-weight:600; color:#1a1a1a;">'
+            f'<div style="margin-bottom:0.6rem;"><span style="font-weight:600; color:#26262b;">'
             f'{html.escape(GRUPO_LABEL.get(grupo, grupo))}:</span> '
-            f'<span style="color:#6b7280; font-size:0.88rem;">{nombres}</span></div>',
+            f'<span style="color:#6b6b64; font-size:0.88rem;">{nombres}</span></div>',
             unsafe_allow_html=True,
         )
 
@@ -1287,15 +1289,16 @@ def _render_readonly():
     def _seccion(titulo: str, categoria: str):
         rows = (disp[disp["categoria"] == categoria].to_dict("records")
                 if not disp.empty else [])
-        st.markdown(f'<div class="section-title">{titulo}</div>', unsafe_allow_html=True)
+        st.markdown(titulo_seccion(titulo), unsafe_allow_html=True)
         if rows:
             _cards(rows)
         else:
-            st.markdown('<p style="color:#9ca3af; font-size:0.85rem;">Sin platos activos.</p>',
+            st.markdown('<p style="color:#a3a39b; font-size:0.85rem;">Sin platos activos.</p>',
                         unsafe_allow_html=True)
 
     _seccion("⭐ Especiales", "especial")
     _seccion("📋 A la carta", "a_la_carta")
+    _seccion("🍟 Adicionales", "adicional")
     _seccion("🥤 Bebidas", "bebida")
 
 
@@ -1306,9 +1309,11 @@ def render():
         _render_readonly()
         return
 
-    t1, t2, t3, t4, t5, t6, t7 = st.tabs([
-        "🍽️ Plato del Día", "⭐ Especiales", "📋 A la carta", "🥤 Bebidas",
-        "📦 Inventario", "📥 Importar", "⚙️ Ajustes",
+    # Inventario e Importar se movieron a 💰 Caja (siguen definidos abajo y se llaman
+    # desde views/caja.py). Aquí el Menú queda enfocado en la carta y los ajustes.
+    t1, t2, t3, t4, t5, t6 = st.tabs([
+        "🍽️ Plato del Día", "⭐ Especiales", "📋 A la carta", "🍟 Adicionales",
+        "🥤 Bebidas", "⚙️ Ajustes",
     ])
     with t1:
         _render_plato_dia()
@@ -1317,10 +1322,8 @@ def render():
     with t3:
         _render_catalogo_tab("a_la_carta", "A la carta", con_precio=True)
     with t4:
-        _render_catalogo_tab("bebida", "Bebidas", con_precio=True)
+        _render_catalogo_tab("adicional", "Adicionales", con_precio=True)
     with t5:
-        _render_inventario()
+        _render_catalogo_tab("bebida", "Bebidas", con_precio=True)
     with t6:
-        _render_importar()
-    with t7:
         _render_ajustes()

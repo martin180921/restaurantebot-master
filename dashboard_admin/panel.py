@@ -114,25 +114,25 @@ if not st.session_state["autenticado"]:
 if not st.session_state["autenticado"]:
     st.markdown("""
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=DM+Sans:wght@400;500&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600&display=swap');
     html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
-    .stApp { background: #f7f7f5; color: #1a1a1a; }
+    .stApp { background: #f7f7f5; color: #26262b; }
     header[data-testid="stHeader"], [data-testid="stToolbar"],
     [data-testid="stDecoration"], [data-testid="stStatusWidget"],
     [data-testid="stMainMenu"], #MainMenu, footer { display: none !important; }
     .stTextInput > div > div > input {
-        background: #ffffff !important; border-color: #d1d5db !important;
-        color: #1a1a1a !important; border-radius: 8px !important;
+        background: #ffffff !important; border-color: #d8d6cf !important;
+        color: #26262b !important; border-radius: 8px !important;
         text-align: center; font-size: 1.1rem; letter-spacing: 4px;
     }
     .stButton > button {
-        width: 100%; background: #1a1a1a !important; color: #ffffff !important;
+        width: 100%; background: #4b43b0 !important; color: #ffffff !important;
         border: none !important; border-radius: 8px !important;
         font-family: 'DM Sans', sans-serif !important;
         font-weight: 600 !important; font-size: 0.9rem !important;
         padding: 10px !important; margin-top: 8px !important;
     }
-    .stButton > button:hover { background: #374151 !important; }
+    .stButton > button:hover { background: #3f389c !important; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -141,8 +141,8 @@ if not st.session_state["autenticado"]:
     with col_i:
         st.markdown("""
         <div style='text-align:center; margin-bottom: 2rem;'>
-          <div style='font-family:Syne,sans-serif; font-size:1.5rem; font-weight:800; color:#1a1a1a;'>Restaurante</div>
-          <div style='font-size:0.82rem; color:#9ca3af; margin-top:4px;'>Panel de operaciones · Acceso restringido</div>
+          <div style='font-family:"DM Sans",sans-serif; font-size:1.4rem; font-weight:300; letter-spacing:0.16em; text-transform:uppercase; color:#26262b;'>Restaurante</div>
+          <div style='font-size:0.82rem; color:#a3a39b; margin-top:6px;'>Panel de operaciones · Acceso restringido</div>
         </div>
         """, unsafe_allow_html=True)
         password_input = st.text_input(
@@ -208,102 +208,110 @@ if role == auth.MESERO:
 # ── Estilos (Light Mode) ───────────────────────────────────────────────────────
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:wght@300;400;500&display=swap');
+/* Tipografía única: DM Sans (la display Syne se retiró en favor de un trazo fino y
+   moderno). Display = pesos 300 (titulares, con tracking) y 600 (cifras grandes).
+   Paleta neutra cálida + acento de marca índigo (#6c5ce0 / texto #4b43b0, tinte
+   #f1effb). Los colores OPERATIVOS (verde cobrar, rojo cancelar, gris ticket, chips
+   de estado) se conservan: el personal opera por color. */
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600&display=swap');
 
 html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
-.stApp { background: #f7f7f5; color: #1a1a1a; }
+.stApp { background: #f7f7f5; color: #26262b; }
 
 .panel-header {
     display: flex; align-items: center; justify-content: space-between;
-    padding: 1.25rem 0 1rem 0; border-bottom: 1px solid #e5e7eb; margin-bottom: 1.25rem;
+    padding: 1.25rem 0 1rem 0; border-bottom: 1px solid #ececec; margin-bottom: 1.25rem;
 }
 .panel-title {
-    font-family: 'Syne', sans-serif; font-size: 1.6rem;
-    font-weight: 800; color: #1a1a1a; letter-spacing: -0.5px;
+    font-family: 'DM Sans', sans-serif; font-size: 1.5rem;
+    font-weight: 300; color: #26262b; letter-spacing: 0.02em;
 }
-.panel-subtitle { font-size: 0.8rem; color: #6b7280; margin-top: 2px; }
+.panel-subtitle { font-size: 0.8rem; color: #6b6b64; margin-top: 2px; }
 .live-dot {
-    width: 8px; height: 8px; background: #22c55e; border-radius: 50%;
+    width: 8px; height: 8px; background: #6c5ce0; border-radius: 50%;
     display: inline-block; margin-right: 6px; animation: pulse 1.8s infinite;
 }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
 
 .metric-card {
-    background: #ffffff; border: 1px solid #e5e7eb;
+    background: #ffffff; border: 1px solid #ececec;
     border-radius: 12px; padding: 1.2rem 1.5rem; text-align: center;
-    box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+    box-shadow: 0 1px 2px rgba(0,0,0,0.03);
 }
 .metric-value {
-    font-family: 'Syne', sans-serif; font-size: 2.4rem;
-    font-weight: 800; color: #1a1a1a; line-height: 1;
+    font-family: 'DM Sans', sans-serif; font-size: 2.2rem;
+    font-weight: 600; color: #26262b; line-height: 1; letter-spacing: -0.01em;
 }
 .metric-label {
-    font-size: 0.72rem; color: #9ca3af;
+    font-size: 0.72rem; color: #a3a39b;
     text-transform: uppercase; letter-spacing: 1px; margin-top: 4px;
 }
-.metric-accent { color: #d97706; }
+.metric-accent { color: #6c5ce0; }
 .metric-green  { color: #16a34a; }
-.metric-blue   { color: #2563eb; }
+.metric-blue   { color: #6c5ce0; }
 
 .badge {
     display: inline-block; padding: 3px 10px; border-radius: 999px;
     font-size: 0.72rem; font-weight: 500; letter-spacing: 0.3px;
 }
 .badge-pendiente   { background: #fef3c7; color: #b45309; border: 1px solid #fde68a; }
-.badge-preparacion { background: #dbeafe; color: #1d4ed8; border: 1px solid #bfdbfe; }
+.badge-preparacion { background: #e9e7fb; color: #4b43b0; border: 1px solid #d9d4f7; }
 .badge-listo       { background: #dcfce7; color: #15803d; border: 1px solid #bbf7d0; }
-.badge-entregado   { background: #f3f4f6; color: #6b7280; border: 1px solid #e5e7eb; }
+.badge-entregado   { background: #f1f0ec; color: #6b6b64; border: 1px solid #e6e4dd; }
 .badge-cancelado   { background: #fee2e2; color: #b91c1c; border: 1px solid #fecaca; }
 .badge-activo      { background: #dcfce7; color: #15803d; border: 1px solid #bbf7d0; }
-.badge-inactivo    { background: #f3f4f6; color: #9ca3af; border: 1px solid #e5e7eb; }
+.badge-inactivo    { background: #f1f0ec; color: #a3a39b; border: 1px solid #e6e4dd; }
 .badge-agotado     { background: #fef2f2; color: #dc2626; border: 1px solid #fecaca; }
 
 .order-card {
-    background: #ffffff; border: 1px solid #e5e7eb; border-radius: 14px;
+    background: #ffffff; border: 1px solid #ececec; border-radius: 14px;
     padding: 1.2rem 1.4rem; margin-bottom: 0.8rem; transition: border-color 0.2s;
-    box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+    box-shadow: 0 1px 2px rgba(0,0,0,0.03);
 }
-.order-card:hover { border-color: #d1d5db; }
-.order-id    { font-family: 'Syne', sans-serif; font-size: 0.75rem; color: #9ca3af; }
-.order-num   { font-size: 0.9rem; font-weight: 500; color: #1a1a1a; }
-.order-items { font-size: 0.82rem; color: #6b7280; margin: 4px 0; }
-.order-total { font-family: 'Syne', sans-serif; font-size: 1.1rem; font-weight: 700; color: #1a1a1a; }
-.order-fecha { font-size: 0.72rem; color: #9ca3af; }
+.order-card:hover { border-color: #d8d6cf; }
+.order-id    { font-family: 'DM Sans', sans-serif; font-size: 0.72rem; font-weight: 500; color: #a3a39b; letter-spacing: 0.04em; }
+.order-num   { font-size: 0.9rem; font-weight: 500; color: #26262b; }
+.order-items { font-size: 0.82rem; color: #6b6b64; margin: 4px 0; }
+.order-total { font-family: 'DM Sans', sans-serif; font-size: 1.1rem; font-weight: 600; color: #26262b; }
+.order-fecha { font-size: 0.72rem; color: #a3a39b; }
 
 .menu-card {
-    background: #ffffff; border: 1px solid #e5e7eb; border-radius: 14px;
+    background: #ffffff; border: 1px solid #ececec; border-radius: 14px;
     padding: 1rem 1.2rem; margin-bottom: 0.6rem; transition: border-color 0.2s;
-    box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+    box-shadow: 0 1px 2px rgba(0,0,0,0.03);
 }
-.menu-card:hover { border-color: #d1d5db; }
+.menu-card:hover { border-color: #d8d6cf; }
 .menu-card.inactivo { opacity: 0.55; }
-.menu-nombre { font-family: 'Syne', sans-serif; font-size: 1rem; font-weight: 700; color: #1a1a1a; }
-.menu-precio { font-size: 0.85rem; color: #6b7280; margin-top: 2px; }
+.menu-nombre { font-family: 'DM Sans', sans-serif; font-size: 1rem; font-weight: 600; color: #26262b; }
+.menu-precio { font-size: 0.85rem; color: #6b6b64; margin-top: 2px; }
 
 .section-title {
-    font-family: 'Syne', sans-serif; font-size: 1rem;
-    font-weight: 700; color: #1a1a1a; margin-bottom: 1rem;
-    padding-bottom: 0.5rem; border-bottom: 1px solid #e5e7eb;
+    font-family: 'DM Sans', sans-serif; font-size: 1rem;
+    font-weight: 300; color: #26262b; letter-spacing: 0.03em; margin-bottom: 1rem;
+    padding-bottom: 0.5rem; border-bottom: 1px solid #ececec;
 }
 
 /* All buttons base */
 .stButton > button {
     border-radius: 8px !important; font-family: 'DM Sans', sans-serif !important;
     font-size: 0.78rem !important; font-weight: 500 !important;
-    border: 1px solid #d1d5db !important; background: #ffffff !important;
-    color: #374151 !important; padding: 6px 12px !important;
+    border: 1px solid #d8d6cf !important; background: #ffffff !important;
+    color: #45443e !important; padding: 6px 12px !important;
     transition: all 0.15s !important; height: auto !important;
     width: 100% !important; min-width: 0 !important;
 }
 .stButton > button:hover {
-    background: #f3f4f6 !important; color: #111827 !important; border-color: #9ca3af !important;
+    background: #f2f1ed !important; color: #26262b !important; border-color: #c9c7c0 !important;
 }
-/* Primary button full width, larger target */
+/* Primary button (acento de marca índigo) full width, larger target */
 div[data-testid="stColumn"] .stButton > button[kind="primary"] {
-    background: #1a1a1a !important; color: #ffffff !important;
-    border-color: #1a1a1a !important; font-weight: 700 !important;
+    background: #4b43b0 !important; color: #ffffff !important;
+    border-color: #4b43b0 !important; font-weight: 600 !important;
     font-size: 0.85rem !important; padding: 10px 12px !important;
     width: 100% !important;
+}
+div[data-testid="stColumn"] .stButton > button[kind="primary"]:hover {
+    background: #3f389c !important; border-color: #3f389c !important; color: #ffffff !important;
 }
 
 /* ── Fase 2: colores semánticos de botones de acción (estrategia st-key) ───────
@@ -387,22 +395,22 @@ div[data-testid="stColumn"] [class*="st-key-ticket_"] .stButton > button:hover {
 .stDownloadButton > button[kind="primary"],
 .stFormSubmitButton > button[kind="primary"],
 .stFormSubmitButton > button[kind="primaryFormSubmit"] {
-    background: #1a1a1a !important; color: #ffffff !important; border: 1px solid #1a1a1a !important;
+    background: #4b43b0 !important; color: #ffffff !important; border: 1px solid #4b43b0 !important;
 }
 .stDownloadButton > button[kind="primary"]:hover,
 .stFormSubmitButton > button[kind="primary"]:hover,
 .stFormSubmitButton > button[kind="primaryFormSubmit"]:hover {
-    background: #374151 !important; color: #ffffff !important; border-color: #374151 !important;
+    background: #3f389c !important; color: #ffffff !important; border-color: #3f389c !important;
 }
 .stDownloadButton > button[kind="secondary"],
 .stFormSubmitButton > button[kind="secondary"],
 .stFormSubmitButton > button[kind="secondaryFormSubmit"] {
-    background: #ffffff !important; color: #374151 !important; border: 1px solid #d1d5db !important;
+    background: #ffffff !important; color: #45443e !important; border: 1px solid #d8d6cf !important;
 }
 .stDownloadButton > button[kind="secondary"]:hover,
 .stFormSubmitButton > button[kind="secondary"]:hover,
 .stFormSubmitButton > button[kind="secondaryFormSubmit"]:hover {
-    background: #f3f4f6 !important; color: #111827 !important; border-color: #9ca3af !important;
+    background: #f2f1ed !important; color: #26262b !important; border-color: #c9c7c0 !important;
 }
 
 /* Navigation as pill buttons */
@@ -412,18 +420,18 @@ div[data-testid="stRadio"] > div {
     background: transparent !important; border: none !important;
 }
 div[data-testid="stRadio"] > div > label {
-    background: #ffffff !important; border: 1px solid #e5e7eb !important;
+    background: #ffffff !important; border: 1px solid #ececec !important;
     border-radius: 999px !important; padding: 7px 20px !important;
     cursor: pointer !important; transition: all 0.15s !important;
-    font-size: 0.82rem !important; color: #6b7280 !important;
+    font-size: 0.82rem !important; color: #6b6b64 !important;
     font-family: 'DM Sans', sans-serif !important;
 }
 div[data-testid="stRadio"] > div > label:hover {
-    border-color: #9ca3af !important; color: #1a1a1a !important;
+    border-color: #d8d6cf !important; color: #26262b !important;
 }
 div[data-testid="stRadio"] > div > label > div:first-child { display: none !important; }
 div[data-testid="stRadio"] > div > label:has(input:checked) {
-    background: #1a1a1a !important; border-color: #1a1a1a !important;
+    background: #4b43b0 !important; border-color: #4b43b0 !important;
     color: #ffffff !important; font-weight: 600 !important;
 }
 /* El texto de cada píldora vive en un <p>/markdown interno que NO hereda el color del
@@ -442,28 +450,28 @@ div[data-testid="stRadio"] > div > label:has(input:checked) [data-testid="stMark
 }
 
 .stTabs [data-baseweb="tab-list"] {
-    background: transparent; border-bottom: 1px solid #e5e7eb; gap: 0;
+    background: transparent; border-bottom: 1px solid #ececec; gap: 0;
 }
 .stTabs [data-baseweb="tab"] {
-    font-family: 'DM Sans', sans-serif; font-size: 0.8rem; color: #9ca3af;
+    font-family: 'DM Sans', sans-serif; font-size: 0.8rem; color: #a3a39b;
     background: transparent; border: none; padding: 8px 20px;
 }
 .stTabs [aria-selected="true"] {
-    color: #1a1a1a !important; border-bottom: 2px solid #1a1a1a !important;
+    color: #26262b !important; border-bottom: 2px solid #6c5ce0 !important;
 }
 .stTabs [data-baseweb="tab-panel"] { padding-top: 1.2rem; }
 
 .stTextInput > div > div > input,
 .stNumberInput > div > div > input {
-    background: #ffffff !important; border-color: #d1d5db !important;
-    color: #1a1a1a !important; border-radius: 8px !important;
+    background: #ffffff !important; border-color: #d8d6cf !important;
+    color: #26262b !important; border-radius: 8px !important;
 }
 .stSelectbox > div > div {
-    background: #ffffff !important; border-color: #d1d5db !important;
-    color: #1a1a1a !important; border-radius: 8px !important;
+    background: #ffffff !important; border-color: #d8d6cf !important;
+    color: #26262b !important; border-radius: 8px !important;
 }
 
-hr { border-color: #e5e7eb !important; }
+hr { border-color: #ececec !important; }
 
 /* Fase 1: lienzo limpio — ocultar por completo la cromática de Streamlit
    (cabecera superior, menú hamburguesa, barra de estado, decoración y pie).
@@ -490,51 +498,115 @@ div[data-testid="stColumn"] .stButton > button { margin: 1px 0 !important; }
 
 # ── Estilos de la navegación lateral (recuadro izquierdo) ───────────────────────
 # Se inyectan DESPUÉS del bloque global para ganarle por orden de cascada a la
-# regla base de botón (.stButton > button). El estado activo/inactivo se distingue
-# por la CLAVE del widget (st-key-nav_active / st-key-nav_inactive_*), la misma
-# estrategia st-key que usan los botones semánticos del resto del panel.
+# regla base de botón (.stButton > button). La CLAVE del widget codifica vista y estado
+# (st-key-nav_active_<view> / st-key-nav_inactive_<view>): el CSS la usa tanto para el
+# icono por vista (var --ic) como para el estilo activo/inactivo, misma estrategia
+# st-key que usan los botones semánticos del resto del panel.
 st.markdown("""
 <style>
+/* ── Navegación lateral elegante (recuadro izquierdo) ─────────────────────────────
+   Recuadro contenedor: panel claro, hairline, esquinas suaves. Se reconoce por el
+   centinela .nav-box que sembramos como primer hijo del st.container(border=True). */
+[data-testid="stVerticalBlockBorderWrapper"]:has(.nav-box) {
+    background: #fbfbf9 !important; border: 1px solid #ececec !important;
+    border-radius: 16px !important;
+}
+[data-testid="stVerticalBlockBorderWrapper"]:has(.nav-box) hr {
+    border-color: #ededec !important; margin: 14px 0 !important;
+}
+
+/* Marca: fina, moderna, en una sola línea con buen aire */
 .nav-brand {
-    font-family: 'Syne', sans-serif; font-size: 1.15rem; font-weight: 800;
-    color: #1e293b; letter-spacing: -0.3px; line-height: 1.2;
+    font-family: 'DM Sans', sans-serif; font-weight: 300; font-size: 0.98rem;
+    color: #26262b; letter-spacing: 0.12em; text-transform: uppercase;
+    white-space: nowrap; line-height: 1.25; padding: 2px 2px 0;
 }
 .nav-brand-sub {
-    font-size: 0.7rem; color: #94a3b8; margin-top: 4px;
-    text-transform: uppercase; letter-spacing: 1px;
+    font-size: 0.66rem; color: #a8a8a2; margin-top: 7px; padding: 0 2px;
+    text-transform: uppercase; letter-spacing: 0.12em;
 }
 
-/* Ítems de navegación: tipografía y forma comunes (activo + inactivo) */
-[class*="st-key-nav_inactive"] button, .st-key-nav_active button {
+/* Ítems de navegación: forma y tipografía comunes (activo + inactivo). El icono se
+   inyecta como ::before con una máscara SVG monocromática (line icon), recoloreada
+   con background-color según el estado. La máscara por vista llega en la variable
+   --ic, fijada en el botón por cada regla de vista de más abajo. */
+[class*="st-key-nav_inactive_"] button, [class*="st-key-nav_active_"] button {
+    display: flex !important; align-items: center !important; gap: 12px !important;
     text-align: left !important; justify-content: flex-start !important;
-    border-radius: 8px !important; padding: 9px 14px !important;
-    font-size: 0.86rem !important; font-weight: 500 !important;
-    box-shadow: none !important; min-height: 0 !important;
-    transition: background 0.18s ease, color 0.18s ease, border-color 0.18s ease !important;
+    border-radius: 10px !important; padding: 10px 14px !important;
+    font-family: 'DM Sans', sans-serif !important;
+    font-size: 0.9rem !important; font-weight: 500 !important; min-height: 0 !important;
+    transition: background .16s ease, color .16s ease, box-shadow .16s ease !important;
 }
-[class*="st-key-nav_inactive"] button p, .st-key-nav_active button p {
+[class*="st-key-nav_inactive_"] button p, [class*="st-key-nav_active_"] button p {
     text-align: left !important; margin: 0 !important;
 }
-
-/* Inactivo: plano, transparente, sin borde — como un ítem de menú de texto */
-[class*="st-key-nav_inactive"] button {
-    background: transparent !important; color: #334155 !important;
-    border: 1px solid transparent !important;
-}
-[class*="st-key-nav_inactive"] button:hover {
-    background: #f1f5f9 !important; color: #1e293b !important;
-    border-color: transparent !important;
+[class*="st-key-nav_inactive_"] button::before, [class*="st-key-nav_active_"] button::before {
+    content: ""; flex: 0 0 auto; width: 19px; height: 19px; background-color: #9e9e96;
+    -webkit-mask: var(--ic) center / contain no-repeat;
+    mask: var(--ic) center / contain no-repeat;
 }
 
-/* Activo: tono corporativo oscuro (slate), texto blanco, borde nítido */
-.st-key-nav_active button {
-    background: #1e293b !important; color: #ffffff !important;
-    font-weight: 600 !important; border: 1px solid #1e293b !important;
+/* Inactivo: plano, transparente — como un ítem de menú de texto */
+[class*="st-key-nav_inactive_"] button {
+    background: transparent !important; color: #5a5a54 !important;
+    border: 1px solid transparent !important; box-shadow: none !important;
 }
-.st-key-nav_active button:hover {
-    background: #0f172a !important; color: #ffffff !important;
-    border-color: #0f172a !important;
+[class*="st-key-nav_inactive_"] button:hover {
+    background: #f2f1ed !important; color: #26262b !important; border-color: transparent !important;
 }
+[class*="st-key-nav_inactive_"] button:hover::before { background-color: #5a5a54; }
+
+/* Activo: lavanda muy pálido + acento vertical 3px (inset shadow respeta el radio) */
+[class*="st-key-nav_active_"] button {
+    background: #f1effb !important; color: #4b43b0 !important; font-weight: 600 !important;
+    border: 1px solid #f1effb !important; box-shadow: inset 3px 0 0 0 #6c5ce0 !important;
+}
+[class*="st-key-nav_active_"] button:hover {
+    background: #ece9fb !important; color: #4b43b0 !important;
+    box-shadow: inset 3px 0 0 0 #6c5ce0 !important;
+}
+[class*="st-key-nav_active_"] button::before { background-color: #5a4fc7; }
+
+/* Iconos line-art por vista (máscara SVG; el color lo pone background-color de arriba) */
+[class*="st-key-nav_active_monitor"] button, [class*="st-key-nav_inactive_monitor"] button {
+    --ic: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><rect x='3' y='4' width='18' height='13' rx='1.7'/><path d='M9 20.5h6'/><path d='M12 17v3.5'/></svg>");
+}
+[class*="st-key-nav_active_menu"] button, [class*="st-key-nav_inactive_menu"] button {
+    --ic: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><path d='M4 9.8c1.6-4.2 14.4-4.2 16 0'/><circle cx='9.4' cy='7.4' r='.5' fill='%23000' stroke='none'/><circle cx='13.6' cy='7' r='.5' fill='%23000' stroke='none'/><path d='M3.6 12.6h16.8'/><path d='M4 15.4c.6 2.3 2.4 3.1 4.4 3.1h7.2c2 0 3.8-.8 4.4-3.1'/></svg>");
+}
+[class*="st-key-nav_active_mesas"] button, [class*="st-key-nav_inactive_mesas"] button {
+    --ic: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><path d='M7.5 12.5V6c0-1.1.9-2 2-2h5c1.1 0 2 .9 2 2v6.5'/><path d='M5.5 12.5h13'/><path d='M7.2 12.5V19.5'/><path d='M16.8 12.5V19.5'/></svg>");
+}
+[class*="st-key-nav_active_nuevo"] button, [class*="st-key-nav_inactive_nuevo"] button {
+    --ic: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><path d='M12 5.5v13'/><path d='M5.5 12h13'/></svg>");
+}
+[class*="st-key-nav_active_caja"] button, [class*="st-key-nav_inactive_caja"] button {
+    --ic: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><path d='M9 4.5h6'/><path d='M9 4.5l1.6 2.6M15 4.5l-1.6 2.6'/><path d='M10.6 7.1c-3 1.5-5.1 4.8-5.1 8.1 0 3 2.4 4.5 6.5 4.5s6.5-1.5 6.5-4.5c0-3.3-2.1-6.6-5.1-8.1z'/><path d='M12 11v5.6'/><path d='M13.8 12.2a2.1 2.1 0 0 0-1.9-1c-1 0-1.8.5-1.8 1.4 0 2 3.7 1 3.7 3 0 .9-.9 1.5-2 1.5a2.1 2.1 0 0 1-1.9-1.1'/></svg>");
+}
+[class*="st-key-nav_active_meseros"] button, [class*="st-key-nav_inactive_meseros"] button {
+    --ic: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><circle cx='12' cy='8' r='3.4'/><path d='M5.5 19.5a6.5 6.5 0 0 1 13 0'/></svg>");
+}
+[class*="st-key-nav_active_admin"] button, [class*="st-key-nav_inactive_admin"] button {
+    --ic: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><path d='M12 3.5l6.5 2.4v4.7c0 4-2.8 6.7-6.5 8-3.7-1.3-6.5-4-6.5-8V5.9z'/><circle cx='12' cy='10.3' r='1.3'/><path d='M12 11.6v2.3'/></svg>");
+}
+
+/* Salir: enlace de texto alineado a la izquierda con icono line-art (no botón) */
+.st-key-btn_logout button {
+    display: flex !important; align-items: center !important; gap: 11px !important;
+    justify-content: flex-start !important; text-align: left !important;
+    background: transparent !important; border: none !important; box-shadow: none !important;
+    color: #6e6e68 !important; font-weight: 500 !important; padding: 8px 14px !important;
+    --ic: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><path d='M14 4.5H6.5A1.5 1.5 0 0 0 5 6v12a1.5 1.5 0 0 0 1.5 1.5H14'/><path d='M11 12h9'/><path d='M16.8 8.5 20.3 12l-3.5 3.5'/></svg>");
+}
+.st-key-btn_logout button::before {
+    content: ""; flex: 0 0 auto; width: 18px; height: 18px; background-color: #9e9e96;
+    -webkit-mask: var(--ic) center / contain no-repeat;
+    mask: var(--ic) center / contain no-repeat;
+}
+.st-key-btn_logout button p { margin: 0 !important; }
+.st-key-btn_logout button:hover { background: transparent !important; color: #26262b !important; }
+.st-key-btn_logout button:hover::before { background-color: #6e6e68; }
 
 /* Pedidos: tira compacta de stats para el panel lateral angosto (reemplaza las
    5 metric-cards grandes, que partían el texto en vertical). */
@@ -545,12 +617,12 @@ st.markdown("""
     box-shadow: 0 1px 2px rgba(0,0,0,0.04);
 }
 .ped-stat-n {
-    display: block; font-family: 'Syne', sans-serif; font-weight: 800;
+    display: block; font-family: 'DM Sans', sans-serif; font-weight: 600;
     font-size: clamp(0.9rem, 1.8vw, 1.3rem); line-height: 1.1;
-    color: #1a1a1a; white-space: nowrap;
+    color: #26262b; white-space: nowrap;
 }
 .ped-stat-l {
-    display: block; font-size: 0.62rem; color: #9ca3af;
+    display: block; font-size: 0.62rem; color: #a3a39b;
     text-transform: uppercase; letter-spacing: 0.5px; margin-top: 3px;
     white-space: nowrap;
 }
@@ -584,6 +656,19 @@ NAV_LABELS = {
     "caja":    "💰 Caja",
     "meseros": "👤 Personal",
     "admin":   "🔐 Administración",
+}
+
+# Etiquetas SIN emoji para el shell de escritorio: el icono lo pinta el CSS como un
+# line-art monocromático (máscara SVG en ::before, ver bloque de estilos de la nav).
+# El shell móvil sigue usando NAV_LABELS (emoji) por sus objetivos táctiles grandes.
+NAV_TEXT = {
+    "monitor": "Monitor",
+    "menu":    "Menú",
+    "mesas":   "Mesas",
+    "nuevo":   "Nuevo pedido",
+    "caja":    "Caja",
+    "meseros": "Personal",
+    "admin":   "Administración",
 }
 
 
@@ -627,11 +712,12 @@ def _dispatch(view: str):
 
 
 def _nav_item(label: str, view: str):
-    """Botón de navegación vertical (shell escritorio). El seleccionado usa la clave
-    'nav_active'; los demás 'nav_inactive_<view>'. El CSS de arriba pinta cada estado
-    por esa clave. Al pulsarlo cambia current_view y re-ejecuta."""
+    """Botón de navegación vertical (shell escritorio). La clave codifica vista Y estado
+    ('nav_active_<view>' / 'nav_inactive_<view>') para que el CSS pueda asignar un icono
+    por vista (var --ic) y, a la vez, el estilo activo/inactivo. Al pulsarlo cambia
+    current_view y re-ejecuta."""
     activo = st.session_state["current_view"] == view
-    key = "nav_active" if activo else f"nav_inactive_{view}"
+    key = f"nav_active_{view}" if activo else f"nav_inactive_{view}"
     if st.button(label, key=key, use_container_width=True):
         st.session_state["current_view"] = view
         st.rerun()
@@ -651,13 +737,13 @@ def _render_mobile_shell():
         font-size: 0.9rem !important; font-weight: 600 !important; padding: 8px 6px !important;
     }
     [class*="st-key-mnav_inactive"] button {
-        background: #ffffff !important; color: #334155 !important; border: 1px solid #e5e7eb !important;
+        background: #ffffff !important; color: #45443e !important; border: 1px solid #ececec !important;
     }
     .st-key-mnav_active button {
-        background: #1e293b !important; color: #ffffff !important; border: 1px solid #1e293b !important;
+        background: #4b43b0 !important; color: #ffffff !important; border: 1px solid #4b43b0 !important;
     }
     .st-key-btn_logout_m button { background: transparent !important; border: none !important;
-        color: #9ca3af !important; font-size: 0.75rem !important; }
+        color: #a3a39b !important; font-size: 0.75rem !important; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -692,7 +778,10 @@ def _render_desktop_shell():
 
     with col_nav:
         with st.container(border=True):
+            # El centinela .nav-box permite al CSS reconocer ESTE recuadro (vía :has)
+            # y darle el acabado de panel claro sin tocar otros contenedores con borde.
             st.markdown(
+                '<span class="nav-box"></span>'
                 '<div class="nav-brand">Restaurante</div>'
                 f'<div class="nav-brand-sub">{fecha_larga(datetime.now())}</div>',
                 unsafe_allow_html=True,
@@ -700,7 +789,7 @@ def _render_desktop_shell():
             st.divider()
             # La navegación se construye desde la matriz de acceso del rol.
             for v in auth.allowed_views(role):
-                _nav_item(NAV_LABELS[v], v)
+                _nav_item(NAV_TEXT[v], v)
             st.divider()
             if st.button("Salir", key="btn_logout", use_container_width=True):
                 _logout()
@@ -713,10 +802,10 @@ def _render_desktop_shell():
     with col_pedidos:
         st.markdown(
             '<div style="display:flex; align-items:center; justify-content:space-between; '
-            'padding-bottom:0.5rem; margin-bottom:0.75rem; border-bottom:1px solid #e5e7eb;">'
-            '<div style="font-family:Syne,sans-serif; font-size:1rem; font-weight:700; '
-            'color:#1a1a1a;">📋 Pedidos</div>'
-            '<div style="font-size:0.75rem; color:#9ca3af;"><span class="live-dot"></span>En vivo</div>'
+            'padding-bottom:0.5rem; margin-bottom:0.75rem; border-bottom:1px solid #ececec;">'
+            '<div style="font-family:\'DM Sans\',sans-serif; font-size:1rem; font-weight:500; '
+            'letter-spacing:0.02em; color:#26262b;">📋 Pedidos</div>'
+            '<div style="font-size:0.75rem; color:#a3a39b;"><span class="live-dot"></span>En vivo</div>'
             '</div>',
             unsafe_allow_html=True,
         )

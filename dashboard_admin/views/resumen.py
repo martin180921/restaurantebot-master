@@ -6,7 +6,7 @@ import json
 from datetime import date
 
 import auth
-from db import engine, fmt_money, saldo_pedido, cobrado_pedido
+from db import engine, fmt_money, saldo_pedido, cobrado_pedido, titulo_seccion
 
 
 # ── DB ───────────────────────────────────────────────────────────────────────────
@@ -68,13 +68,13 @@ def render():
     if not auth.can("see_revenue"):
         st.error("🔒 Acceso denegado")
         st.stop()
-    st.markdown('<div class="section-title">📊 Resumen del día</div>', unsafe_allow_html=True)
+    st.markdown(titulo_seccion('📊 Resumen del día'), unsafe_allow_html=True)
 
     dia = st.date_input("Día", value=date.today(), format="DD/MM/YYYY", key="resumen_dia")
 
     pedidos = cargar_pedidos_dia(dia)
     if not pedidos:
-        st.markdown('<p style="color:#9ca3af; font-size:0.9rem; padding:1rem 0;">No hay pedidos registrados en esta fecha.</p>', unsafe_allow_html=True)
+        st.markdown('<p style="color:#a3a39b; font-size:0.9rem; padding:1rem 0;">No hay pedidos registrados en esta fecha.</p>', unsafe_allow_html=True)
         return
 
     df = pd.DataFrame(pedidos)
@@ -128,7 +128,7 @@ def render():
         st.markdown(f'<div class="metric-card"><div class="metric-value metric-blue" style="font-size:clamp(0.9rem,1.6vw,2rem); white-space:nowrap;">${fmt_money(transf)}</div><div class="metric-label">💳 Transferencia</div></div>', unsafe_allow_html=True)
     with d3:
         st.markdown(f'<div class="metric-card"><div class="metric-value" style="font-size:clamp(0.9rem,1.6vw,2rem); white-space:nowrap;">${fmt_money(total_cobros)}</div><div class="metric-label">Total cobros</div></div>', unsafe_allow_html=True)
-    st.markdown('<p style="color:#9ca3af; font-size:0.72rem; margin-top:4px;">Por hora real de pago (libro de pagos). Empieza a registrar desde su activación; días anteriores pueden verse en $0.</p>', unsafe_allow_html=True)
+    st.markdown('<p style="color:#a3a39b; font-size:0.72rem; margin-top:4px;">Por hora real de pago (libro de pagos). Empieza a registrar desde su activación; días anteriores pueden verse en $0.</p>', unsafe_allow_html=True)
     st.markdown("<br>", unsafe_allow_html=True)
 
     col_items, col_horas = st.columns(2)
@@ -154,7 +154,7 @@ def render():
             ])
             st.dataframe(tabla, hide_index=True, use_container_width=True)
         else:
-            st.markdown('<p style="color:#9ca3af; font-size:0.85rem;">Sin platos vendidos.</p>', unsafe_allow_html=True)
+            st.markdown('<p style="color:#a3a39b; font-size:0.85rem;">Sin platos vendidos.</p>', unsafe_allow_html=True)
 
     # ── Ventas por hora ────────────────────────────────────────────────────────
     with col_horas:
@@ -167,7 +167,7 @@ def render():
             serie.index = [f"{h:02d}h" for h in serie.index]
             st.bar_chart(serie, color="#16a34a", height=260)
         else:
-            st.markdown('<p style="color:#9ca3af; font-size:0.85rem;">Sin ventas.</p>', unsafe_allow_html=True)
+            st.markdown('<p style="color:#a3a39b; font-size:0.85rem;">Sin ventas.</p>', unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
 

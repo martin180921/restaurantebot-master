@@ -19,7 +19,7 @@ from datetime import date, timedelta
 import auth
 import audit
 import empleados
-from db import fmt_money
+from db import fmt_money, titulo_seccion
 
 
 # Etiquetas legibles de las acciones del libro mayor.
@@ -48,7 +48,7 @@ def render():
         st.error("🔒 Acceso denegado")
         st.stop()
 
-    st.markdown('<div class="section-title">👥 Personal · actividad y auditoría</div>',
+    st.markdown(titulo_seccion('👥 Personal · actividad y auditoría'),
                 unsafe_allow_html=True)
 
     # Finaliza sesiones sin latido (pestañas cerradas sin "Salir") antes de calcular horas,
@@ -62,7 +62,7 @@ def render():
             f'<span style="display:inline-block; background:#dcfce7; color:#15803d; '
             f'border:1px solid #bbf7d0; border-radius:999px; padding:4px 12px; '
             f'margin:0 6px 6px 0; font-size:0.78rem; font-weight:600;">🟢 {s["nombre"]} '
-            f'<span style="color:#6b7280; font-weight:400;">· {s["rol"]} · desde '
+            f'<span style="color:#6b6b64; font-weight:400;">· {s["rol"]} · desde '
             f'{s["login_at"].strftime("%H:%M") if hasattr(s["login_at"], "strftime") else "—"}'
             f'</span></span>'
             for s in activos
@@ -87,7 +87,7 @@ def render():
 
     filas = audit.reporte_personal(desde, hasta)
     if not filas:
-        st.markdown('<p style="color:#9ca3af; font-size:0.9rem; padding:1rem 0;">'
+        st.markdown('<p style="color:#a3a39b; font-size:0.9rem; padding:1rem 0;">'
                     'Sin actividad registrada en este rango.</p>', unsafe_allow_html=True)
     else:
         tabla = pd.DataFrame([{
@@ -112,7 +112,7 @@ def render():
     st.markdown("<br>", unsafe_allow_html=True)
 
     # ── 3. Libro mayor reciente (eventos crudos) ────────────────────────────────
-    st.markdown('<div class="section-title">📒 Libro mayor · eventos recientes</div>',
+    st.markdown(titulo_seccion('📒 Libro mayor · eventos recientes'),
                 unsafe_allow_html=True)
     opciones = {"Todas": None, "💵 Cobros": "cobrar", "✕ Cancelaciones": "cancelar_pedido",
                 "🏷️ Descuentos": "descuento", "🎁 Cortesías": "cortesia",
@@ -138,9 +138,9 @@ def render():
         ref = f' · #{e["entidad_id"]}' if e.get("entidad_id") else ""
         st.markdown(
             f'<div style="display:flex; justify-content:space-between; font-size:0.8rem; '
-            f'padding:6px 0; border-bottom:1px solid #f1f5f9;">'
-            f'<span style="color:#374151;">{etiqueta}{ref} '
-            f'<span style="color:#9ca3af;">{extra}</span></span>'
-            f'<span style="color:#6b7280;">{actor_txt} · {ts}</span></div>',
+            f'padding:6px 0; border-bottom:1px solid #f2f1ed;">'
+            f'<span style="color:#45443e;">{etiqueta}{ref} '
+            f'<span style="color:#a3a39b;">{extra}</span></span>'
+            f'<span style="color:#6b6b64;">{actor_txt} · {ts}</span></div>',
             unsafe_allow_html=True,
         )

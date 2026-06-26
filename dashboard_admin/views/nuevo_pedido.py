@@ -16,7 +16,7 @@ from sqlalchemy import text
 import json
 import html
 
-from db import (engine, cargar_mesas_activas, componentes_activos_por_grupo,
+from db import (engine, titulo_seccion, cargar_mesas_activas, componentes_activos_por_grupo,
                 cargar_catalogo, disponibles, precio_plato_dia,
                 num_acompanamientos, fmt_money, flash, drain_toasts,
                 fee_entrega, upsert_cliente, aplicar_inventario,
@@ -126,6 +126,8 @@ def _cfg_text(it) -> str:
                 orden.append(a)
             cnt[a] = cnt.get(a, 0) + 1
         partes.append(", ".join(f"{cnt[a]}x {a}" for a in orden))
+    if cfg.get("bebida"):
+        partes.append(str(cfg.get("bebida")))
     txt = " · ".join(p for p in partes if p)
     if it.get("nota"):
         txt += f" · Nota: {it['nota']}"
@@ -180,7 +182,7 @@ def _selector_grupo(uid, grupo, opciones, label):
     if key not in st.session_state:
         st.session_state[key] = _default_grupo_sel(opciones)
     sel = st.session_state.get(key)
-    st.markdown(f'<div style="font-size:0.75rem; color:#6b7280; margin-top:6px;">{label}</div>',
+    st.markdown(f'<div style="font-size:0.75rem; color:#6b6b64; margin-top:6px;">{label}</div>',
                 unsafe_allow_html=True)
     botones = [{"nombre": NINGUNO, "stock": None, "disabled": False}]
     for o in opciones:
@@ -232,8 +234,8 @@ def _render_alerta_cocina():
     st.markdown(
         '<div style="background:#fffbeb; border:1px solid #fde68a; border-radius:12px; '
         'padding:0.7rem 0.9rem; margin-bottom:0.8rem;">'
-        '<div style="font-family:\'Syne\',sans-serif; font-weight:700; font-size:0.85rem; '
-        'color:#1a1a1a; margin-bottom:6px;">🔔 Alerta de cocina · Plato del Día</div>'
+        '<div style="font-family:\'DM Sans\',sans-serif; font-weight:600; font-size:0.85rem; '
+        'color:#26262b; margin-bottom:6px;">🔔 Alerta de cocina · Plato del Día</div>'
         + "".join(bloques) + '</div>',
         unsafe_allow_html=True,
     )
@@ -241,10 +243,10 @@ def _render_alerta_cocina():
 
 def _seccion_plato_dia(comp, precio, n):
     """Configurador del Plato del Día. Devuelve (items, ok)."""
-    st.markdown('<div class="section-title">🍛 Plato del Día</div>', unsafe_allow_html=True)
+    st.markdown(titulo_seccion('🍛 Plato del Día'), unsafe_allow_html=True)
     faltan = [g for g in ("entrada", "principio", "proteina", "acompanamiento") if not comp.get(g)]
     if faltan:
-        st.markdown('<p style="color:#9ca3af; font-size:0.85rem;">No disponible hoy: faltan '
+        st.markdown('<p style="color:#a3a39b; font-size:0.85rem;">No disponible hoy: faltan '
                     'opciones activas. Configúralas en 🍔 Menú → Plato del Día.</p>',
                     unsafe_allow_html=True)
         return [], True
@@ -264,7 +266,7 @@ def _seccion_plato_dia(comp, precio, n):
     for pos, uid in enumerate(list(instancias)):
         c_tit, c_del = st.columns([5, 1])
         with c_tit:
-            st.markdown(f'<div style="border-left:3px solid #1a1a1a; padding:2px 0 2px 10px; '
+            st.markdown(f'<div style="border-left:3px solid #26262b; padding:2px 0 2px 10px; '
                         f'margin:10px 0 4px 0; font-weight:700; font-size:0.9rem;">Plato #{pos+1}</div>',
                         unsafe_allow_html=True)
         with c_del:
@@ -277,10 +279,14 @@ def _seccion_plato_dia(comp, precio, n):
         entrada   = _selector_grupo(uid, "entrada",   comp["entrada"],   "Entrada")
         principio = _selector_grupo(uid, "principio", comp["principio"], "Principio")
         proteina  = _selector_grupo(uid, "proteina",  comp["proteina"],  "Carnes o Proteína")
+        # Bebida del día (incluida en el precio plano): solo se ofrece si el restaurante
+        # configuró opciones de bebida para el Plato del Día. "Ninguno" permite omitirla.
+        bebida = (_selector_grupo(uid, "bebida", comp["bebida"], "Bebida")
+                  if comp.get("bebida") else None)
 
         cuentas = st.session_state.setdefault(f"pdpos_{uid}_acomp", {})
         elegidos = sum(cuentas.values())
-        st.markdown(f'<div style="font-size:0.75rem; color:#6b7280; margin-top:6px;">'
+        st.markdown(f'<div style="font-size:0.75rem; color:#6b6b64; margin-top:6px;">'
                     f'Acompañamientos ({elegidos}/{n})</div>', unsafe_allow_html=True)
         for a in comp["acompanamiento"]:
             aid = str(a["id"])
@@ -289,7 +295,7 @@ def _seccion_plato_dia(comp, precio, n):
             c = int(cuentas.get(aid, 0))
             ac1, ac2, ac3, ac4 = st.columns([3, 1, 1, 1])
             with ac1:
-                color = "#9ca3af" if agot else "#1a1a1a"
+                color = "#a3a39b" if agot else "#26262b"
                 st.markdown(f'<div style="padding:4px 0; font-size:0.88rem; color:{color};">'
                             f'{html.escape(str(a["nombre"]))}{_stock_suffix(stock_a)}</div>',
                             unsafe_allow_html=True)
@@ -323,21 +329,22 @@ def _seccion_plato_dia(comp, precio, n):
             st.markdown(f'<p style="color:#b45309; font-size:0.8rem;">Elige exactamente {n} '
                         f'acompañamientos para el Plato #{pos+1}.</p>', unsafe_allow_html=True)
 
+        cfg = {"entrada": entrada, "principio": principio, "proteina": proteina,
+               "acompanamientos": acomp_list}
+        if bebida:
+            cfg["bebida"] = bebida
         plates.append({
             "tipo": "plato_dia", "nombre": "Plato del Día", "precio": int(precio),
-            "cantidad": 1,
-            "config": {"entrada": entrada, "principio": principio,
-                       "proteina": proteina, "acompanamientos": acomp_list},
-            "nota": (nota or "").strip(),
+            "cantidad": 1, "config": cfg, "nota": (nota or "").strip(),
         })
     return plates, ok
 
 
 def _seccion_catalogo(productos, tipo, titulo, con_desc=False):
     """Sección de catálogo con stepper por producto; devuelve los items elegidos."""
-    st.markdown(f'<div class="section-title">{titulo}</div>', unsafe_allow_html=True)
+    st.markdown(titulo_seccion(titulo), unsafe_allow_html=True)
     if not productos:
-        st.markdown('<p style="color:#9ca3af; font-size:0.85rem;">Sin opciones disponibles.</p>',
+        st.markdown('<p style="color:#a3a39b; font-size:0.85rem;">Sin opciones disponibles.</p>',
                     unsafe_allow_html=True)
         return []
     carrito = st.session_state["carrito_manual"]
@@ -348,13 +355,13 @@ def _seccion_catalogo(productos, tipo, titulo, con_desc=False):
         qty = carrito.get(key, 0)
         c_nom, c_qty = st.columns([3, 2])
         with c_nom:
-            desc = (f'<div style="font-size:0.76rem; color:#9ca3af; font-style:italic;">'
+            desc = (f'<div style="font-size:0.76rem; color:#a3a39b; font-style:italic;">'
                     f'{html.escape(str(p.get("descripcion") or ""))}</div>'
                     if con_desc and p.get("descripcion") else "")
             st.markdown(
-                f'<div style="padding:6px 0;"><span style="font-size:0.9rem; color:#1a1a1a;">'
+                f'<div style="padding:6px 0;"><span style="font-size:0.9rem; color:#26262b;">'
                 f'{html.escape(str(p["nombre"]))}</span>{desc}'
-                f'<div style="font-size:0.82rem; color:#6b7280;">${fmt_money(p["precio"])}'
+                f'<div style="font-size:0.82rem; color:#6b6b64;">${fmt_money(p["precio"])}'
                 f'{_stock_suffix(p.get("stock"))}</div></div>',
                 unsafe_allow_html=True,
             )
@@ -425,7 +432,7 @@ def _form_fragment():
 
         if es_mesa:
             if not mesas:
-                st.markdown('<p style="color:#9ca3af; font-size:0.85rem;">No hay mesas activas. '
+                st.markdown('<p style="color:#a3a39b; font-size:0.85rem;">No hay mesas activas. '
                             'Crea una en la pestaña 🪑 Mesas.</p>', unsafe_allow_html=True)
                 return
             mesa_id = st.selectbox("Mesa", options=mesa_ids,
@@ -445,15 +452,17 @@ def _form_fragment():
                                       "⭐ Especiales", con_desc=True)
         items_alc = _seccion_catalogo(_catalogo_seccion(df_cat, "a_la_carta"), "item",
                                       "🍽️ A la carta")
+        items_adi = _seccion_catalogo(_catalogo_seccion(df_cat, "adicional"), "adicional",
+                                      "🍟 Adicionales", con_desc=True)
         items_beb = _seccion_catalogo(_catalogo_seccion(df_cat, "bebida"), "bebida",
                                       "🥤 Bebidas")
-        items = plates + items_esp + items_alc + items_beb
+        items = plates + items_esp + items_alc + items_adi + items_beb
 
     with col_resumen:
         st.markdown('<div class="section-title">Resumen</div>', unsafe_allow_html=True)
 
         if not items:
-            st.markdown('<p style="color:#9ca3af; font-size:0.85rem;">Agrega platos para ver el resumen.</p>',
+            st.markdown('<p style="color:#a3a39b; font-size:0.85rem;">Agrega platos para ver el resumen.</p>',
                         unsafe_allow_html=True)
             return
 
@@ -465,20 +474,20 @@ def _form_fragment():
         for it in items:
             if it.get("tipo") == "plato_dia":
                 st.markdown(f"""
-                <div style="padding:6px 0; border-bottom:1px solid #e5e7eb; font-size:0.85rem;">
+                <div style="padding:6px 0; border-bottom:1px solid #ececec; font-size:0.85rem;">
                     <div style="display:flex; justify-content:space-between;">
-                      <span style="color:#1a1a1a;">1× Plato del Día</span>
-                      <span style="color:#6b7280;">${fmt_money(it["precio"])}</span>
+                      <span style="color:#26262b;">1× Plato del Día</span>
+                      <span style="color:#6b6b64;">${fmt_money(it["precio"])}</span>
                     </div>
-                    <div style="font-size:0.74rem; color:#9ca3af;">{html.escape(_cfg_text(it))}</div>
+                    <div style="font-size:0.74rem; color:#a3a39b;">{html.escape(_cfg_text(it))}</div>
                 </div>""", unsafe_allow_html=True)
             else:
                 sub = int(it["precio"]) * int(it["cantidad"])
                 st.markdown(f"""
                 <div style="display:flex; justify-content:space-between; padding:6px 0;
-                            border-bottom:1px solid #e5e7eb; font-size:0.85rem;">
-                    <span style="color:#1a1a1a;">{it["cantidad"]}x {html.escape(str(it["nombre"]))}</span>
-                    <span style="color:#6b7280;">${fmt_money(sub)}</span>
+                            border-bottom:1px solid #ececec; font-size:0.85rem;">
+                    <span style="color:#26262b;">{it["cantidad"]}x {html.escape(str(it["nombre"]))}</span>
+                    <span style="color:#6b6b64;">${fmt_money(sub)}</span>
                 </div>""", unsafe_allow_html=True)
 
         # Línea de recargo (solo entrega).
@@ -486,8 +495,8 @@ def _form_fragment():
             recargo_lbl = "Domicilio" if es_domicilio else "Para llevar"
             st.markdown(f"""
             <div style="display:flex; justify-content:space-between; padding:6px 0; font-size:0.85rem;">
-                <span style="color:#6b7280;">Recargo · {recargo_lbl}</span>
-                <span style="color:#6b7280;">${fmt_money(fee)}</span>
+                <span style="color:#6b6b64;">Recargo · {recargo_lbl}</span>
+                <span style="color:#6b6b64;">${fmt_money(fee)}</span>
             </div>""", unsafe_allow_html=True)
 
         if es_mesa:
@@ -496,10 +505,10 @@ def _form_fragment():
             destino = cli_nombre or cli_tel or ("Domicilio" if es_domicilio else "Para llevar")
         st.markdown(f"""
         <div style="display:flex; justify-content:space-between; padding:12px 0 4px 0;">
-            <span style="font-family:'Syne',sans-serif; font-weight:700; color:#1a1a1a;">Total</span>
-            <span style="font-family:'Syne',sans-serif; font-size:1.2rem; font-weight:800; color:#1a1a1a;">${fmt_money(total)}</span>
+            <span style="font-family:'DM Sans',sans-serif; font-weight:600; color:#26262b;">Total</span>
+            <span style="font-family:'DM Sans',sans-serif; font-size:1.2rem; font-weight:600; color:#26262b;">${fmt_money(total)}</span>
         </div>
-        <div style="font-size:0.78rem; color:#9ca3af; margin-bottom:0.5rem;">{html.escape(str(destino))}</div>
+        <div style="font-size:0.78rem; color:#a3a39b; margin-bottom:0.5rem;">{html.escape(str(destino))}</div>
         """, unsafe_allow_html=True)
 
         # Pago (solo entrega): método + con cuánto paga, para el cambio del repartidor. El

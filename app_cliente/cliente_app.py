@@ -152,7 +152,7 @@ def cargar_componentes_activos() -> dict:
             "WHERE activo = TRUE AND (agotado_hasta IS NULL OR agotado_hasta < CURRENT_DATE) "
             "ORDER BY grupo, orden, id"
         )).mappings().all()
-    out = {"entrada": [], "principio": [], "proteina": [], "acompanamiento": []}
+    out = {"entrada": [], "principio": [], "proteina": [], "acompanamiento": [], "bebida": []}
     for r in rows:
         out.setdefault(r["grupo"], []).append(
             {"id": int(r["id"]), "nombre": r["nombre"], "stock": _stock_val(r["stock"])})
@@ -171,7 +171,7 @@ def cargar_catalogo() -> dict:
             "AND (stock IS NULL OR stock > 0) "
             "ORDER BY categoria, orden, id"
         )).mappings().all()
-    out = {"especial": [], "a_la_carta": [], "bebida": []}
+    out = {"especial": [], "a_la_carta": [], "adicional": [], "bebida": []}
     for r in rows:
         out.setdefault(r["categoria"], []).append({
             "id": int(r["id"]), "nombre": r["nombre"],
@@ -236,7 +236,7 @@ def _descontar_inventario(conn, items) -> None:
             continue
         if str(it.get("tipo") or "item").lower() == "plato_dia":
             cfg = it.get("config") or {}
-            for g in ("entrada", "principio", "proteina"):
+            for g in ("entrada", "principio", "proteina", "bebida"):
                 v = cfg.get(g)
                 if v:
                     k = (g, str(v).strip().lower())
@@ -606,6 +606,8 @@ def _seccion_plato_dia(comp, precio, n):
     disp_ent = [e for e in comp["entrada"] if not _agotado(e)]
     disp_pri = [p for p in comp["principio"] if not _agotado(p)]
     disp_pro = [p for p in comp["proteina"] if not _agotado(p)]
+    # Bebida incluida (opcional): solo si el restaurante configuró bebidas del día.
+    disp_beb = [b for b in comp.get("bebida", []) if not _agotado(b)]
     if not (disp_ent and disp_pri and disp_pro):
         st.markdown('<div class="c-empty">El Plato del Día no está disponible por ahora '
                     '(algún ingrediente se agotó).</div>', unsafe_allow_html=True)
@@ -640,6 +642,8 @@ def _seccion_plato_dia(comp, precio, n):
     nom_ent = [e["nombre"] for e in disp_ent]
     nom_pri = [p["nombre"] for p in disp_pri]
     nom_pro = [p["nombre"] for p in disp_pro]
+    stock_beb = {b["nombre"]: b.get("stock") for b in disp_beb}
+    nom_beb = [b["nombre"] for b in disp_beb]
 
     plates, ok = [], True
     for i in range(qty):
@@ -649,6 +653,8 @@ def _seccion_plato_dia(comp, precio, n):
         _sanea_radio(f"pd_{i}_entrada", nom_ent)
         _sanea_radio(f"pd_{i}_principio", nom_pri)
         _sanea_radio(f"pd_{i}_proteina", nom_pro)
+        if nom_beb:
+            _sanea_radio(f"pd_{i}_bebida", nom_beb)
         st.markdown('<div class="conf-label">Entrada</div>', unsafe_allow_html=True)
         entrada = st.radio("Entrada", nom_ent, key=f"pd_{i}_entrada",
                            format_func=lambda nm: f"{nm}{_disp_suffix(stock_ent.get(nm))}",
@@ -661,6 +667,12 @@ def _seccion_plato_dia(comp, precio, n):
         proteina = st.radio("Proteína", nom_pro, key=f"pd_{i}_proteina",
                             format_func=lambda nm: f"{nm}{_disp_suffix(stock_pro.get(nm))}",
                             label_visibility="collapsed")
+        bebida = None
+        if nom_beb:
+            st.markdown('<div class="conf-label">Bebida</div>', unsafe_allow_html=True)
+            bebida = st.radio("Bebida", nom_beb, key=f"pd_{i}_bebida",
+                              format_func=lambda nm: f"{nm}{_disp_suffix(stock_beb.get(nm))}",
+                              label_visibility="collapsed")
 
         cuentas = st.session_state.setdefault(f"pd_{i}_acomp", {})
         elegidos_n = sum(cuentas.values())
@@ -706,12 +718,13 @@ def _seccion_plato_dia(comp, precio, n):
             st.markdown(f'<div class="warn">Elige exactamente {n} acompañamientos para el Plato #{i+1}.</div>',
                         unsafe_allow_html=True)
 
+        cfg = {"entrada": entrada, "principio": principio, "proteina": proteina,
+               "acompanamientos": acomp_list}
+        if bebida:
+            cfg["bebida"] = bebida
         plates.append({
             "tipo": "plato_dia", "nombre": "Plato del Día", "precio": int(precio),
-            "cantidad": 1,
-            "config": {"entrada": entrada, "principio": principio, "proteina": proteina,
-                       "acompanamientos": acomp_list},
-            "nota": (nota or "").strip(),
+            "cantidad": 1, "config": cfg, "nota": (nota or "").strip(),
         })
     return plates, ok
 
@@ -729,6 +742,8 @@ def _resumen_item_cfg(it) -> str:
                 orden.append(a)
             cnt[a] = cnt.get(a, 0) + 1
         partes.append(", ".join(f"{cnt[a]}x {a}" for a in orden))
+    if cfg.get("bebida"):
+        partes.append(str(cfg.get("bebida")))
     txt = " · ".join(p for p in partes if p)
     if it.get("nota"):
         txt += f" · Nota: {it['nota']}"
@@ -758,13 +773,17 @@ def _carta(comp, cat, ajustes):
     st.markdown('<div class="c-section">⭐ Especiales</div>', unsafe_allow_html=True)
     items_esp = _seccion_catalogo(cat.get("especial", []), "especial", con_desc=True)
 
-    # #3 A la carta (+ sub-grupo Bebidas)
+    # #3 A la carta (+ sub-grupos Adicionales y Bebidas)
     st.markdown('<div class="c-section">🍽️ A la carta</div>', unsafe_allow_html=True)
     items_alc = _seccion_catalogo(cat.get("a_la_carta", []), "item")
+    items_adi = []
+    if cat.get("adicional"):
+        st.markdown('<div class="c-sub">🍟 Adicionales</div>', unsafe_allow_html=True)
+        items_adi = _seccion_catalogo(cat.get("adicional", []), "adicional", con_desc=True)
     st.markdown('<div class="c-sub">🥤 Bebidas</div>', unsafe_allow_html=True)
     items_beb = _seccion_catalogo(cat.get("bebida", []), "bebida")
 
-    items = items_pd + items_esp + items_alc + items_beb
+    items = items_pd + items_esp + items_alc + items_adi + items_beb
 
     # #4 Notas generales + resumen + envío
     st.markdown('<div class="c-section">📝 Notas generales</div>', unsafe_allow_html=True)

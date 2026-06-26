@@ -16,7 +16,7 @@ import auth
 import audit
 import empleados
 import mesero_keys
-from db import flash
+from db import flash, titulo_seccion
 
 
 _ROL_LABEL = {"mesero": "🧑‍🍳 Mesero", "caja": "💵 Caja", "admin": "🛡️ Admin"}
@@ -100,10 +100,10 @@ def render():
         st.error("🔒 Acceso denegado")
         st.stop()
 
-    st.markdown('<div class="section-title">👤 Personal · empleados y accesos</div>',
+    st.markdown(titulo_seccion('👤 Personal · empleados y accesos'),
                 unsafe_allow_html=True)
     st.markdown(
-        '<p style="color:#6b7280; font-size:0.85rem; margin-top:-6px;">Cada empleado entra '
+        '<p style="color:#6b6b64; font-size:0.85rem; margin-top:-6px;">Cada empleado entra '
         'con su PIN personal y queda identificado en la auditoría; su entrada y salida se '
         'registran solas. El PIN se muestra una sola vez al crearlo.</p>',
         unsafe_allow_html=True,
@@ -140,8 +140,8 @@ def render():
         bloqueado = bool(e.get("bloqueado"))
         # Estado en vivo: inactivo / acceso cerrado (bloqueado) / En turno / Fuera de turno.
         if not activo:
-            estado_chip = '<span style="color:#9ca3af;"> · perfil inactivo</span>'
-            borde = "#9ca3af"
+            estado_chip = '<span style="color:#a3a39b;"> · perfil inactivo</span>'
+            borde = "#a3a39b"
         elif bloqueado:
             estado_chip = '<span style="color:#b45309;"> · 🔒 Acceso cerrado</span>'
             borde = "#d97706"
@@ -149,14 +149,14 @@ def render():
             estado_chip = '<span style="color:#16a34a;"> · 🟢 En turno</span>'
             borde = "#16a34a"
         else:
-            estado_chip = '<span style="color:#9ca3af;"> · ⚪ Fuera de turno</span>'
-            borde = "#d1d5db"
+            estado_chip = '<span style="color:#a3a39b;"> · ⚪ Fuera de turno</span>'
+            borde = "#d8d6cf"
         # Tarjeta + 3 acciones: Salida/Reactivar (caja+admin) · Nuevo PIN · Baja (admin).
         col_a, col_acc, col_pin, col_baja = st.columns([3, 1.3, 1, 1])
         with col_a:
             st.markdown(
                 f'<div class="order-card" style="border-left:4px solid {borde};">'
-                f'<div style="font-size:0.9rem; color:#1a1a1a; font-weight:600;">'
+                f'<div style="font-size:0.9rem; color:#26262b; font-weight:600;">'
                 f'{_ROL_LABEL.get(rol, rol)} · {html.escape(nombre)}'
                 f'<span style="font-weight:400; font-size:0.8rem;">{estado_chip}</span>'
                 f'</div></div>',

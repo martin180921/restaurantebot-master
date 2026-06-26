@@ -17,9 +17,9 @@ import auth
 import audit
 import empleados
 import mesero_keys
-from db import engine, fmt_money, flash, saldo_pedido
+from db import engine, fmt_money, flash, saldo_pedido, titulo_seccion
 from utils.print_jobs import badge_agente_html
-from views import pedidos
+from views import pedidos, menu
 
 
 # ── DB ───────────────────────────────────────────────────────────────────────────
@@ -476,7 +476,7 @@ _MOV_LABEL = {
 
 def _seccion_flujo_caja(cierre: dict):
     cid = int(cierre["id"])
-    st.markdown('<div class="section-title">💸 Flujo de caja · gastos y repartidores</div>',
+    st.markdown(titulo_seccion('💸 Flujo de caja · gastos y repartidores'),
                 unsafe_allow_html=True)
 
     b1, b2 = st.columns(2)
@@ -499,9 +499,9 @@ def _seccion_flujo_caja(cierre: dict):
         with col_a:
             st.markdown(
                 f'<div class="order-card" style="border-left:4px solid #dc2626;">'
-                f'<div style="font-size:0.85rem; color:#374151;">🧾 Gasto abierto · '
+                f'<div style="font-size:0.85rem; color:#45443e;">🧾 Gasto abierto · '
                 f'<b>${fmt_money(g["monto"])}</b>{quien}</div>'
-                f'<div style="font-size:0.78rem; color:#9ca3af;">{html.escape(motivo)}</div></div>',
+                f'<div style="font-size:0.78rem; color:#a3a39b;">{html.escape(motivo)}</div></div>',
                 unsafe_allow_html=True,
             )
         with col_b:
@@ -523,8 +523,8 @@ def _seccion_flujo_caja(cierre: dict):
         pend_saldo = sum(int(o["saldo"]) for o in ordenes)
 
         st.markdown(
-            f'<div class="order-card" style="border-left:4px solid #2563eb; margin-bottom:6px;">'
-            f'<div style="font-size:0.85rem; color:#374151;">🛵 Repartidor en ruta · '
+            f'<div class="order-card" style="border-left:4px solid #6c5ce0; margin-bottom:6px;">'
+            f'<div style="font-size:0.85rem; color:#45443e;">🛵 Repartidor en ruta · '
             f'<b>{html.escape(nombre)}</b> · base ${fmt_money(b["monto"])} · '
             f'{len(ordenes)} pedido(s) · por cobrar ${fmt_money(pend_saldo)}</div></div>',
             unsafe_allow_html=True,
@@ -540,7 +540,7 @@ def _seccion_flujo_caja(cierre: dict):
                 pagado_txt = ("✓ pagado" if o["saldo"] <= 0
                               else f'por cobrar ${fmt_money(o["saldo"])}')
                 st.markdown(
-                    f'<div style="font-size:0.8rem; color:#6b7280; padding:4px 0;">'
+                    f'<div style="font-size:0.8rem; color:#6b6b64; padding:4px 0;">'
                     f'#{oid} · {html.escape(str(o["nombre"]))} · {pagado_txt}</div>',
                     unsafe_allow_html=True,
                 )
@@ -561,19 +561,19 @@ def _seccion_flujo_caja(cierre: dict):
         signo = "+" if neto >= 0 else "−"
         color = "#16a34a" if neto >= 0 else "#dc2626"
         st.markdown(
-            f'<div style="font-size:0.82rem; color:#374151; margin-top:8px;">Efecto neto en el '
+            f'<div style="font-size:0.82rem; color:#45443e; margin-top:8px;">Efecto neto en el '
             f'cajón: <b style="color:{color};">{signo}${fmt_money(abs(neto))}</b></div>',
             unsafe_allow_html=True,
         )
         with st.expander(f"Ver movimientos del turno ({len(movs)})"):
             for mv in movs:
-                etiqueta, c = _MOV_LABEL.get(mv["tipo"], (mv["tipo"], "#6b7280"))
+                etiqueta, c = _MOV_LABEL.get(mv["tipo"], (mv["tipo"], "#6b6b64"))
                 signo_mv = "+" if mv["tipo"] in TIPOS_ENTRADA else "−"
                 extra = f" · {html.escape(str(mv['motivo'] or mv['actor_nombre'] or ''))}".rstrip(" ·")
                 st.markdown(
                     f'<div style="display:flex; justify-content:space-between; font-size:0.8rem; '
-                    f'padding:4px 0; border-bottom:1px solid #f1f5f9;">'
-                    f'<span style="color:#374151;">{etiqueta} · {_fechahora(mv["creado_at"])}'
+                    f'padding:4px 0; border-bottom:1px solid #f2f1ed;">'
+                    f'<span style="color:#45443e;">{etiqueta} · {_fechahora(mv["creado_at"])}'
                     f'{"" if extra == " · " else extra}</span>'
                     f'<span style="color:{c}; font-weight:700;">{signo_mv}${fmt_money(mv["monto"])}</span></div>',
                     unsafe_allow_html=True,
@@ -589,17 +589,31 @@ def render():
     if not auth.can("manage_caja"):
         st.error("🔒 Acceso denegado")
         st.stop()
+    # Caja reúne el cierre operativo + Inventario e Importar (movidos desde 🍔 Menú): el
+    # cajero fija el stock del día y hace cargas masivas sin entrar a Administración. Las
+    # dos vistas se reutilizan tal cual desde views/menu.py (no se duplica su lógica).
+    tab_cierre, tab_inv, tab_imp = st.tabs(
+        ["💰 Cierre de caja", "📦 Inventario", "📥 Importar"])
+    with tab_cierre:
+        _render_cierre()
+    with tab_inv:
+        menu._render_inventario()
+    with tab_imp:
+        menu._render_importar()
+
+
+def _render_cierre():
     # Botón slate (formal) para finalizar el turno, vía estilo por st-key.
     st.markdown(
         "<style>"
-        ".st-key-btn_finalizar_cierre button{background:#1e293b !important;"
-        "border-color:#1e293b !important;color:#fff !important;}"
-        ".st-key-btn_finalizar_cierre button:hover{background:#0f172a !important;"
-        "border-color:#0f172a !important;color:#fff !important;}"
+        ".st-key-btn_finalizar_cierre button{background:#2e2d29 !important;"
+        "border-color:#2e2d29 !important;color:#fff !important;}"
+        ".st-key-btn_finalizar_cierre button:hover{background:#26262b !important;"
+        "border-color:#26262b !important;color:#fff !important;}"
         "</style>",
         unsafe_allow_html=True,
     )
-    st.markdown('<div class="section-title">💰 Caja · cierre de turno</div>',
+    st.markdown(titulo_seccion('💰 Caja · cierre de turno'),
                 unsafe_allow_html=True)
 
     # Salud del Agente de Impresión Local (heartbeat): el cajero ve de un vistazo si los
@@ -616,9 +630,9 @@ def render():
         st.markdown(
             '<div class="order-card" style="text-align:center; padding:1.6rem 1rem;">'
             '<div style="font-size:2rem; line-height:1;">🔒</div>'
-            '<div style="font-family:\'Syne\',sans-serif; font-size:1.3rem; '
-            'font-weight:800; color:#1a1a1a; margin-top:6px;">La caja se encuentra cerrada.</div>'
-            '<div style="color:#6b7280; font-size:0.9rem; margin-top:4px;">Define la base en '
+            '<div style="font-family:\'DM Sans\',sans-serif; font-size:1.3rem; '
+            'font-weight:800; color:#26262b; margin-top:6px;">La caja se encuentra cerrada.</div>'
+            '<div style="color:#6b6b64; font-size:0.9rem; margin-top:4px;">Define la base en '
             'efectivo e inicia un nuevo turno para comenzar a operar.</div>'
             '</div>',
             unsafe_allow_html=True,
@@ -656,7 +670,7 @@ def render():
           <div style="display:flex; justify-content:space-between; align-items:center;">
             <div>
               <div class="order-id">Turno abierto</div>
-              <div style="font-family:'Syne',sans-serif; font-size:1.2rem; font-weight:800; color:#1a1a1a;">
+              <div style="font-family:'DM Sans',sans-serif; font-size:1.2rem; font-weight:600; color:#26262b;">
                 Desde las {_hora(cierre["fecha_apertura"])}</div>
             </div>
             <div style="text-align:right;">
@@ -688,9 +702,9 @@ def render():
         # ── Formulario de cierre ────────────────────────────────────────────────
         with st.container(border=True):
             st.markdown(
-                '<div style="font-family:\'Syne\',sans-serif; font-size:1.05rem; '
-                'font-weight:800; color:#1a1a1a; margin-bottom:2px;">🔒 Formulario de Cierre de Caja</div>'
-                '<div style="color:#6b7280; font-size:0.85rem; margin-bottom:10px;">Cuenta el dinero '
+                '<div style="font-family:\'DM Sans\',sans-serif; font-size:1.05rem; '
+                'font-weight:800; color:#26262b; margin-bottom:2px;">🔒 Formulario de Cierre de Caja</div>'
+                '<div style="color:#6b6b64; font-size:0.85rem; margin-bottom:10px;">Cuenta el dinero '
                 'físico y verifica las transferencias en el banco antes de finalizar el turno.</div>',
                 unsafe_allow_html=True,
             )
@@ -722,7 +736,7 @@ def render():
                 _pill("#fef3c7", "#fcd34d", "#92400e",
                       f"⚠️ Faltante en caja: -${fmt_money(-diferencia)}")
             else:
-                _pill("#dbeafe", "#93c5fd", "#1e3a8a",
+                _pill("#e9e7fb", "#bcb4f0", "#4b43b0",
                       f"ℹ️ Sobrante en caja: +${fmt_money(diferencia)}")
 
             # Contraste de transferencias (contexto; no afecta la caja física).
@@ -759,7 +773,7 @@ def render():
             if dif == 0:
                 color, etiqueta = "#16a34a", "cuadrada"
             elif dif > 0:
-                color, etiqueta = "#2563eb", f"sobrante ${fmt_money(dif)}"
+                color, etiqueta = "#6c5ce0", f"sobrante ${fmt_money(dif)}"
             else:
                 color, etiqueta = "#dc2626", f"faltante ${fmt_money(-dif)}"
             efectivo_real = int(t["efectivo_real"]) if t["efectivo_real"] is not None else 0
@@ -767,9 +781,9 @@ def render():
             st.markdown(f"""
             <div class="order-card" style="border-left:4px solid {color};">
               <div style="display:flex; justify-content:space-between; align-items:center;">
-                <div style="font-size:0.85rem; color:#374151;">
+                <div style="font-size:0.85rem; color:#45443e;">
                   {_fechahora(t["fecha_apertura"])} → {_fechahora(t["fecha_cierre"])}
-                  <span style="color:#9ca3af;"> · base ${fmt_money(t["monto_apertura"])} · efectivo ${fmt_money(efectivo_real)} · transf. ${fmt_money(transf_real)}</span>
+                  <span style="color:#a3a39b;"> · base ${fmt_money(t["monto_apertura"])} · efectivo ${fmt_money(efectivo_real)} · transf. ${fmt_money(transf_real)}</span>
                 </div>
                 <div style="color:{color}; font-weight:700; font-size:0.85rem;">{html.escape(etiqueta)}</div>
               </div>

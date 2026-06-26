@@ -18,14 +18,14 @@ import html
 import time
 
 import auth
-from db import fmt_money, cargar_mesas_activas, saldo_pedido
+from db import fmt_money, cargar_mesas_activas, saldo_pedido, titulo_seccion
 from views import pedidos
 
 
 # ── Colores de estado de mesa (paleta Light Mode existente) ─────────────────────
 VERDE = "#16a34a"   # libre
 AMBAR = "#d97706"   # ocupada (en servicio, sin urgencia)
-AZUL  = "#2563eb"   # por cobrar (todo entregado, solo falta el pago)
+AZUL  = "#6c5ce0"   # por cobrar (todo entregado, solo falta el pago)
 ROJO  = "#dc2626"   # atención (algo listo por entregar o espera larga)
 
 # Fase 3: tinte de fondo COMPLETO por estado para las tarjetas-mesa del panel
@@ -34,7 +34,7 @@ ROJO  = "#dc2626"   # atención (algo listo por entregar o espera larga)
 CARD_TINT = {
     VERDE: ("#dcfce7", "#bbf7d0", "#14532d"),  # Libre       → verde claro
     AMBAR: ("#ffedd5", "#fed7aa", "#7c2d12"),  # Ocupada     → naranja claro
-    AZUL:  ("#dbeafe", "#bfdbfe", "#1e3a8a"),  # Por cobrar  → azul claro
+    AZUL:  ("#e9e7fb", "#d9d4f7", "#4b43b0"),  # Por cobrar  → azul claro
     ROJO:  ("#fee2e2", "#fecaca", "#7f1d1d"),  # Atención    → rojo claro
 }
 
@@ -171,7 +171,7 @@ def render():
     .mon-card { padding: 1.5rem 1.8rem !important; border-radius: 18px !important; }
     .mon-card .order-id    { font-size: 0.95rem !important; }
     .mon-card .order-num   { font-size: 1.25rem !important; font-weight: 600 !important; }
-    .mon-card .order-items { font-size: 1.2rem !important; line-height: 1.55 !important; color: #1a1a1a !important; }
+    .mon-card .order-items { font-size: 1.2rem !important; line-height: 1.55 !important; color: #26262b !important; }
     .mon-card .order-fecha { font-size: 0.9rem !important; }
     .mon-card .order-total { font-size: 1.7rem !important; }
     .mon-card .badge       { font-size: 0.95rem !important; padding: 5px 16px !important; }
@@ -232,12 +232,12 @@ def _abrir_dialogo_pendiente() -> None:
 
 
 def _monitor_en_vivo():
-    st.markdown('<div class="section-title">🖥️ Monitor de mesas</div>', unsafe_allow_html=True)
+    st.markdown(titulo_seccion('🖥️ Monitor de mesas'), unsafe_allow_html=True)
 
     mesas = cargar_mesas_activas()
     if not mesas:
         st.markdown(
-            '<p style="color:#9ca3af; font-size:0.85rem;">No hay mesas activas. '
+            '<p style="color:#a3a39b; font-size:0.85rem;">No hay mesas activas. '
             'Crea mesas en la pestaña 🪑 Mesas.</p>',
             unsafe_allow_html=True,
         )
@@ -307,15 +307,15 @@ def _monitor_en_vivo():
     [class*="st-key-mesabtn_"] button {
         text-align: left !important; justify-content: flex-start !important;
         padding: 12px 14px !important; min-height: 62px !important;
-        border-radius: 12px !important; border: 1px solid #e5e7eb !important;
-        border-left: 4px solid #d1d5db !important; background: #ffffff !important;
-        color: #1a1a1a !important; font-size: 0.86rem !important; font-weight: 600 !important;
+        border-radius: 12px !important; border: 1px solid #ececec !important;
+        border-left: 4px solid #d8d6cf !important; background: #ffffff !important;
+        color: #26262b !important; font-size: 0.86rem !important; font-weight: 600 !important;
         box-shadow: 0 1px 2px rgba(0,0,0,0.04) !important; margin: 0 0 8px 0 !important;
         line-height: 1.35 !important; white-space: normal !important;
     }
     [class*="st-key-mesabtn_"] button p { text-align: left !important; }
     [class*="st-key-mesabtn_"] button:hover {
-        border-color: #9ca3af !important; background: #f9fafb !important; color: #111827 !important;
+        border-color: #a3a39b !important; background: #fafaf8 !important; color: #26262b !important;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -337,7 +337,7 @@ def _monitor_en_vivo():
         # Selección: anillo oscuro + negrita; CONSERVA el tinte de estado y el
         # acento lateral (no se toca background ni border-left-color).
         dyn.append(
-            f".st-key-mesabtn_{sel} button {{ box-shadow:0 0 0 2px #111827 !important; "
+            f".st-key-mesabtn_{sel} button {{ box-shadow:0 0 0 2px #26262b !important; "
             f"font-weight:800 !important; }}"
         )
     st.markdown(f"<style>{''.join(dyn)}</style>", unsafe_allow_html=True)
@@ -345,8 +345,8 @@ def _monitor_en_vivo():
     # ── Objetivo 3: layout horizontal (fila de tarjetas activas) + detalle debajo ─
     if not activas:
         st.markdown(
-            '<div style="border:1px dashed #d1d5db; border-radius:14px; background:#ffffff; '
-            'padding:2rem; text-align:center; color:#6b7280; box-shadow:0 1px 2px rgba(0,0,0,0.04);">'
+            '<div style="border:1px dashed #d8d6cf; border-radius:14px; background:#ffffff; '
+            'padding:2rem; text-align:center; color:#6b6b64; box-shadow:0 1px 2px rgba(0,0,0,0.04);">'
             '🟢 Todas las mesas están libres. Aparecerán aquí en cuanto tengan pedidos activos.</div>',
             unsafe_allow_html=True,
         )
@@ -409,14 +409,14 @@ def _monitor_en_vivo():
 # ── Detalle: placeholder (sin mesa) ─────────────────────────────────────────────
 def _placeholder():
     st.markdown("""
-    <div style="border:1px dashed #d1d5db; border-radius:16px; background:#ffffff;
+    <div style="border:1px dashed #d8d6cf; border-radius:16px; background:#ffffff;
                 padding:4rem 2rem; text-align:center; margin-top:0.5rem;
                 box-shadow:0 1px 2px rgba(0,0,0,0.04);">
       <div style="font-size:2.6rem; margin-bottom:0.6rem;">🍽️</div>
-      <div style="font-family:'Syne',sans-serif; font-size:1.15rem; font-weight:700; color:#1a1a1a;">
+      <div style="font-family:'DM Sans',sans-serif; font-size:1.15rem; font-weight:600; color:#26262b;">
         Selecciona una mesa
       </div>
-      <div style="font-size:0.85rem; color:#9ca3af; margin-top:6px;">
+      <div style="font-size:0.85rem; color:#a3a39b; margin-top:6px;">
         Elige una mesa en la fila de arriba para ver los detalles de su pedido.
       </div>
     </div>
@@ -451,13 +451,13 @@ def _detalle_mesa(mid: int, nombre: str, sub: pd.DataFrame, color: str,
       <div style="display:flex; justify-content:space-between; align-items:flex-start;">
         <div>
           <div class="order-id">Ambiente de mesa</div>
-          <div style="font-family:'Syne',sans-serif; font-size:1.4rem; font-weight:800; color:#1a1a1a;">🪑 {html.escape(nombre)}</div>
+          <div style="font-family:'DM Sans',sans-serif; font-size:1.4rem; font-weight:600; color:#26262b;">🪑 {html.escape(nombre)}</div>
           <div style="font-size:0.8rem; color:{color}; font-weight:600; margin-top:2px;">{html.escape(estado_txt)}</div>
         </div>
         <div style="text-align:right;">
           <div class="metric-label">Por cobrar</div>
           <div class="order-total" style="font-size:1.4rem;">${fmt_money(saldo_activo)}</div>
-          <div style="font-size:0.72rem; color:#9ca3af; margin-top:4px;">Cobradas hoy: {cerradas_n} · ${fmt_money(cerradas_total)}</div>
+          <div style="font-size:0.72rem; color:#a3a39b; margin-top:4px;">Cobradas hoy: {cerradas_n} · ${fmt_money(cerradas_total)}</div>
         </div>
       </div>
     </div>
@@ -496,7 +496,7 @@ def _detalle_mesa(mid: int, nombre: str, sub: pd.DataFrame, color: str,
 
     if sub.empty:
         st.markdown(
-            '<p style="color:#9ca3af; font-size:0.9rem; padding:1.5rem 0; text-align:center;">'
+            '<p style="color:#a3a39b; font-size:0.9rem; padding:1.5rem 0; text-align:center;">'
             'Esta mesa está libre. No tiene pedidos activos.</p>',
             unsafe_allow_html=True,
         )
@@ -525,7 +525,7 @@ def _detalle_pedido(row, idx: int):
             if color_urg else "")
     borde = f' style="border-left:4px solid {color_urg};"' if color_urg else ""
     # Cuando hay abono parcial, el número grande es el SALDO y se anota lo abonado.
-    abono_html = (f'<div style="font-size:0.72rem; color:#1e3a8a; font-weight:600; margin-top:2px;">'
+    abono_html = (f'<div style="font-size:0.72rem; color:#4b43b0; font-weight:600; margin-top:2px;">'
                   f'Abonado ${fmt_money(abonado)} de ${fmt_money(total_p)}</div>'
                   if abonado > 0 else "")
 
@@ -594,7 +594,7 @@ def _detalle_pedido(row, idx: int):
 # todo lo necesario para prepararlos y despacharlos: contacto, dirección (domicilio),
 # método de pago + cambio, recargo de envío y las mismas acciones del tablero.
 TIPO_BADGE = {
-    "domicilio":   ("🛵 Domicilio",   "#dbeafe", "#1e3a8a"),
+    "domicilio":   ("🛵 Domicilio",   "#e9e7fb", "#4b43b0"),
     "para_llevar": ("🛍️ Para llevar", "#ffedd5", "#7c2d12"),
 }
 
@@ -612,14 +612,14 @@ def _txt(valor) -> str:
 
 
 def _web_en_vivo():
-    st.markdown('<div class="section-title">🛵 Pedidos web · Domicilio y Para Llevar</div>',
+    st.markdown(titulo_seccion('🛵 Pedidos web · Domicilio y Para Llevar'),
                 unsafe_allow_html=True)
 
     df = pedidos.cargar_pedidos()
     pedidos._maybe_print_ticket(df)  # impresión bajo demanda (un solo iframe)
 
     if "tipo_entrega" not in df.columns:
-        st.markdown('<p style="color:#9ca3af; font-size:0.85rem;">Aún no hay pedidos web.</p>',
+        st.markdown('<p style="color:#a3a39b; font-size:0.85rem;">Aún no hay pedidos web.</p>',
                     unsafe_allow_html=True)
         return
 
@@ -642,11 +642,11 @@ def _web_en_vivo():
     with m4:
         st.markdown(f'<div class="metric-card"><div class="metric-value metric-green">{n_listos}</div><div class="metric-label">Listos</div></div>', unsafe_allow_html=True)
 
-    st.markdown('<p style="color:#9ca3af; font-size:0.78rem; margin-top:6px;">No ocupan mesa. '
+    st.markdown('<p style="color:#a3a39b; font-size:0.78rem; margin-top:6px;">No ocupan mesa. '
                 'Prepáralos y despáchalos desde aquí.</p>', unsafe_allow_html=True)
 
     if activos.empty:
-        st.markdown('<p style="color:#9ca3af; font-size:0.9rem; padding:1.5rem 0; text-align:center;">'
+        st.markdown('<p style="color:#a3a39b; font-size:0.9rem; padding:1.5rem 0; text-align:center;">'
                     'No hay pedidos web en curso.</p>', unsafe_allow_html=True)
         return
 
@@ -660,7 +660,7 @@ def _web_card(row, idx: int):
     num_dia  = row.get("num_dia") or pid
     estado   = row.get("estado", "pendiente")
     tipo     = str(row.get("tipo_entrega") or "")
-    etiqueta, bg, fg = TIPO_BADGE.get(tipo, ("Web", "#e5e7eb", "#374151"))
+    etiqueta, bg, fg = TIPO_BADGE.get(tipo, ("Web", "#ececec", "#45443e"))
     nombre   = _txt(row.get("cliente_nombre")) or _txt(row.get("numero_cliente")) or "Cliente"
     tel      = _txt(row.get("cliente_telefono"))
     direccion = _txt(row.get("direccion"))
@@ -695,7 +695,7 @@ def _web_card(row, idx: int):
         pago_html = ''
     nota_html = (f'<div style="font-size:0.76rem; color:#b45309; margin-top:4px;">📝 {html.escape(nota)}</div>'
                  if nota else "")
-    fee_html = (f'<div style="font-size:0.72rem; color:#9ca3af;">incl. envío ${fmt_money(fee)}</div>'
+    fee_html = (f'<div style="font-size:0.72rem; color:#a3a39b;">incl. envío ${fmt_money(fee)}</div>'
                 if fee else "")
 
     # Una SOLA cadena sin saltos de línea ni sangría: una interpolación vacía (sin nota,
@@ -710,7 +710,7 @@ def _web_card(row, idx: int):
         f'<div class="order-num">{contacto}</div>'
         f'{dir_html}'
         f'<div class="order-items">{items}</div>'
-        f'<div style="font-size:0.78rem; color:#6b7280; margin-top:4px;">{pago_html}</div>'
+        f'<div style="font-size:0.78rem; color:#6b6b64; margin-top:4px;">{pago_html}</div>'
         f'{nota_html}'
         f'<div class="order-fecha">{fecha}</div>'
         f'</div>'

@@ -10,7 +10,7 @@ from datetime import datetime
 import auth
 import audit
 import empleados
-from db import (engine, fmt_money, fecha_corta, flash, drain_toasts,
+from db import (engine, titulo_seccion, fmt_money, fecha_corta, flash, drain_toasts,
                 saldo_pedido, cobrado_pedido, _es_pagado, _a_entero,
                 aplicar_inventario)
 from utils.print_jobs import enqueue_recibo, enqueue_comanda
@@ -596,9 +596,9 @@ def _emit_print(ticket_html: str, tid: int) -> None:
                .replace("${", "\\${").replace("</script>", "<" + "/script>"))
     fn = f"imprimir_{tid}"
     st.components.v1.html(f"""
-    <div style="font-family:'DM Sans',sans-serif; font-size:0.8rem; color:#6b7280; display:flex; align-items:center; gap:10px;">
+    <div style="font-family:'DM Sans',sans-serif; font-size:0.8rem; color:#6b6b64; display:flex; align-items:center; gap:10px;">
       <span id="msg_{tid}">🖨 Abriendo impresión del ticket #{tid}…</span>
-      <button onclick="{fn}()" style="padding:6px 14px; background:#1a1a1a; color:#fff; border:none; border-radius:8px; font-family:'DM Sans',sans-serif; font-size:0.78rem; cursor:pointer;">Imprimir #{tid}</button>
+      <button onclick="{fn}()" style="padding:6px 14px; background:#26262b; color:#fff; border:none; border-radius:8px; font-family:'DM Sans',sans-serif; font-size:0.78rem; cursor:pointer;">Imprimir #{tid}</button>
     </div>
     <script>
       function {fn}() {{
@@ -681,10 +681,10 @@ def dialog_cobrar(ids, titulo, total, uid):
 
     st.markdown(f"**{html.escape(str(titulo))}**")
     st.markdown(
-        '<div style="font-size:0.78rem; color:#6b7280; text-transform:uppercase; '
+        '<div style="font-size:0.78rem; color:#6b6b64; text-transform:uppercase; '
         'letter-spacing:0.04em;">Total por pagar</div>'
-        f'<div style="font-family:\'Syne\',sans-serif; font-size:1.9rem; font-weight:800; '
-        f'color:#1a1a1a; line-height:1.1;">${fmt_money(total)}</div>',
+        f'<div style="font-family:\'DM Sans\',sans-serif; font-size:1.9rem; font-weight:600; '
+        f'color:#26262b; line-height:1.1;">${fmt_money(total)}</div>',
         unsafe_allow_html=True,
     )
 
@@ -747,7 +747,7 @@ def dialog_cobrar(ids, titulo, total, uid):
 
     seleccion = {}
     if por_plato:
-        st.markdown('<div style="font-size:0.82rem; color:#374151; margin:6px 0 2px;">'
+        st.markdown('<div style="font-size:0.82rem; color:#45443e; margin:6px 0 2px;">'
                     'Unidades a cobrar</div>', unsafe_allow_html=True)
         for l in lineas:
             idx = l["idx"]
@@ -756,13 +756,13 @@ def dialog_cobrar(ids, titulo, total, uid):
             col_n, col_m, col_c, col_p = st.columns([4, 1, 1, 1])
             with col_n:
                 if restante <= 0:
-                    st.markdown(f'<div style="font-size:0.85rem; color:#9ca3af; padding:8px 0;">'
+                    st.markdown(f'<div style="font-size:0.85rem; color:#a3a39b; padding:8px 0;">'
                                 f'✓ {html.escape(str(l["nombre"]))} · pagado</div>',
                                 unsafe_allow_html=True)
                 else:
-                    st.markdown(f'<div style="font-size:0.85rem; color:#1a1a1a; padding:4px 0;">'
+                    st.markdown(f'<div style="font-size:0.85rem; color:#26262b; padding:4px 0;">'
                                 f'{html.escape(str(l["nombre"]))}<br>'
-                                f'<span style="font-size:0.76rem; color:#6b7280;">'
+                                f'<span style="font-size:0.76rem; color:#6b6b64;">'
                                 f'${fmt_money(l["precio"])} c/u · quedan {restante}</span></div>',
                                 unsafe_allow_html=True)
             if restante <= 0:
@@ -790,9 +790,9 @@ def dialog_cobrar(ids, titulo, total, uid):
         abono = sum(q * precio_idx.get(idx, 0) for idx, q in seleccion.items())
         st.markdown(
             '<div style="display:flex; justify-content:space-between; padding:8px 0 2px; '
-            'border-top:1px solid #e5e7eb; margin-top:6px;"><span style="font-weight:600; '
-            'color:#374151;">Subtotal seleccionado</span>'
-            f'<span style="font-family:\'Syne\',sans-serif; font-weight:800; color:#1a1a1a;">'
+            'border-top:1px solid #ececec; margin-top:6px;"><span style="font-weight:600; '
+            'color:#45443e;">Subtotal seleccionado</span>'
+            f'<span style="font-family:\'DM Sans\',sans-serif; font-weight:600; color:#26262b;">'
             f'${fmt_money(abono)}</span></div>',
             unsafe_allow_html=True,
         )
@@ -817,7 +817,7 @@ def dialog_cobrar(ids, titulo, total, uid):
                 '<div style="background:#dcfce7; border:1px solid #86efac; border-radius:10px; '
                 'padding:10px 14px; margin-top:6px; display:flex; justify-content:space-between; '
                 'align-items:center;"><span style="color:#14532d; font-weight:600;">Cambio</span>'
-                f'<span style="font-family:\'Syne\',sans-serif; font-weight:800; font-size:1.2rem; '
+                f'<span style="font-family:\'DM Sans\',sans-serif; font-weight:600; font-size:1.2rem; '
                 f'color:#14532d;">${fmt_money(recibe - abono)}</span></div>',
                 unsafe_allow_html=True,
             )
@@ -834,7 +834,7 @@ def dialog_cobrar(ids, titulo, total, uid):
 
     if abono < total and not efectivo_corto:
         st.markdown(
-            f'<div style="font-size:0.8rem; color:#1e3a8a; margin-top:8px;">Abono parcial · '
+            f'<div style="font-size:0.8rem; color:#4b43b0; margin-top:8px;">Abono parcial · '
             f'saldo restante: <b>${fmt_money(total - abono)}</b> (la cuenta sigue abierta).</div>',
             unsafe_allow_html=True,
         )
@@ -890,7 +890,7 @@ def dialog_descuento(pedido_id: int, saldo: int, uid: str):
         return
     pedido_id, saldo = int(pedido_id), int(saldo)
     st.markdown(f"Saldo actual del pedido **#{pedido_id}**: "
-                f"<b style='color:#1a1a1a;'>${fmt_money(saldo)}</b>", unsafe_allow_html=True)
+                f"<b style='color:#26262b;'>${fmt_money(saldo)}</b>", unsafe_allow_html=True)
     if saldo <= 0:
         st.info("Este pedido no tiene saldo por descontar.")
         if st.button("Cerrar", key=f"desc_cerrar_{uid}", use_container_width=True):
@@ -946,7 +946,7 @@ def render_pedidos(dataframe: pd.DataFrame, tab_key: str = "all", mesa_nombres=N
     # Las acciones (avanzar / cobrar / ticket / comanda / cancelar) viven en el Monitor de
     # mesas y en Nuevo pedido, no aquí — por eso ya no se pintan botones por tarjeta.
     if dataframe.empty:
-        st.markdown('<p style="color:#9ca3af; font-size:0.85rem; padding:1rem 0;">Sin pedidos en esta categoría.</p>', unsafe_allow_html=True)
+        st.markdown('<p style="color:#a3a39b; font-size:0.85rem; padding:1rem 0;">Sin pedidos en esta categoría.</p>', unsafe_allow_html=True)
         return
     for _, row in dataframe.iterrows():
         pid     = row["id"]
@@ -1029,7 +1029,7 @@ def render_por_mesa(df: pd.DataFrame, mesa_nombres: dict):
     'entregado'. Ver _con_saldo_mask (excluye pagado=TRUE o saldo <= 0)."""
     activos = df[df["estado"].isin(ESTADOS_ACTIVOS) & _con_saldo_mask(df)].copy()
     if activos.empty:
-        st.markdown('<p style="color:#9ca3af; font-size:0.85rem; padding:1rem 0;">No hay pedidos activos en este momento.</p>', unsafe_allow_html=True)
+        st.markdown('<p style="color:#a3a39b; font-size:0.85rem; padding:1rem 0;">No hay pedidos activos en este momento.</p>', unsafe_allow_html=True)
         return
     activos["__grupo"] = activos.apply(lambda r: grupo_de_mesa(r, mesa_nombres), axis=1)
     # Mesas reales primero (por nombre); 'Sin mesa' al final.
@@ -1038,7 +1038,7 @@ def render_por_mesa(df: pd.DataFrame, mesa_nombres: dict):
         sub = activos[activos["__grupo"] == grupo].copy()
         total_grupo = sub["total"].sum() if "total" in sub.columns else 0
         st.markdown(
-            f'<div class="section-title">🪑 {html.escape(str(grupo))} · {len(sub)} activo(s) · ${fmt_money(total_grupo)}</div>',
+            titulo_seccion(f'🪑 {html.escape(str(grupo))} · {len(sub)} activo(s) · ${fmt_money(total_grupo)}'),
             unsafe_allow_html=True,
         )
         render_pedidos(sub, tab_key=f"mesa{gi}", mesa_nombres=mesa_nombres)
@@ -1182,6 +1182,6 @@ def _tablero_en_vivo():
     st.markdown("<br>", unsafe_allow_html=True)
     # Vista de solo lectura: sin botón de refresco manual (el fragmento se actualiza
     # solo cada 30 s). Las acciones se gestionan desde el Monitor de mesas.
-    st.markdown('<p style="color:#9ca3af; font-size:0.75rem;">Vista en vivo · se actualiza '
+    st.markdown('<p style="color:#a3a39b; font-size:0.75rem;">Vista en vivo · se actualiza '
                 'automáticamente. Gestiona los pedidos desde el 🖥️ Monitor.</p>',
                 unsafe_allow_html=True)

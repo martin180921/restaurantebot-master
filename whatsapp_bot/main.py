@@ -203,7 +203,8 @@ def init_db():
                 ('principio', 'Frijol', 1), ('principio', 'Lenteja', 2),
                 ('proteina', 'Res', 1), ('proteina', 'Cerdo', 2), ('proteina', 'Pechuga', 3),
                 ('acompanamiento', 'Arroz', 1), ('acompanamiento', 'Maduro', 2),
-                ('acompanamiento', 'Papa', 3), ('acompanamiento', 'Ensalada', 4)
+                ('acompanamiento', 'Papa', 3), ('acompanamiento', 'Ensalada', 4),
+                ('bebida', 'Limonada', 1), ('bebida', 'Jugo del día', 2)
             """))
 
         # Categoría + descripción del catálogo 'menu': especiales (con resumen de
