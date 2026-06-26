@@ -1305,10 +1305,12 @@ except Exception:
     st.stop()
 
 if es_mesa:
-    # Ventana de revisión (solo mesa): si hay un pedido en espera de confirmación, ábrela
-    # como overlay antes de que nada llegue a la cocina.
+    # Ventana de revisión (solo mesa): mientras hay un pedido en espera de confirmación,
+    # mostramos SOLO el modal y NO renderizamos la carta-fragment detrás. Así evitamos la
+    # carrera "fragment removido durante un rerun completo" al interactuar con el diálogo.
     if st.session_state.get("pedido_pendiente"):
         _dialog_confirmar()
-    _carta_mesa(_comp, _cat, _ajustes)
+    else:
+        _carta_mesa(_comp, _cat, _ajustes)
 else:
     _carta_delivery(_comp, _cat, _ajustes)
