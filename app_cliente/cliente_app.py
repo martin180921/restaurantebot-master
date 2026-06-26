@@ -1,23 +1,22 @@
-"""app_cliente: carta digital de auto-servicio por QR (pedido desde la mesa).
+"""app_cliente: carta digital pública con DOS flujos según el origen.
 
-Flujo:
-  1) Detección de mesa por URL: el QR de cada mesa abre la app con ?table=<id|nombre>
-     (o ?mesa=). La mesa se extrae UNA vez y se FIJA en la sesión (inmutable durante
-     todo el journey). Si la URL no trae mesa (no escaneó el QR), la carta queda
-     BLOQUEADA: el comensal debe elegir su mesa a mano antes de continuar.
-  2) Confirmación visible: al entrar a la carta se muestra "¡Bienvenido! Estás ordenando
-     desde 🪑 <Mesa>" para que no haya dudas de qué mesa ordena.
-  3) Carta dinámica en 4 secciones, idéntica a la del POS:
-       #1 Plato del Día — configurable por plato (entrada / principio / proteína /
-          N acompañamientos con repetición permitida).
-       #2 Especiales — platos con descripción; precio plano de la categoría.
-       #3 A la carta — platos sueltos, con un sub-grupo de Bebidas.
-       #4 Notas generales — observaciones del pedido al final.
-     Opción "Para llevar" (suma el recargo de empaque); por defecto se come en la mesa.
-  4) Envío → escribe en `pedidos` con tipo_entrega='mesa_qr' + mesa_id (mismo pipeline
-     que un pedido de mesa del POS), descuenta inventario en el mismo txn y encola la
-     comanda de cocina marcada [QR]. El pago se cobra luego en caja. El pedido aparece
-     en el Monitor de mesas y en el tablero de cocina, señalizado como auto-servicio QR.
+  A) DELIVERY (enlace de WhatsApp / acceso directo, sin ?table=) — el flujo de antes:
+     puerta de entrada (Domicilio / Para Llevar + datos del cliente), carta, pago al
+     final (efectivo con cambio / transferencia) y envío directo. Escribe en `pedidos`
+     con tipo_entrega='domicilio'|'para_llevar' y recargo de entrega. La URL puede traer
+     ?tel=<num> para identificar y pre-rellenar al cliente.
+
+  B) MESA / auto-servicio por QR (la URL trae ?table=<id|nombre>, o ?mesa=) — el QR de
+     cada mesa abre la app con la mesa ya FIJADA (inmutable durante todo el journey) y
+     un banner de bienvenida. Opción "Para llevar" (suma recargo). Antes de mandar a
+     cocina, una ventana de revisión pide confirmar el pedido. Al confirmar escribe en
+     `pedidos` con tipo_entrega='mesa_qr' + mesa_id (mismo pipeline que un pedido de
+     mesa del POS), descuenta inventario en el mismo txn y encola la comanda marcada
+     [QR]. El pago lo cobra la caja. Aparece en el Monitor de mesas señalizado como QR.
+
+  Carta común (ambos flujos), 4 secciones idénticas a las del POS:
+     #1 Plato del Día configurable · #2 Especiales · #3 A la carta (+ Adicionales y
+     Bebidas) · #4 Notas generales.
 
 App aislada: su propia conexión; comparte con el panel solo el esquema de la BD.
 """
@@ -34,7 +33,8 @@ load_dotenv()
 
 # Anti-spam del enlace público.
 COOLDOWN_SEG          = 25   # espera mínima entre envíos por sesión
-MAX_ACTIVAS_POR_MESA  = 8    # tope de pedidos en curso por mesa (auto-servicio)
+MAX_ACTIVAS_POR_TEL   = 5    # tope de pedidos en curso por teléfono (domicilio/llevar)
+MAX_ACTIVAS_POR_MESA  = 8    # tope de pedidos en curso por mesa (auto-servicio QR)
 
 # Identidad del restaurante para la cola de impresión multi-tenant (mismo env que el
 # panel). La comanda de cocina de cada pedido QR se encola con este id.
@@ -457,6 +457,31 @@ def _encolar_comanda(pedido_id: int, mesa_label: str, items) -> None:
         pass
 
 
+def guardar_pedido(numero_cliente, items, total, *, tipo_entrega, cliente_nombre,
+                   cliente_telefono, direccion, metodo_pago, paga_con, fee,
+                   nota_general) -> int:
+    """Pedido de la app pública por WhatsApp / acceso directo: Domicilio o Para Llevar
+    (como antes). Lleva datos del cliente + método de pago/cambio + recargo de entrega;
+    el cobro real lo registra la caja al entregar. Descuenta inventario en el mismo txn."""
+    with engine.begin() as conn:
+        nuevo_id = int(conn.execute(text("""
+            INSERT INTO pedidos
+              (numero_cliente, items, total, estado, tipo_entrega, cliente_nombre,
+               cliente_telefono, direccion, metodo_pago, paga_con, fee, nota_general)
+            VALUES
+              (:nc, :items, :total, 'pendiente', :te, :cn, :ct, :dir, :mp, :pc, :fee, :ng)
+            RETURNING id
+        """), {
+            "nc": numero_cliente, "items": json.dumps(items, ensure_ascii=False),
+            "total": int(total), "te": tipo_entrega, "cn": cliente_nombre,
+            "ct": cliente_telefono, "dir": (direccion or None), "mp": metodo_pago,
+            "pc": int(paga_con or 0), "fee": int(fee or 0), "ng": (nota_general or None),
+        }).scalar())
+        # Descuento inmediato del inventario (mismo txn): evita revender lo ya pedido.
+        _descontar_inventario(conn, items)
+        return nuevo_id
+
+
 def guardar_pedido_mesa(mesa_id, mesa_nombre, items, total, *, para_llevar, fee,
                         nota_general) -> int:
     """Inserta un pedido de auto-servicio por QR en el MISMO pipeline que un pedido de
@@ -690,40 +715,59 @@ def _pantalla_seguimiento():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Puerta de entrada: selección de mesa (fallback cuando no hay QR)
+# Puerta de entrada DELIVERY (WhatsApp / acceso directo): tipo + datos del cliente
 # ══════════════════════════════════════════════════════════════════════════════
-# Sin ?table= en la URL no se puede ordenar: la carta queda BLOQUEADA hasta que el
-# comensal elija su mesa manualmente (req #2). Es la contingencia para quien abre la app
-# sin escanear el QR; el caso normal entra ya con la mesa fijada y no ve esta pantalla.
-def _pantalla_mesa():
+# Es el flujo "de antes": quien llega SIN QR de mesa (enlace de WhatsApp o acceso
+# directo) hace su pedido a Domicilio o Para Llevar. Bloquea la carta hasta llenar
+# tipo de entrega + datos del cliente. El pago se pide al final de la carta. (Quien
+# llega por el QR de una mesa NO ve esta pantalla: va directo al flujo de mesa.)
+def _pantalla_gate():
     st.markdown("""
     <div class="c-header">
-      <div class="c-title">🍽️ Bienvenido</div>
-      <div class="c-subtitle">Para ver la carta y ordenar, dinos en qué mesa estás</div>
+      <div class="c-title">🍽️ Haz tu pedido</div>
+      <div class="c-subtitle">Domicilio o para llevar · cuéntanos a dónde va</div>
     </div>
     """, unsafe_allow_html=True)
 
-    st.markdown('<div class="warn">📷 No detectamos el código QR de tu mesa. '
-                'Selecciónala abajo para continuar.</div>', unsafe_allow_html=True)
+    tel_param = _clean_tel(qp.get("tel"))
+    cli = buscar_cliente(tel_param) if tel_param else None
 
-    mesas = cargar_mesas_activas()
-    if not mesas:
-        st.markdown('<div class="c-empty">No hay mesas disponibles en este momento. '
-                    'Por favor avísale a un mesero.</div>', unsafe_allow_html=True)
-        st.stop()
+    st.markdown('<div class="c-sub">Tipo de pedido</div>', unsafe_allow_html=True)
+    tipo_lbl = st.radio("Tipo de pedido", ["🛵 Domicilio", "🛍️ Para Llevar"],
+                        horizontal=True, label_visibility="collapsed", key="g_tipo")
+    es_domicilio = tipo_lbl == "🛵 Domicilio"
 
-    ids    = [m["id"] for m in mesas]
-    labels = {m["id"]: m["nombre"] for m in mesas}
+    st.markdown('<div class="c-sub">Tus datos</div>', unsafe_allow_html=True)
+    nombre = st.text_input("Nombre", value=(cli or {}).get("nombre") or "", key="g_nombre")
+    telefono = st.text_input("Número de teléfono",
+                             value=tel_param or (cli or {}).get("telefono") or "", key="g_tel")
+    direccion = ""
+    if es_domicilio:
+        direccion = st.text_area("Dirección de entrega",
+                                 value=(cli or {}).get("direccion") or "", key="g_dir",
+                                 placeholder="Calle, número, barrio, referencias…")
 
-    st.markdown('<div class="c-sub">Tu mesa</div>', unsafe_allow_html=True)
-    sel = st.selectbox("Mesa", options=ids, format_func=lambda i: labels[i],
-                       key="mesa_pick", label_visibility="collapsed")
-
-    if st.button("Confirmar mesa →", type="primary", use_container_width=True):
-        st.session_state["mesa_id"]     = int(sel)
-        st.session_state["mesa_nombre"] = labels[int(sel)]
-        st.session_state["mesa_auto"]   = False   # elegida a mano (no por QR)
-        st.rerun()
+    if st.button("Ver la carta →", type="primary", use_container_width=True):
+        errores = []
+        if not (nombre or "").strip():
+            errores.append("Escribe tu nombre.")
+        if len(_clean_tel(telefono)) < 7:
+            errores.append("Escribe un teléfono válido.")
+        if es_domicilio and not (direccion or "").strip():
+            errores.append("La dirección es obligatoria para Domicilio.")
+        if errores:
+            for e in errores:
+                st.warning(e)
+        else:
+            # El método de pago y el "¿con cuánto pagas?" se piden al FINAL de la carta,
+            # ya con el total a la vista (ver _carta_delivery), no aquí.
+            st.session_state["gate"] = {
+                "tipo_entrega": "domicilio" if es_domicilio else "para_llevar",
+                "nombre": nombre.strip(),
+                "telefono": _clean_tel(telefono),
+                "direccion": direccion.strip() if es_domicilio else "",
+            }
+            st.rerun()
     st.stop()
 
 
@@ -1043,32 +1087,11 @@ def _dialog_confirmar():
             st.rerun()
 
 
-@st.fragment
-def _carta(comp, cat, ajustes):
-    # Datos ya cargados fuera del fragment (bajo el guard de errores): así los reruns
-    # de los +/- nunca tocan la BD y la carta queda estable durante el pedido.
-    mesa_id     = st.session_state["mesa_id"]
-    mesa_nombre = st.session_state["mesa_nombre"]
-    fee_llevar = _int(ajustes, "fee_entrega", 0)   # recargo SOLO si pide para llevar
+def _render_secciones(comp, cat, ajustes):
+    """Renderiza las 4 secciones de la carta + notas generales (parte COMÚN a los dos
+    flujos: mesa y delivery). Devuelve (items, ok_pd, notas)."""
     pd_precio = _int(ajustes, "plato_dia_precio", 0)
     n_ac = max(1, _int(ajustes, "acompanamientos_n", 3))
-
-    # Confirmación de mesa (prominente) — req #2: el comensal ve de inmediato desde qué
-    # mesa está ordenando, tanto si llegó por QR como si la eligió a mano.
-    detalle = ("Detectada por tu código QR" if st.session_state.get("mesa_auto")
-               else "Mesa seleccionada")
-    st.markdown(
-        f'<div class="mesa-banner"><div class="mb-check">✅</div><div>'
-        f'<div class="mb-title">¡Bienvenido! Estás ordenando desde</div>'
-        f'<div class="mb-mesa">🪑 {html.escape(str(mesa_nombre))}</div>'
-        f'<div class="mb-sub">{detalle}</div></div></div>',
-        unsafe_allow_html=True,
-    )
-
-    st.markdown(
-        '<div class="c-header"><div class="c-title">🍽️ Nuestra carta</div></div>',
-        unsafe_allow_html=True,
-    )
 
     # #1 Plato del Día
     items_pd, ok_pd = _seccion_plato_dia(comp, pd_precio, n_ac)
@@ -1089,10 +1112,34 @@ def _carta(comp, cat, ajustes):
 
     items = items_pd + items_esp + items_alc + items_adi + items_beb
 
-    # #4 Notas generales + resumen + envío
+    # #4 Notas generales
     st.markdown('<div class="c-section">📝 Notas generales</div>', unsafe_allow_html=True)
     notas = st.text_area("Notas generales", key="notas_generales", label_visibility="collapsed",
                          placeholder="Observaciones para todo el pedido (timbre dañado, sin cubiertos…)")
+    return items, ok_pd, notas
+
+
+# ── Carta MESA (auto-servicio por QR) ────────────────────────────────────────────
+# Banner de mesa + opción "para llevar" (suma recargo) + ventana de revisión antes de
+# mandar a cocina. NO captura pago (lo cobra la caja). Escribe con tipo_entrega='mesa_qr'.
+@st.fragment
+def _carta_mesa(comp, cat, ajustes):
+    mesa_nombre = st.session_state["mesa_nombre"]
+    fee_llevar  = _int(ajustes, "fee_entrega", 0)   # recargo SOLO si pide para llevar
+
+    detalle = ("Detectada por tu código QR" if st.session_state.get("mesa_auto")
+               else "Mesa seleccionada")
+    st.markdown(
+        f'<div class="mesa-banner"><div class="mb-check">✅</div><div>'
+        f'<div class="mb-title">¡Bienvenido! Estás ordenando desde</div>'
+        f'<div class="mb-mesa">🪑 {html.escape(str(mesa_nombre))}</div>'
+        f'<div class="mb-sub">{detalle}</div></div></div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown('<div class="c-header"><div class="c-title">🍽️ Nuestra carta</div></div>',
+                unsafe_allow_html=True)
+
+    items, ok_pd, notas = _render_secciones(comp, cat, ajustes)
 
     st.markdown('<div class="c-section">🧾 Tu pedido</div>', unsafe_allow_html=True)
     if not items:
@@ -1110,11 +1157,10 @@ def _carta(comp, cat, ajustes):
     fee = fee_llevar if para_llevar else 0
     total = subtotal + fee
 
-    filas = _filas_resumen_html(items)
     fee_html = (f'<div class="c-fee"><span>Recargo · Para llevar</span>'
                 f'<span>${fmt_money(fee)}</span></div>') if fee else ""
     st.markdown(
-        f'<div class="c-summary">{filas}{fee_html}'
+        f'<div class="c-summary">{_filas_resumen_html(items)}{fee_html}'
         f'<div class="c-total"><span>Total</span><span>${fmt_money(total)}</span></div></div>',
         unsafe_allow_html=True,
     )
@@ -1123,24 +1169,114 @@ def _carta(comp, cat, ajustes):
         st.markdown('<div class="warn">Completa los acompañamientos de cada Plato del Día '
                     'antes de enviar.</div>', unsafe_allow_html=True)
 
-    # Auto-servicio de mesa: el cobro se hace al final, en el restaurante (lo registra la
-    # caja). No se captura método de pago aquí (a diferencia del flujo de domicilio).
     st.markdown('<div style="text-align:center; color:#777; font-size:0.85rem; '
                 'margin:0.3rem 0 0.2rem;">💳 El pago se realiza en el restaurante al '
                 'finalizar.</div>', unsafe_allow_html=True)
 
     if st.button(f"Revisar pedido · ${fmt_money(total)}", type="primary",
                  use_container_width=True, disabled=not ok_pd):
-        # Aún NO se envía: se guarda un snapshot del pedido y se abre la ventana de
-        # revisión para que el comensal confirme antes de que entre a la cocina (evita
-        # pedidos enviados por error). El guardado real ocurre en _dialog_confirmar al
-        # pulsar "Confirmar y enviar". El snapshot congela lo revisado: si el comensal
-        # vuelve a editar, se descarta y se rearma al revisar de nuevo.
+        # Aún NO se envía: snapshot + ventana de revisión (doble chequeo antes de cocina).
+        # El guardado real ocurre en _dialog_confirmar al pulsar "Confirmar y enviar".
         st.session_state["pedido_pendiente"] = {
             "items": items, "subtotal": subtotal, "fee": fee, "total": total,
             "para_llevar": para_llevar, "nota": (notas or "").strip(),
         }
         st.rerun(scope="app")
+
+
+# ── Carta DELIVERY (WhatsApp / acceso directo) ───────────────────────────────────
+# Flujo "de antes": Domicilio / Para Llevar con recargo de entrega, captura de pago
+# (efectivo + cambio / transferencia) y envío directo. Sin ventana de revisión.
+@st.fragment
+def _carta_delivery(comp, cat, ajustes):
+    gate = st.session_state["gate"]
+    fee = _int(ajustes, "fee_entrega", 0)
+
+    st.markdown(
+        f'<div class="c-header"><div class="c-title">🍽️ Nuestra carta</div>'
+        f'<div class="c-subtitle">{TIPO_LABEL.get(gate["tipo_entrega"], "")} · '
+        f'{html.escape(gate["nombre"])}</div></div>',
+        unsafe_allow_html=True,
+    )
+
+    items, ok_pd, notas = _render_secciones(comp, cat, ajustes)
+
+    st.markdown('<div class="c-section">🧾 Tu pedido</div>', unsafe_allow_html=True)
+    if not items:
+        st.markdown('<div class="c-empty">Agrega platos para armar tu pedido.</div>',
+                    unsafe_allow_html=True)
+        return
+
+    subtotal = sum(int(it["precio"]) * int(it["cantidad"]) for it in items)
+    total = subtotal + fee
+
+    fee_lbl = "Domicilio" if gate["tipo_entrega"] == "domicilio" else "Para llevar"
+    st.markdown(
+        f'<div class="c-summary">{_filas_resumen_html(items)}'
+        f'<div class="c-fee"><span>Recargo · {fee_lbl}</span><span>${fmt_money(fee)}</span></div>'
+        f'<div class="c-total"><span>Total</span><span>${fmt_money(total)}</span></div></div>',
+        unsafe_allow_html=True,
+    )
+
+    if not ok_pd:
+        st.markdown('<div class="warn">Completa los acompañamientos de cada Plato del Día '
+                    'antes de enviar.</div>', unsafe_allow_html=True)
+
+    # Pago AL FINAL, ya con el total a la vista (como antes): método y, si es efectivo,
+    # con cuánto paga y su cambio.
+    st.markdown('<div class="c-section">💳 ¿Cómo vas a pagar?</div>', unsafe_allow_html=True)
+    metodo_lbl = st.radio("Método de pago", ["💵 Efectivo", "💳 Transferencia"],
+                          horizontal=True, label_visibility="collapsed", key="c_metodo")
+    es_efectivo = metodo_lbl == "💵 Efectivo"
+    metodo_pago = "efectivo" if es_efectivo else "transferencia"
+    paga_con = 0
+    if es_efectivo:
+        paga_con = int(st.number_input("¿Con cuánto vas a pagar? (para tu cambio)",
+                                       min_value=0, step=1000, key="c_paga_con") or 0)
+        if paga_con >= total and paga_con > 0:
+            cc_sub = (f'<div class="cc-sub">Pagas con ${fmt_money(paga_con)} · '
+                      f'tu cambio: ${fmt_money(paga_con - total)}</div>')
+        elif paga_con > 0:
+            cc_sub = (f'<div class="cc-sub">Te faltan ${fmt_money(total - paga_con)} · '
+                      f'ten listo al menos ${fmt_money(total)}</div>')
+        else:
+            cc_sub = '<div class="cc-sub">Escribe con cuánto pagas para ver tu cambio</div>'
+        st.markdown(
+            f'<div class="cash-card"><div class="cc-label">💵 Pago en efectivo · Total a pagar</div>'
+            f'<div class="cc-total">${fmt_money(total)}</div>{cc_sub}</div>',
+            unsafe_allow_html=True,
+        )
+
+    falta_efectivo = es_efectivo and paga_con <= 0
+    if st.button(f"Enviar pedido · ${fmt_money(total)}", type="primary",
+                 use_container_width=True, disabled=(not ok_pd or falta_efectivo)):
+        ahora = time.time()
+        if ahora - st.session_state.get("ultimo_envio", 0) < COOLDOWN_SEG:
+            st.toast("Espera unos segundos antes de enviar otro pedido.", icon="⏳")
+        elif pedidos_activos_telefono(gate["telefono"]) >= MAX_ACTIVAS_POR_TEL:
+            st.toast("Ya tienes varios pedidos en curso. Llámanos para otro.", icon="🚦")
+        else:
+            nuevo_id = guardar_pedido(
+                gate["nombre"], items, total,
+                tipo_entrega=gate["tipo_entrega"], cliente_nombre=gate["nombre"],
+                cliente_telefono=gate["telefono"], direccion=gate["direccion"],
+                metodo_pago=metodo_pago, paga_con=paga_con,
+                fee=fee, nota_general=(notas or "").strip(),
+            )
+            upsert_cliente(gate["telefono"], gate["nombre"], gate["direccion"] or None)
+            st.session_state["ultimo_envio"] = ahora
+            st.session_state["pedido_enviado"] = {
+                "id": nuevo_id, "tipo": TIPO_LABEL.get(gate["tipo_entrega"], ""), "total": total,
+            }
+            # Limpia la carta y la configuración de platos del día.
+            st.session_state["cart"] = {}
+            for k in [k for k in st.session_state if str(k).startswith("pd_")]:
+                del st.session_state[k]
+            st.session_state.pop("notas_generales", None)
+            st.session_state.pop("c_metodo", None)
+            st.session_state.pop("c_paga_con", None)
+            st.session_state["pd_qty"] = 0
+            st.rerun(scope="app")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1149,9 +1285,14 @@ def _carta(comp, cat, ajustes):
 if st.session_state["pedido_enviado"]:
     _pantalla_seguimiento()
 
-# Sin mesa fijada (ni por QR ni a mano), la carta queda bloqueada (req #2).
-if st.session_state["mesa_id"] is None:
-    _pantalla_mesa()
+# Enrutado por origen:
+#   • Vino por el QR de una mesa (?table=) → flujo de MESA (auto-servicio, dine-in).
+#   • Cualquier otro acceso (enlace de WhatsApp / directo) → flujo DELIVERY de antes
+#     (Domicilio / Para Llevar), con su puerta de entrada de datos del cliente.
+es_mesa = st.session_state["mesa_id"] is not None
+
+if not es_mesa and st.session_state["gate"] is None:
+    _pantalla_gate()   # puerta delivery (bloquea la carta hasta tener los datos)
 
 # Carga de la carta a prueba de fallos para el cliente (fuera del fragment).
 try:
@@ -1162,9 +1303,11 @@ except Exception:
     st.error("El servicio no está disponible en este momento. Intenta más tarde.")
     st.stop()
 
-# Ventana de revisión: si hay un pedido preparado en espera de confirmación, ábrela
-# (overlay sobre la carta) antes de que nada llegue a la cocina.
-if st.session_state.get("pedido_pendiente"):
-    _dialog_confirmar()
-
-_carta(_comp, _cat, _ajustes)
+if es_mesa:
+    # Ventana de revisión (solo mesa): si hay un pedido en espera de confirmación, ábrela
+    # como overlay antes de que nada llegue a la cocina.
+    if st.session_state.get("pedido_pendiente"):
+        _dialog_confirmar()
+    _carta_mesa(_comp, _cat, _ajustes)
+else:
+    _carta_delivery(_comp, _cat, _ajustes)
