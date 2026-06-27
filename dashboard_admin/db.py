@@ -668,27 +668,34 @@ def inventario_de_items(items):
       comp_qty → {(grupo, nombre_en_minúsculas): unidades}  (componentes del Plato del Día)
       menu_qty → {menu_id: unidades}                         (a la carta / especiales / bebidas)
     El Plato del Día descuenta su entrada/principio/proteína (si no son 'Ninguno') y cada
-    acompañamiento elegido (con repetición). Los demás ítems descuentan su menu_id. La
-    cantidad del ítem multiplica las unidades. Tolerante a items legados / basura."""
+    acompañamiento elegido (con repetición). Los demás ítems descuentan su menu_id; además,
+    un especial puede traer entrada/bebida del Plato del Día INCLUIDAS en su config, que
+    también descuentan su componente. La cantidad del ítem multiplica las unidades.
+    Tolerante a items legados / basura."""
     comp_qty, menu_qty = {}, {}
+
+    def _acumular_config(cfg, cant):
+        # entrada/principio/proteína/bebida descuentan UNA porción de su componente; los
+        # acompañamientos, una por cada uno elegido (con repetición). Un especial solo
+        # trae entrada/bebida → los demás grupos faltan en su cfg y se omiten solos.
+        for g in ("entrada", "principio", "proteina", "bebida"):
+            v = cfg.get(g)
+            if v:
+                k = (g, str(v).strip().lower())
+                comp_qty[k] = comp_qty.get(k, 0) + cant
+        for a in (cfg.get("acompanamientos") or []):
+            if a:
+                k = ("acompanamiento", str(a).strip().lower())
+                comp_qty[k] = comp_qty.get(k, 0) + cant
+
     for it in parse_items(items):
         cant = int(it.get("cantidad", 1) or 1)
         if cant <= 0:
             continue
         tipo = str(it.get("tipo") or "item").lower()
+        cfg = it.get("config") or {}
         if tipo == "plato_dia":
-            cfg = it.get("config") or {}
-            # entrada/principio/proteína/bebida descuentan UNA porción de su componente
-            # (la bebida del Plato del Día es un componente más, incluido en el precio).
-            for g in ("entrada", "principio", "proteina", "bebida"):
-                v = cfg.get(g)
-                if v:
-                    k = (g, str(v).strip().lower())
-                    comp_qty[k] = comp_qty.get(k, 0) + cant
-            for a in (cfg.get("acompanamientos") or []):
-                if a:
-                    k = ("acompanamiento", str(a).strip().lower())
-                    comp_qty[k] = comp_qty.get(k, 0) + cant
+            _acumular_config(cfg, cant)
         else:
             mid = it.get("id")
             try:
@@ -696,6 +703,9 @@ def inventario_de_items(items):
             except (TypeError, ValueError):
                 continue
             menu_qty[mid] = menu_qty.get(mid, 0) + cant
+            # Entrada/bebida del Plato del Día incluidas en un especial (u otro ítem).
+            if cfg:
+                _acumular_config(cfg, cant)
     return comp_qty, menu_qty
 
 

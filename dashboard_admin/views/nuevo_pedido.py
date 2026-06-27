@@ -187,14 +187,16 @@ def _default_grupo_sel(opciones) -> str:
     return NINGUNO
 
 
-def _selector_grupo(uid, grupo, opciones, label):
+def _selector_grupo(uid, grupo, opciones, label, *, default_ninguno=False):
     """Selector de UNA opción (entrada/principio/proteína) en botones — no st.radio —
     para poder deshabilitar individualmente las opciones agotadas (los radios de
     Streamlit no permiten desactivar opciones sueltas) y mostrar las porciones que
-    quedan. 'Ninguno' siempre disponible. Devuelve el nombre elegido, o None (Ninguno)."""
+    quedan. 'Ninguno' siempre disponible. Devuelve el nombre elegido, o None (Ninguno).
+    default_ninguno=True arranca en 'Ninguno' (para extras opcionales, p. ej. la
+    entrada/bebida incluidas en un especial); por defecto arranca en la 1ª disponible."""
     key = f"pdpos_{uid}_{grupo}"
     if key not in st.session_state:
-        st.session_state[key] = _default_grupo_sel(opciones)
+        st.session_state[key] = NINGUNO if default_ninguno else _default_grupo_sel(opciones)
     sel = st.session_state.get(key)
     st.markdown(f'<div style="font-size:0.75rem; color:#6b6b64; margin-top:6px;">{label}</div>',
                 unsafe_allow_html=True)
@@ -403,6 +405,80 @@ def _seccion_catalogo(productos, tipo, titulo, con_desc=False):
     return elegidos
 
 
+def _seccion_especiales(productos, comp):
+    """Especiales: mismo stepper que el catálogo (precio + descripción) y, cuando el
+    restaurante tiene entradas/bebidas del Plato del Día configuradas, dos selectores
+    OPCIONALES (Entrada / Bebida) que van INCLUIDOS sin costo. La selección se comparte
+    para todas las unidades del mismo especial (un solo config por producto). Si el
+    restaurante no tiene esos componentes, el especial se comporta igual que antes."""
+    st.markdown(titulo_seccion("⭐ Especiales"), unsafe_allow_html=True)
+    if not productos:
+        st.markdown('<p style="color:#a3a39b; font-size:0.85rem;">Sin opciones disponibles.</p>',
+                    unsafe_allow_html=True)
+        return []
+    ofrece_entrada = bool(comp.get("entrada"))
+    ofrece_bebida  = bool(comp.get("bebida"))
+    carrito = st.session_state["carrito_manual"]
+    elegidos = []
+    for p in productos:
+        pid = int(p["id"])
+        key = f"especial:{pid}"
+        qty = carrito.get(key, 0)
+        c_nom, c_qty = st.columns([3, 2])
+        with c_nom:
+            desc = (f'<div style="font-size:0.76rem; color:#a3a39b; font-style:italic;">'
+                    f'{html.escape(str(p.get("descripcion") or ""))}</div>'
+                    if p.get("descripcion") else "")
+            st.markdown(
+                f'<div style="padding:6px 0;"><span style="font-size:0.9rem; color:#26262b;">'
+                f'{html.escape(str(p["nombre"]))}</span>{desc}'
+                f'<div style="font-size:0.82rem; color:#6b6b64;">${fmt_money(p["precio"])}'
+                f'{_stock_suffix(p.get("stock"))}</div></div>',
+                unsafe_allow_html=True,
+            )
+        with c_qty:
+            m, q, pl = st.columns([1, 1, 1])
+            with m:
+                if st.button("−", key=f"menos_{key}", use_container_width=True):
+                    if qty > 0:
+                        carrito[key] = qty - 1
+                        if carrito[key] == 0:
+                            del carrito[key]
+                    st.rerun(scope="fragment")
+            with q:
+                st.markdown(f'<div style="text-align:center; padding:4px 0; font-weight:600;">{qty}</div>',
+                            unsafe_allow_html=True)
+            with pl:
+                tope = (p.get("stock") is not None and qty >= int(p["stock"]))
+                if st.button("+", key=f"mas_{key}", use_container_width=True, disabled=tope):
+                    carrito[key] = qty + 1
+                    st.rerun(scope="fragment")
+
+        cfg = {}
+        # Entrada/bebida del Plato del Día incluidas: solo se ofrecen si el especial está
+        # en el carrito y el restaurante tiene esos componentes. "Ninguno" por defecto.
+        if qty > 0 and (ofrece_entrada or ofrece_bebida):
+            uid = f"esp_{pid}"
+            if ofrece_entrada:
+                ent = _selector_grupo(uid, "entrada", comp["entrada"], "Entrada (incluida)",
+                                      default_ninguno=True)
+                if ent:
+                    cfg["entrada"] = ent
+            if ofrece_bebida:
+                beb = _selector_grupo(uid, "bebida", comp["bebida"], "Bebida (incluida)",
+                                      default_ninguno=True)
+                if beb:
+                    cfg["bebida"] = beb
+
+        if qty > 0:
+            item = {"tipo": "especial", "id": pid, "nombre": p["nombre"],
+                    "precio": int(p["precio"]), "cantidad": qty}
+            if cfg:
+                item["config"] = cfg
+            elegidos.append(item)
+    return elegidos
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # SECCIÓN: NUEVO PEDIDO
 # ══════════════════════════════════════════════════════════════════════════════
@@ -462,8 +538,7 @@ def _form_fragment():
                                         placeholder="Dirección + referencias") or "").strip()
 
         plates, ok_pd = _seccion_plato_dia(comp, precio_pd, n_ac)
-        items_esp = _seccion_catalogo(_catalogo_seccion(df_cat, "especial"), "especial",
-                                      "⭐ Especiales", con_desc=True)
+        items_esp = _seccion_especiales(_catalogo_seccion(df_cat, "especial"), comp)
         items_alc = _seccion_catalogo(_catalogo_seccion(df_cat, "a_la_carta"), "item",
                                       "🍽️ A la carta")
         items_adi = _seccion_catalogo(_catalogo_seccion(df_cat, "adicional"), "adicional",
@@ -497,11 +572,19 @@ def _form_fragment():
                 </div>""", unsafe_allow_html=True)
             else:
                 sub = int(it["precio"]) * int(it["cantidad"])
+                # Un especial puede traer entrada/bebida incluidas: se muestran debajo.
+                extra = ""
+                if it.get("config"):
+                    cfg_txt = _cfg_text(it)
+                    if cfg_txt:
+                        extra = (f'<div style="font-size:0.74rem; color:#a3a39b;">'
+                                 f'{html.escape(cfg_txt)}</div>')
                 st.markdown(f"""
-                <div style="display:flex; justify-content:space-between; padding:6px 0;
-                            border-bottom:1px solid #ececec; font-size:0.85rem;">
-                    <span style="color:#26262b;">{it["cantidad"]}x {html.escape(str(it["nombre"]))}</span>
-                    <span style="color:#6b6b64;">${fmt_money(sub)}</span>
+                <div style="padding:6px 0; border-bottom:1px solid #ececec; font-size:0.85rem;">
+                    <div style="display:flex; justify-content:space-between;">
+                      <span style="color:#26262b;">{it["cantidad"]}x {html.escape(str(it["nombre"]))}</span>
+                      <span style="color:#6b6b64;">${fmt_money(sub)}</span>
+                    </div>{extra}
                 </div>""", unsafe_allow_html=True)
 
         # Línea de recargo (solo entrega).

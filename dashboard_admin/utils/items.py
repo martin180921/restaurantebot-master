@@ -67,11 +67,15 @@ def _agrupa_acomp(acomp) -> str:
 
 
 def componentes_lineas(item):
-    """[[etiqueta, valor], ...] de un plato_dia: entrada/principio/proteína/acomp +
-    nota. Listas (no tuplas) para serializar limpio a JSON. [] si no es plato_dia."""
-    if item_tipo(item) != "plato_dia":
-        return []
+    """[[etiqueta, valor], ...] del desglose de un item según su config:
+      · plato_dia → entrada/principio/proteína/acomp + bebida + nota.
+      · especial  → entrada + bebida del Plato del Día INCLUIDAS (opcionales); los demás
+                    grupos no existen en su config, así que se omiten solos.
+    Listas (no tuplas) para serializar limpio a JSON. [] si el item no trae config
+    (especial sin extras, a la carta, bebida o legado)."""
     cfg = item.get("config") or {}
+    if not cfg:
+        return []
     out = []
     for g in ("entrada", "principio", "proteina"):
         v = cfg.get(g)
@@ -91,12 +95,12 @@ def componentes_lineas(item):
 
 def etiqueta_item(item) -> str:
     """Texto plano de UN item para resúmenes en línea (sin prefijo de cantidad). El
-    Plato del Día incluye su desglose entre paréntesis."""
+    Plato del Día —y un especial con entrada/bebida incluidas— añade su desglose entre
+    paréntesis."""
     nombre = str(item.get("nombre") or "?")
-    if item_tipo(item) == "plato_dia":
-        partes = [v for _, v in componentes_lineas(item)]
-        if partes:
-            return f"{nombre} ({' · '.join(partes)})"
+    partes = [v for _, v in componentes_lineas(item)]
+    if partes:
+        return f"{nombre} ({' · '.join(partes)})"
     return nombre
 
 
@@ -114,9 +118,10 @@ def formatear_items_html(raw) -> str:
 
 
 def _agrupar(raw):
-    """[(tipo, [{nombre, cantidad, componentes}, ...]), ...] en ORDEN_CAT. Los
-    plato_dia van individuales (cada plato tiene su propia config); los simples se
-    agregan por nombre dentro de su categoría."""
+    """[(tipo, [{nombre, cantidad, componentes}, ...]), ...] en ORDEN_CAT. Van
+    individuales (con su desglose) los plato_dia y los especiales que traen entrada/bebida
+    incluidas; el resto (incl. especiales sin extras) se agrega por nombre dentro de su
+    categoría."""
     items = parse_items(raw)
     buckets = {c: [] for c in ORDEN_CAT}
     indices = {}
@@ -124,9 +129,10 @@ def _agrupar(raw):
         tipo = item_tipo(it)
         qty = int(it.get("cantidad", 1) or 1)
         nombre = str(it.get("nombre") or "?")
-        if tipo == "plato_dia":
+        comp = componentes_lineas(it)
+        if tipo == "plato_dia" or comp:
             buckets[tipo].append({"nombre": nombre, "cantidad": qty,
-                                  "componentes": componentes_lineas(it)})
+                                  "componentes": comp})
         else:
             key = (tipo, nombre)
             if key in indices:

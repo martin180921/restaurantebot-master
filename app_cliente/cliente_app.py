@@ -378,29 +378,37 @@ def _descontar_inventario(conn, items) -> None:
     SinStock → revienta el txn (rollback del pedido). Recorre ORDENADO (orden de bloqueo
     determinista → sin deadlocks entre pedidos concurrentes)."""
     comp_qty, menu_qty = {}, {}
+
+    def _acumular_config(cfg, cant):
+        # Un especial solo trae entrada/bebida → los demás grupos faltan y se omiten solos.
+        for g in ("entrada", "principio", "proteina", "bebida"):
+            v = cfg.get(g)
+            if v:
+                k = (g, str(v).strip().lower())
+                comp_qty[k] = comp_qty.get(k, 0) + cant
+        for a in (cfg.get("acompanamientos") or []):
+            if a:
+                k = ("acompanamiento", str(a).strip().lower())
+                comp_qty[k] = comp_qty.get(k, 0) + cant
+
     for it in (items or []):
         if not isinstance(it, dict):
             continue
         cant = int(it.get("cantidad", 1) or 1)
         if cant <= 0:
             continue
+        cfg = it.get("config") or {}
         if str(it.get("tipo") or "item").lower() == "plato_dia":
-            cfg = it.get("config") or {}
-            for g in ("entrada", "principio", "proteina", "bebida"):
-                v = cfg.get(g)
-                if v:
-                    k = (g, str(v).strip().lower())
-                    comp_qty[k] = comp_qty.get(k, 0) + cant
-            for a in (cfg.get("acompanamientos") or []):
-                if a:
-                    k = ("acompanamiento", str(a).strip().lower())
-                    comp_qty[k] = comp_qty.get(k, 0) + cant
+            _acumular_config(cfg, cant)
         else:
             try:
                 mid = int(it.get("id"))
             except (TypeError, ValueError):
                 continue
             menu_qty[mid] = menu_qty.get(mid, 0) + cant
+            # Entrada/bebida del Plato del Día incluidas en un especial.
+            if cfg:
+                _acumular_config(cfg, cant)
 
     faltan = []
     for (grupo, nombre_l), n in sorted(comp_qty.items()):
@@ -461,9 +469,11 @@ def _agrupa_acomp(acomp) -> str:
 
 
 def _componentes_lineas(it):
-    if _item_tipo(it) != "plato_dia":
-        return []
+    # Desglose desde la config: completo para el plato_dia; entrada+bebida para un especial
+    # con extras incluidos. [] si el item no trae config.
     cfg = it.get("config") or {}
+    if not cfg:
+        return []
     out = []
     for g in ("entrada", "principio", "proteina"):
         v = cfg.get(g)
@@ -492,9 +502,10 @@ def _items_para_ticket(items):
         tipo = _item_tipo(it)
         qty = int(it.get("cantidad", 1) or 1)
         nombre = str(it.get("nombre") or "?")
-        if tipo == "plato_dia":
+        comps = _componentes_lineas(it)
+        if tipo == "plato_dia" or comps:
             buckets[tipo].append({"tipo": tipo, "nombre": nombre, "cantidad": qty,
-                                  "componentes": _componentes_lineas(it)})
+                                  "componentes": comps})
         else:
             key = (tipo, nombre)
             if key in indices:
@@ -916,6 +927,71 @@ def _seccion_catalogo(productos, tipo, con_desc=False):
     return elegidos
 
 
+def _seccion_especiales(productos, comp):
+    """Especiales: stepper por producto (precio + descripción) y, si el restaurante tiene
+    entradas/bebidas del Plato del Día, dos selectores OPCIONALES (Entrada / Bebida) que
+    van INCLUIDOS sin costo (radio con 'Ninguno', por defecto 'Ninguno'). La selección se
+    comparte para todas las unidades del mismo especial. Si no hay esos componentes, el
+    especial se comporta igual que antes (solo stepper)."""
+    if not productos:
+        st.markdown('<div class="c-empty">No disponible por ahora.</div>', unsafe_allow_html=True)
+        return []
+    disp_ent = [e for e in comp.get("entrada", []) if not _agotado(e)]
+    disp_beb = [b for b in comp.get("bebida", []) if not _agotado(b)]
+    nom_ent = [e["nombre"] for e in disp_ent]
+    nom_beb = [b["nombre"] for b in disp_beb]
+    stock_ent = {e["nombre"]: e.get("stock") for e in disp_ent}
+    stock_beb = {b["nombre"]: b.get("stock") for b in disp_beb}
+    carrito = st.session_state["cart"]
+    elegidos = []
+    for p in productos:
+        pid = int(p["id"])
+        key = f"especial:{pid}"
+        qty = carrito.get(key, 0)
+        c_info, c_step = st.columns([3, 2])
+        with c_info:
+            desc = (f'<div class="c-desc">{html.escape(str(p.get("descripcion") or ""))}</div>'
+                    if p.get("descripcion") else "")
+            st.markdown(
+                f'<div style="padding:8px 0;"><span class="c-name">{html.escape(str(p["nombre"]))}</span>'
+                f'{desc}<div class="c-price">${fmt_money(p["precio"])}{_disp_suffix(p.get("stock"))}</div></div>',
+                unsafe_allow_html=True,
+            )
+        with c_step:
+            tope = (p.get("stock") is not None and qty >= int(p["stock"]))
+            _stepper(key, qty, permitir_mas=not tope)
+
+        cfg = {}
+        # Extras incluidos: solo cuando el especial está en el carrito y hay componentes.
+        if qty > 0 and (nom_ent or nom_beb):
+            if nom_ent:
+                _sanea_radio(f"esp_{pid}_entrada", ["Ninguno"] + nom_ent)
+                st.markdown('<div class="conf-label">Entrada (incluida)</div>', unsafe_allow_html=True)
+                ent = st.radio("Entrada", ["Ninguno"] + nom_ent, key=f"esp_{pid}_entrada",
+                               format_func=lambda nm: nm if nm == "Ninguno"
+                               else f"{nm}{_disp_suffix(stock_ent.get(nm))}",
+                               label_visibility="collapsed")
+                if ent and ent != "Ninguno":
+                    cfg["entrada"] = ent
+            if nom_beb:
+                _sanea_radio(f"esp_{pid}_bebida", ["Ninguno"] + nom_beb)
+                st.markdown('<div class="conf-label">Bebida (incluida)</div>', unsafe_allow_html=True)
+                beb = st.radio("Bebida", ["Ninguno"] + nom_beb, key=f"esp_{pid}_bebida",
+                               format_func=lambda nm: nm if nm == "Ninguno"
+                               else f"{nm}{_disp_suffix(stock_beb.get(nm))}",
+                               label_visibility="collapsed")
+                if beb and beb != "Ninguno":
+                    cfg["bebida"] = beb
+
+        if qty > 0:
+            item = {"tipo": "especial", "id": pid, "nombre": p["nombre"],
+                    "precio": int(p["precio"]), "cantidad": qty}
+            if cfg:
+                item["config"] = cfg
+            elegidos.append(item)
+    return elegidos
+
+
 def _seccion_plato_dia(comp, precio, n):
     """Configurador del Plato del Día. Devuelve (items, ok) — ok=False si algún plato
     no tiene exactamente n acompañamientos."""
@@ -1085,7 +1161,14 @@ def _filas_resumen_html(items) -> str:
                       f'<div class="cfg">{html.escape(_resumen_item_cfg(it))}</div></span>'
                       f'<span>${fmt_money(it["precio"])}</span></div>')
         else:
-            filas += (f'<div class="c-row"><span>{it["cantidad"]}× {html.escape(str(it["nombre"]))}</span>'
+            # Un especial puede traer entrada/bebida incluidas: se muestran bajo el nombre.
+            cfg_html = ""
+            if it.get("config"):
+                cfg_txt = _resumen_item_cfg(it)
+                if cfg_txt:
+                    cfg_html = f'<div class="cfg">{html.escape(cfg_txt)}</div>'
+            filas += (f'<div class="c-row"><span>{it["cantidad"]}× {html.escape(str(it["nombre"]))}'
+                      f'{cfg_html}</span>'
                       f'<span>${fmt_money(int(it["precio"]) * int(it["cantidad"]))}</span></div>')
     return filas
 
@@ -1155,7 +1238,8 @@ def _dialog_confirmar():
                     # Limpia la carta y la config de platos del día. La MESA se conserva: el
                     # comensal sigue en la misma mesa y puede pedir de nuevo (req #3).
                     st.session_state["cart"] = {}
-                    for k in [k for k in st.session_state if str(k).startswith("pd_")]:
+                    for k in [k for k in st.session_state
+                              if str(k).startswith("pd_") or str(k).startswith("esp_")]:
                         del st.session_state[k]
                     st.session_state.pop("notas_generales", None)
                     st.session_state.pop("c_modo_mesa", None)
@@ -1177,9 +1261,9 @@ def _render_secciones(comp, cat, ajustes):
     # #1 Plato del Día
     items_pd, ok_pd = _seccion_plato_dia(comp, pd_precio, n_ac)
 
-    # #2 Especiales
+    # #2 Especiales (con entrada/bebida del Plato del Día incluidas, opcionales)
     st.markdown('<div class="c-section">⭐ Especiales</div>', unsafe_allow_html=True)
-    items_esp = _seccion_catalogo(cat.get("especial", []), "especial", con_desc=True)
+    items_esp = _seccion_especiales(cat.get("especial", []), comp)
 
     # #3 A la carta (+ sub-grupos Adicionales y Bebidas)
     st.markdown('<div class="c-section">🍽️ A la carta</div>', unsafe_allow_html=True)
@@ -1356,7 +1440,8 @@ def _carta_delivery(comp, cat, ajustes):
                 }
                 # Limpia la carta y la configuración de platos del día.
                 st.session_state["cart"] = {}
-                for k in [k for k in st.session_state if str(k).startswith("pd_")]:
+                for k in [k for k in st.session_state
+                          if str(k).startswith("pd_") or str(k).startswith("esp_")]:
                     del st.session_state[k]
                 st.session_state.pop("notas_generales", None)
                 st.session_state.pop("c_metodo", None)
