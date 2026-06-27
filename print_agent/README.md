@@ -99,3 +99,8 @@ imprimir duplicados. Para reintentar un fallo: `UPDATE print_jobs SET estado='pe
 El cajón se abre **solo en pagos en efectivo**: el panel pone `abrir_cajon:true` en el
 payload y el agente envía el pulso `\x1b\x70\x00\x19\x96` al inicio del buffer. En
 transferencia no se abre.
+
+# Re start para actualizaciones 
+Stop-ScheduledTask  -TaskName PrintAgent
+Start-ScheduledTask -TaskName PrintAgent
+Get-ScheduledTask   -TaskName PrintAgent
