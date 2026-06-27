@@ -4,11 +4,11 @@ Pestañas (la misma taxonomía que ven el POS y la app del cliente):
   🍽️ Plato del Día  → componentes por grupo (entrada / principio / proteína /
                        acompañamientos). Cada opción se activa, se marca "86" (agotado
                        hoy), se renombra o se elimina. Precio plano editable en Ajustes.
-  ⭐ Especiales     → platos con descripción de lo que incluyen; precio plano de la
-                       categoría (todos cuestan igual).
+  ⭐ Especiales     → platos con su propio precio + descripción de lo que incluyen
+                       (cada especial puede costar distinto).
   📋 A la carta     → platos sueltos con su propio precio.
   🥤 Bebidas        → bebidas con su propio precio.
-  ⚙️ Ajustes        → precios planos (Plato del Día y Especiales), recargo de entrega
+  ⚙️ Ajustes        → precio plano del Plato del Día, recargo de entrega
                        (Domicilio / Para Llevar) y nº de acompañamientos a elegir.
 
 Reusa los patrones del panel: tarjetas (.menu-card), modales @st.dialog, toasts
@@ -28,7 +28,7 @@ import auth
 from db import (engine, titulo_seccion, cargar_menu, cargar_componentes, cargar_catalogo,
                 cargar_ajustes, fmt_money, flash, disponibles,
                 componentes_activos_por_grupo, precio_plato_dia, num_acompanamientos,
-                GRUPOS_COMPONENTE, GRUPO_LABEL, precio_especiales,
+                GRUPOS_COMPONENTE, GRUPO_LABEL,
                 guardar_inventario, stock_int, STOCK_BAJO, agotado_por_stock)
 
 
@@ -203,8 +203,7 @@ def quitar_agotado_componente(cid: int):
 # DB: catálogo por categoría (tabla menu: especial / a_la_carta / bebida)
 # ══════════════════════════════════════════════════════════════════════════════
 def agregar_item(categoria: str, nombre: str, precio: int, descripcion=None):
-    # Especiales: precio plano de la categoría (se ignora cualquier precio entrante).
-    precio = precio_especiales() if categoria == "especial" else int(precio)
+    precio = int(precio)
     with engine.begin() as conn:
         mx = conn.execute(text("SELECT COALESCE(MAX(orden),0) FROM menu WHERE categoria = :c"),
                           {"c": categoria}).scalar()
@@ -288,11 +287,6 @@ def guardar_ajustes(d: dict):
                 "INSERT INTO ajustes (clave, valor) VALUES (:k, :v) "
                 "ON CONFLICT (clave) DO UPDATE SET valor = EXCLUDED.valor"
             ), {"k": clave, "v": str(valor)})
-        # El precio de Especiales es plano: al cambiarlo, alinea TODAS las especiales
-        # (mantiene menu.precio usable en cualquier lectura, incl. la heredada).
-        if "especiales_precio" in d:
-            conn.execute(text("UPDATE menu SET precio = :p WHERE categoria = 'especial'"),
-                         {"p": int(d["especiales_precio"])})
     cargar_ajustes.clear()
     _clear_menu_caches()
     flash("Ajustes guardados", "✅")
@@ -485,14 +479,14 @@ def _componente_card(row, grupo: str):
 # ══════════════════════════════════════════════════════════════════════════════
 # Pestañas 2–4 · Catálogo (Especiales / A la carta / Bebidas)
 # ══════════════════════════════════════════════════════════════════════════════
-def _enter_edit(categoria: str, row, con_precio: bool):
+def _enter_edit(categoria: str, row, con_precio: bool, con_desc: bool = False):
     # Escribimos DIRECTO en las claves de los widgets (no en defaults aparte) para
     # esquivar el gotcha de Streamlit: un widget con key ignora value= si ya hay estado.
     st.session_state[f"ed_{categoria}_id"] = int(row["id"])
     st.session_state[f"in_{categoria}_nombre"] = str(row["nombre"])
     if con_precio:
         st.session_state[f"in_{categoria}_precio"] = int(row["precio"])
-    else:
+    if con_desc:
         st.session_state[f"in_{categoria}_desc"] = _txt(row.get("descripcion"))
 
 
@@ -502,7 +496,7 @@ def _clear_edit(categoria: str):
     st.session_state.pop(f"ed_{categoria}_id", None)
 
 
-def _render_catalogo_tab(categoria: str, label: str, con_precio: bool):
+def _render_catalogo_tab(categoria: str, label: str, con_precio: bool, con_desc: bool = False):
     df = cargar_catalogo()
     sub = df[df["categoria"] == categoria].copy() if not df.empty else df
 
@@ -510,9 +504,6 @@ def _render_catalogo_tab(categoria: str, label: str, con_precio: bool):
 
     with col_lista:
         st.markdown(f'<div class="section-title">{label}</div>', unsafe_allow_html=True)
-        if not con_precio:
-            st.caption(f"Precio plano de la categoría: ${fmt_money(precio_especiales())}. "
-                       "Cámbialo en ⚙️ Ajustes (se aplica a todas por igual).")
 
         if sub is None or sub.empty:
             st.markdown('<p style="color:#a3a39b; font-size:0.85rem;">No hay platos en esta sección.</p>',
@@ -526,20 +517,20 @@ def _render_catalogo_tab(categoria: str, label: str, con_precio: bool):
             if _acc_header(f"disp_{categoria}", f"● Disponibles · {len(disp)}", default_open=True):
                 if disp:
                     for row in disp:
-                        _item_card(row, categoria, con_precio)
+                        _item_card(row, categoria, con_precio, con_desc)
                 else:
                     st.markdown('<p style="color:#a3a39b; font-size:0.82rem;">Ninguno disponible ahora.</p>',
                                 unsafe_allow_html=True)
             if no:
                 if _acc_header(f"nodisp_{categoria}", f"○ No disponibles · {len(no)}", default_open=False):
                     for row in no:
-                        _item_card(row, categoria, con_precio)
+                        _item_card(row, categoria, con_precio, con_desc)
 
     with col_form:
-        _item_form(categoria, label, con_precio)
+        _item_form(categoria, label, con_precio, con_desc)
 
 
-def _item_card(row, categoria: str, con_precio: bool):
+def _item_card(row, categoria: str, con_precio: bool, con_desc: bool = False):
     iid = int(row["id"])
     nombre = row["nombre"]
     precio = int(row["precio"])
@@ -557,13 +548,16 @@ def _item_card(row, categoria: str, con_precio: bool):
     elif sin_stock:
         badge += ' <span class="badge badge-agotado">🚫 Sin stock</span>'
 
+    sub_parts = []
     if con_precio:
-        sub_html = f'<div class="menu-precio">${fmt_money(precio)}</div>'
-    elif desc:
-        sub_html = (f'<div class="menu-precio" style="font-style:italic;">'
-                    f'{html.escape(desc)}</div>')
-    else:
-        sub_html = ('<div class="menu-precio" style="color:#d97706;">Sin descripción</div>')
+        sub_parts.append(f'<div class="menu-precio">${fmt_money(precio)}</div>')
+    if con_desc:
+        if desc:
+            sub_parts.append(f'<div class="menu-precio" style="font-style:italic;">'
+                             f'{html.escape(desc)}</div>')
+        else:
+            sub_parts.append('<div class="menu-precio" style="color:#d97706;">Sin descripción</div>')
+    sub_html = "".join(sub_parts)
 
     col_card, col_btns = st.columns([3, 1.4])
     with col_card:
@@ -591,7 +585,7 @@ def _item_card(row, categoria: str, con_precio: bool):
         with b3:
             if st.button("✏️", key=f"edit_{categoria}_{iid}", help="Editar",
                          use_container_width=True):
-                _enter_edit(categoria, row, con_precio)
+                _enter_edit(categoria, row, con_precio, con_desc)
                 st.rerun()
         with b4:
             if st.button("🗑", key=f"eliminar_{categoria}_{iid}", help="Eliminar",
@@ -599,7 +593,7 @@ def _item_card(row, categoria: str, con_precio: bool):
                 _dialog_eliminar_item(iid, str(nombre), categoria)
 
 
-def _item_form(categoria: str, label: str, con_precio: bool):
+def _item_form(categoria: str, label: str, con_precio: bool, con_desc: bool = False):
     editando = f"ed_{categoria}_id" in st.session_state
     st.markdown(f'<div class="section-title">{"Editar" if editando else "Agregar"}</div>',
                 unsafe_allow_html=True)
@@ -610,11 +604,9 @@ def _item_form(categoria: str, label: str, con_precio: bool):
     if con_precio:
         precio_val = st.number_input("Precio", min_value=0, step=1000,
                                      key=f"in_{categoria}_precio")
-    else:
-        st.caption(f"Precio plano: ${fmt_money(precio_especiales())} (editable en Ajustes).")
 
     desc = None
-    if not con_precio:
+    if con_desc:
         desc = st.text_area("Descripción (qué incluye)", key=f"in_{categoria}_desc",
                             placeholder="Ej: incluye todos los acompañamientos")
 
@@ -629,8 +621,7 @@ def _item_form(categoria: str, label: str, con_precio: bool):
             else:
                 if editando:
                     actualizar_item(
-                        st.session_state[f"ed_{categoria}_id"], nombre,
-                        (precio_val if con_precio else precio_especiales()), desc,
+                        st.session_state[f"ed_{categoria}_id"], nombre, precio_val, desc,
                     )
                     _clear_edit(categoria)
                 else:
@@ -662,18 +653,15 @@ def _render_ajustes():
     with c1:
         pd_precio = st.number_input("Precio Plato del Día", min_value=0, step=1000,
                                     value=_int_aj(aj, "plato_dia_precio", 0), key="aj_plato_dia")
-        esp_precio = st.number_input("Precio Especiales (plano)", min_value=0, step=1000,
-                                     value=_int_aj(aj, "especiales_precio", 0), key="aj_especiales")
-    with c2:
         fee = st.number_input("Recargo de entrega (Domicilio / Para Llevar)", min_value=0,
                               step=500, value=_int_aj(aj, "fee_entrega", 0), key="aj_fee")
+    with c2:
         n_ac = st.number_input("Acompañamientos a elegir", min_value=1, max_value=6, step=1,
                                value=_int_aj(aj, "acompanamientos_n", 3), key="aj_n_ac")
 
     if st.button("💾 Guardar ajustes", type="primary", key="btn_guardar_ajustes"):
         guardar_ajustes({
             "plato_dia_precio": int(pd_precio),
-            "especiales_precio": int(esp_precio),
             "fee_entrega": int(fee),
             "acompanamientos_n": int(n_ac),
         })
@@ -684,7 +672,7 @@ def _render_ajustes():
         'padding:1rem; font-size:0.78rem; color:#6b6b64; margin-top:1rem;">'
         '<div style="color:#45443e; font-weight:600; margin-bottom:6px;">💡 Cómo se aplican</div>'
         'El <b>Plato del Día</b> cuesta lo mismo sin importar la combinación elegida.<br>'
-        'Las <b>Especiales</b> comparten un único precio: al cambiarlo, se actualizan todas.<br>'
+        'Cada <b>Especial</b> tiene su propio precio (se edita en la pestaña ⭐ Especiales).<br>'
         'El <b>recargo de entrega</b> se suma una vez a cada pedido de Domicilio o Para Llevar.'
         '</div>',
         unsafe_allow_html=True,
@@ -1016,9 +1004,10 @@ def importar_menu(filas, modo_stock: str = "sobrescribir") -> dict:
                 ex = conn.execute(text(
                     "SELECT id, stock FROM menu WHERE categoria = :c AND LOWER(nombre) = LOWER(:n)"
                 ), {"c": categoria, "n": nombre}).mappings().first()
-                # Especiales: precio plano de la categoría; el resto usa el del archivo.
-                precio = precio_especiales() if categoria == "especial" else f["precio"]
-                if not ex and categoria != "especial" and (precio is None or precio <= 0):
+                # Todas las categorías de catálogo (especial/a la carta/adicional/bebida)
+                # usan el precio del archivo.
+                precio = f["precio"]
+                if not ex and (precio is None or precio <= 0):
                     res["omitidos"].append(
                         f"Fila {f['fila']}: «{nombre}» sin precio válido (requerido para "
                         f"un plato/bebida nuevo).")
@@ -1027,9 +1016,7 @@ def importar_menu(filas, modo_stock: str = "sobrescribir") -> dict:
                 if ex:
                     sets = ["activo = :a", "stock = :s"]
                     params = {"a": f["activo"], "s": nuevo_stock, "id": ex["id"]}
-                    if categoria == "especial":
-                        sets.append("precio = :p"); params["p"] = int(precio)
-                    elif precio is not None:           # precio en blanco → conserva el actual
+                    if precio is not None:             # precio en blanco → conserva el actual
                         sets.append("precio = :p"); params["p"] = int(precio)
                     if f["descripcion"] is not None:   # descr en blanco → conserva la actual
                         sets.append("descripcion = :d"); params["d"] = f["descripcion"]
@@ -1058,7 +1045,7 @@ def _plantilla_csv() -> bytes:
         ["principio", "Frijol", "", "", "40", "si"],
         ["proteina", "Pollo", "", "", "40", "si"],
         ["acompanamiento", "Arroz", "", "", "100", "si"],
-        ["especial", "Bandeja Paisa", "Frijol, arroz, carne, chicharrón, huevo", "", "20", "si"],
+        ["especial", "Bandeja Paisa", "Frijol, arroz, carne, chicharrón, huevo", "22000", "20", "si"],
         ["a_la_carta", "Hamburguesa clásica", "", "25000", "30", "si"],
         ["bebida", "Limonada natural", "", "5000", "", "si"],
     ]
@@ -1079,7 +1066,7 @@ PLANTILLA_EJEMPLOS = [
     ["Proteína", "Pollo a la plancha", None, None, 40, "Sí"],
     ["Acompañamiento", "Arroz blanco", None, None, 100, "Sí"],
     ["Especiales", "Bandeja Paisa", "Frijol, arroz, carne, chicharrón, huevo, plátano",
-     None, 20, "Sí"],
+     22000, 20, "Sí"],
     ["A la carta", "Hamburguesa clásica", "Carne 150g, queso y papas", 25000, 30, "Sí"],
     ["Bebidas", "Limonada natural", "Vaso 16oz", 5000, None, "Sí"],
 ]
@@ -1121,8 +1108,8 @@ def _plantilla_xlsx() -> bytes:
             "Acompañamiento van al PLATO DEL DÍA. Especiales · A la carta · Bebidas van a la carta."),
         2: "Nombre del ítem. Si ya existe en esa sección, se ACTUALIZA (no se duplica).",
         3: "Opcional. Lo que incluye (sobre todo útil en Especiales).",
-        4: ("Precio en pesos, solo el número (ej: 25000). A la carta y Bebidas: obligatorio "
-            "si es nuevo. Especiales usan el precio plano de Ajustes. Componentes: sin precio."),
+        4: ("Precio en pesos, solo el número (ej: 25000). Especiales, A la carta y Bebidas: "
+            "obligatorio si es nuevo. Componentes del Plato del Día: sin precio."),
         5: "Cantidad de hoy. VACÍO = ilimitado / no cambia el contador. 0 = agotado.",
         6: "Sí = se ofrece · No = inactivo.",
     }
@@ -1177,7 +1164,7 @@ def _plantilla_xlsx() -> bytes:
               "Al subirla verás una vista previa antes de guardar."),
         ("h", "Sección (obligatoria · lista desplegable)"),
         ("p", "• Entrada / Principio / Proteína / Acompañamiento → componentes del Plato del Día."),
-        ("p", "• Especiales → platos especiales (precio plano definido en Ajustes)."),
+        ("p", "• Especiales → platos especiales con su propio precio (y descripción de lo que incluyen)."),
         ("p", "• A la carta → platos sueltos con su propio precio."),
         ("p", "• Bebidas → bebidas con su propio precio."),
         ("h", "Nombre (obligatorio)"),
@@ -1185,8 +1172,8 @@ def _plantilla_xlsx() -> bytes:
         ("h", "Descripción (opcional)"),
         ("p", "Lo que incluye el plato. Recomendado en Especiales."),
         ("h", "Precio"),
-        ("p", "Solo el número, en pesos (ej: 25000). Obligatorio para A la carta y Bebidas "
-              "nuevas. Especiales lo ignoran (usan el precio plano). Componentes no llevan precio."),
+        ("p", "Solo el número, en pesos (ej: 25000). Obligatorio para Especiales, A la carta y "
+              "Bebidas nuevas. Componentes del Plato del Día no llevan precio."),
         ("h", "Stock (inventario del día)"),
         ("p", "• Un número = porciones/unidades disponibles hoy."),
         ("p", "• Vacío = ilimitado y NO cambia el contador actual (ideal para actualizar solo precios)."),
@@ -1424,7 +1411,7 @@ def render():
     with t1:
         _render_plato_dia()
     with t2:
-        _render_catalogo_tab("especial", "Especiales", con_precio=False)
+        _render_catalogo_tab("especial", "Especiales", con_precio=True, con_desc=True)
     with t3:
         _render_catalogo_tab("a_la_carta", "A la carta", con_precio=True)
     with t4:
