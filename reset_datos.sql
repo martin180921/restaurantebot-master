@@ -11,7 +11,7 @@
 
 BEGIN;
 
--- Orden respeta FK: primero las tablas hijas, luego las padres.
+-- Orden respeta FK: primero las tablas hijas, luego las padres. para bash
 TRUNCATE TABLE
     pago_lineas,
     pagos,
@@ -27,3 +27,6 @@ TRUNCATE TABLE
 RESTART IDENTITY CASCADE;
 
 COMMIT;
+
+-- para psql
+psql $DATABASE_URL -c "TRUNCATE TABLE pago_lineas, pagos, auditoria, sesiones_empleado, movimientos_caja, print_jobs, pedidos, cierres_caja, turnos_caja, claves_mesero, sesiones RESTART IDENTITY CASCADE;"
