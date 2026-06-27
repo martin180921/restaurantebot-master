@@ -1,13 +1,13 @@
-"""Vista Personal: perfiles PERSISTENTES de empleados (mesero/caja/admin) + accesos de
-turno efímeros (legado).
+"""Vista Personal: perfiles PERSISTENTES de empleados (mesero/caja/admin).
 
 FASE 1 amplía esta vista de "solo PINs de turno del mesero" a una gestión de personal:
 el admin/caja crea perfiles con nombre, rol y PIN propio (empleados.py). Cada empleado
 entra con su PIN, queda identificado en la auditoría y su entrada/salida se marca solo
 (clock-in/out). El PIN se muestra UNA vez al crearlo o regenerarlo.
 
-Se conserva el flujo anterior de PIN EFÍMERO de turno (mesero_keys) en un panel aparte
-para no romper despliegues en marcha; los dos sistemas de acceso conviven.
+La gestión de PIN EFÍMERO de turno (mesero_keys) se retiró de esta vista; el backend
+sigue existiendo para no romper despliegues en marcha (el login lo acepta y la caja lo
+revoca al cerrar), pero ya no se generan accesos efímeros nuevos desde aquí.
 """
 import streamlit as st
 import html
@@ -15,7 +15,6 @@ import html
 import auth
 import audit
 import empleados
-import mesero_keys
 from db import flash, titulo_seccion
 
 
@@ -109,8 +108,8 @@ def render():
         unsafe_allow_html=True,
     )
 
-    # Solo el ADMINISTRADOR crea/gestiona perfiles de empleado. Caja conserva los accesos
-    # de turno efímeros (abajo) para dar acceso temporal a un mesero sin perfil fijo.
+    # Solo el ADMINISTRADOR crea/gestiona perfiles de empleado; caja queda en modo de
+    # solo lectura sobre el roster (con sus acciones de turno: Salida/Reactivar).
     puede_gestionar = auth.can("manage_empleados")
 
     _mostrar_pin_generado()
@@ -119,8 +118,7 @@ def render():
         if st.button("➕ Nuevo empleado", key="btn_nuevo_emp", use_container_width=True):
             _dialog_nuevo_empleado()
     else:
-        st.caption("🔒 Solo un administrador puede crear o gestionar perfiles de empleado. "
-                   "Como caja puedes generar accesos de turno efímeros (más abajo).")
+        st.caption("🔒 Solo un administrador puede crear o gestionar perfiles de empleado.")
 
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown('<div class="section-title">Empleados</div>', unsafe_allow_html=True)
@@ -203,43 +201,3 @@ def render():
                 if st.button("🗑 Eliminar", key=f"del_{eid}", use_container_width=True,
                              help="Borrar el perfil de forma permanente"):
                     _dialog_eliminar_empleado(eid, nombre, rol)
-
-    # ── Accesos de turno efímeros (legado, opcional) ────────────────────────────
-    st.markdown("<br>", unsafe_allow_html=True)
-    with st.expander("🔑 Accesos de turno efímeros (legado)"):
-        st.caption("PIN temporal para un mesero sin perfil fijo; se revoca al cerrar la caja. "
-                   "Para personal habitual usa un empleado con PIN propio (arriba).")
-
-        pin = st.session_state.get("_pin_generado")
-        if pin is not None:
-            if pin == "ERROR":
-                st.error("No se pudo generar el PIN. Intenta de nuevo.")
-            else:
-                st.success("PIN de turno generado · entrégaselo al mesero:")
-                st.code(pin, language=None)
-            if st.button("Ocultar", key="ocultar_pin", use_container_width=True):
-                st.session_state.pop("_pin_generado", None)
-                st.rerun()
-
-        etiqueta = st.text_input("Nombre del mesero (opcional)", key="nuevo_mesero_nombre",
-                                 placeholder="Ej: Temporal sábado")
-        if st.button("Generar PIN de turno", key="btn_gen_efimero", use_container_width=True):
-            st.session_state["_pin_generado"] = (
-                mesero_keys.generar_clave(etiqueta, auth.actor()[0]) or "ERROR")
-            st.rerun()
-
-        activas_ef = mesero_keys.claves_activas()
-        if activas_ef:
-            st.markdown("**Accesos de turno activos**")
-            for k in activas_ef:
-                kid = int(k["id"])
-                nombre = str(k.get("etiqueta") or "Mesero")
-                col_a, col_b = st.columns([3, 1])
-                with col_a:
-                    st.markdown(f'🔑 {html.escape(nombre)}')
-                with col_b:
-                    if st.button("⏹ Cerrar", key=f"revoke_mesero_{kid}",
-                                 use_container_width=True):
-                        mesero_keys.revocar_clave(kid)
-                        flash(f"Acceso cerrado · {nombre}", "🔒")
-                        st.rerun()
