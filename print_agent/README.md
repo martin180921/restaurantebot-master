@@ -79,6 +79,14 @@ este modo exige cambiar el driver a WinUSB con Zadig (la impresora deja de ser u
 - **`comanda`** — ticket de **cocina**, se encola cuando un pedido pasa a
   *"en preparación"* (botón ▶ Iniciar preparación). Solo mesa/cliente + ítems en
   grande, **sin precios ni cajón**.
+- **`prerecibo`** — **pre-cuenta** para el cliente antes de pagar (botón **🖨 Ticket**
+  del Monitor). Mismo layout que el `recibo` (ítems + total en **Fuente B**) pero con
+  encabezado **PRERECIBO** ("NO ES FACTURA VÁLIDA") y la **Mesa** bien visible.
+  **Sin desglose de pago ni cajón.**
+
+> El **cuerpo** del `recibo` y del `prerecibo` se imprime en **Fuente B** (más pequeña,
+> ~64 col) para gastar menos papel; tras el corte se vuelve a **Fuente A** (~48 col),
+> así las `comanda`s y reportes siguientes salen en el tamaño legible estándar.
 
 ## Estados de un trabajo
 

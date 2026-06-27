@@ -557,8 +557,10 @@ def _detalle_pedido(row, idx: int):
                                    use_container_width=True):
             pedidos.avanzar_estado(pid, estado)  # flashea toast + st.rerun()
     with b2:
-        if st.button("🖨 Ticket", key=f"ticket_{uid}", use_container_width=True):
-            st.session_state["print_ticket_id"] = pid
+        if st.button("🖨 Ticket", key=f"ticket_{uid}", use_container_width=True,
+                     help="Imprimir el prerecibo (pre-cuenta) del cliente"):
+            pedidos.enqueue_prerecibo(pid)
+            pedidos.flash(f"Prerecibo enviado · Pedido #{pid}", "🖨")
             st.rerun()
     with b3:
         if auth.can("cobrar") and st.button(
@@ -739,8 +741,10 @@ def _web_card(row, idx: int):
                                    use_container_width=True):
             pedidos.avanzar_estado(pid, estado)  # flashea toast + st.rerun()
     with b2:
-        if st.button("🖨 Ticket", key=f"ticket_{uid}", use_container_width=True):
-            st.session_state["print_ticket_id"] = pid
+        if st.button("🖨 Ticket", key=f"ticket_{uid}", use_container_width=True,
+                     help="Imprimir el prerecibo (pre-cuenta) del cliente"):
+            pedidos.enqueue_prerecibo(pid)
+            pedidos.flash(f"Prerecibo enviado · Pedido #{pid}", "🖨")
             st.rerun()
     with b3:
         if auth.can("cobrar") and st.button(

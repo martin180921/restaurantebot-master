@@ -27,6 +27,11 @@ CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.j
 
 # Ancho útil de una térmica de 80mm con fuente A: ~48 caracteres.
 ANCHO = 48
+# Fuente B (ESC/POS): más pequeña y ESTRECHA. En una térmica de 80mm caben ~64
+# caracteres. Se usa solo en el CUERPO del recibo/prerecibo del cliente (ítems,
+# totales, pago) para gastar menos papel y que no se vea abultado; el ancho cambia a
+# ANCHO_B para que separadores y precios alineados a la derecha lleguen al borde.
+ANCHO_B = 64
 # Pulso de apertura del cajón SAT (raw ESC p 0 25 150). Va al INICIO del buffer.
 PULSO_CAJON = b"\x1b\x70\x00\x19\x96"
 
@@ -139,7 +144,7 @@ def imprimir_recibo(printer, payload: dict) -> None:
         printer._raw(PULSO_CAJON)
 
     # 2) Encabezado.
-    printer.set(align="center", bold=True, double_height=True, double_width=True)
+    printer.set(font="a", align="center", bold=True, double_height=True, double_width=True)
     printer.text("RECIBO\n")
     printer.set(align="center", bold=False, double_height=False, double_width=False)
     mesa = payload.get("mesa") or "—"
@@ -147,12 +152,16 @@ def imprimir_recibo(printer, payload: dict) -> None:
     printer.text(datetime.now().strftime("%d/%m/%Y  %H:%M") + "\n")
     printer.text("-" * ANCHO + "\n")
 
-    # 3) Ítems agrupados por categoría con sus componentes indentados.
+    # 3) Cuerpo en FUENTE B (más pequeña/estrecha): ítems, totales y pago. Ahorra papel
+    #    y evita el aspecto abultado del recibo del cliente. Es "pegajosa": en escpos>=3.1
+    #    set(font=...) solo emite el comando cuando se pasa font, así que los set() de
+    #    _imprimir_items (que no lo pasan) NO la revierten. El cuerpo usa ANCHO_B.
+    printer.set(font="b")
     _imprimir_items(printer, payload.get("items", []), grande=False)
-    printer.text("-" * ANCHO + "\n")
+    printer.text("-" * ANCHO_B + "\n")
 
     # 4) Totales y desglose de pago.
-    printer.text(linea_precio("Total", payload.get("total", 0)) + "\n")
+    printer.text(linea_precio("Total", payload.get("total", 0), ANCHO_B) + "\n")
     printer.set(bold=True)
     # En transferencia, anexa la billetera (Nequi/Daviplata/Bre-B) a la etiqueta del
     # método: 'Pagado (Transferencia · Nequi)'. En efectivo queda 'Pagado (Efectivo)'.
@@ -161,7 +170,7 @@ def imprimir_recibo(printer, payload: dict) -> None:
         sub = SUBMETODO_LABEL.get(str(payload.get("submetodo") or "").lower())
         if sub:
             metodo = f"{metodo} · {sub}"
-    printer.text(linea_precio(f"Pagado ({metodo})", payload.get("pagado", 0)) + "\n")
+    printer.text(linea_precio(f"Pagado ({metodo})", payload.get("pagado", 0), ANCHO_B) + "\n")
     printer.set(bold=False)
 
     # Comprobante de la transferencia (n.º de transacción), si se registró.
@@ -170,13 +179,13 @@ def imprimir_recibo(printer, payload: dict) -> None:
         printer.text(f"Comp. {comprobante}\n")
 
     if payload.get("metodo") == "efectivo" and payload.get("recibido") is not None:
-        printer.text(linea_precio("Recibido", payload.get("recibido", 0)) + "\n")
-        printer.text(linea_precio("Cambio", payload.get("cambio", 0)) + "\n")
+        printer.text(linea_precio("Recibido", payload.get("recibido", 0), ANCHO_B) + "\n")
+        printer.text(linea_precio("Cambio", payload.get("cambio", 0), ANCHO_B) + "\n")
 
     saldo = int(payload.get("saldo", 0) or 0)
     if saldo > 0:
         printer.set(bold=True)
-        printer.text(linea_precio("SALDO PENDIENTE", saldo) + "\n")
+        printer.text(linea_precio("SALDO PENDIENTE", saldo, ANCHO_B) + "\n")
         printer.set(bold=False)
         printer.set(align="center")
         printer.text("** CUENTA AUN ABIERTA **\n")
@@ -185,12 +194,16 @@ def imprimir_recibo(printer, payload: dict) -> None:
     printer.set(align="center")
     printer.text("\n¡Gracias!\n")
     printer.cut()
+    # La Fuente B solo aplica al recibo del cliente. Tras el corte volvemos a Fuente A
+    # para que las siguientes comandas de cocina / reportes salgan en el tamaño legible
+    # estándar (la impresora conserva la fuente entre trabajos hasta que se cambie).
+    printer.set(font="a")
 
 
 def imprimir_comanda(printer, payload: dict) -> None:
     """Ticket de COCINA: mesa, hora e ítems en grande. Sin precios ni cajón — la
     cocina solo necesita qué preparar y para quién."""
-    printer.set(align="center", bold=True, double_height=True, double_width=True)
+    printer.set(font="a", align="center", bold=True, double_height=True, double_width=True)
     printer.text("COMANDA\n")
     printer.set(align="center", bold=False, double_height=False, double_width=False)
     printer.text(f"{payload.get('mesa') or '—'}\n")
@@ -200,6 +213,47 @@ def imprimir_comanda(printer, payload: dict) -> None:
     _imprimir_items(printer, payload.get("items", []), grande=True)
     printer.text("-" * ANCHO + "\n")
     printer.cut()
+
+
+def imprimir_prerecibo(printer, payload: dict) -> None:
+    """PRERECIBO (pre-cuenta) para el cliente ANTES de pagar — botón "🖨 Ticket".
+
+    Mismo layout que el recibo (mismos ítems en Fuente B + Total) pero con dos
+    diferencias clave: el encabezado dice PRERECIBO con el aviso de que NO es una
+    factura válida, y muestra de forma prominente la MESA de la que proviene la cuenta.
+    Sin pulso de cajón ni desglose de pago: es una cuenta previa para revisar."""
+    # 1) Encabezado PRERECIBO + aviso de que NO es factura (Fuente A, bien visible).
+    printer.set(font="a", align="center", bold=True, double_height=True, double_width=True)
+    printer.text("PRERECIBO\n")
+    printer.set(align="center", bold=False, double_height=False, double_width=False)
+    printer.text("** NO ES FACTURA VALIDA **\n")
+    # 2) MESA siempre visible (requisito): de qué mesa proviene la cuenta.
+    printer.set(bold=True)
+    printer.text(f"Mesa: {payload.get('mesa') or '—'}\n")
+    printer.set(bold=False)
+    printer.text(datetime.now().strftime("%d/%m/%Y  %H:%M") + "\n")
+    printer.text("-" * ANCHO + "\n")
+
+    # 3) Cuerpo en FUENTE B (igual que el recibo): ítems + total.
+    printer.set(font="b")
+    _imprimir_items(printer, payload.get("items", []), grande=False)
+    printer.text("-" * ANCHO_B + "\n")
+    printer.text(linea_precio("Total", payload.get("total", 0), ANCHO_B) + "\n")
+
+    # 4) Abonos previos (cuenta parcialmente pagada) → saldo pendiente.
+    abonado = int(payload.get("pagado", 0) or 0)
+    total = int(payload.get("total", 0) or 0)
+    if abonado > 0:
+        printer.text(linea_precio("Abonado", abonado, ANCHO_B) + "\n")
+        printer.set(bold=True)
+        printer.text(linea_precio("SALDO", max(0, total - abonado), ANCHO_B) + "\n")
+        printer.set(bold=False)
+
+    # 5) Pie + corte. Vuelve a Fuente A para no afectar comandas/reportes posteriores.
+    printer.set(align="center")
+    printer.text("\nCuenta previa - solicite su factura al pagar.\n")
+    printer.cut()
+    printer.set(font="a")
 
 
 # ── Modo prueba (sin BD) ─────────────────────────────────────────────────────────
@@ -315,10 +369,27 @@ def _payload_demo_comanda() -> dict:
     }
 
 
+def _payload_demo_prerecibo() -> dict:
+    """Prerecibo de muestra (misma forma que enqueue_prerecibo): mesa + ítems + total,
+    parcialmente abonado para previsualizar el saldo. Sin método de pago ni cajón."""
+    return {
+        "pedido_id": 0,
+        "mesa": "Mesa 4",
+        "items": [
+            {"tipo": "especial", "nombre": "Bandeja Paisa", "cantidad": 2, "componentes": []},
+            {"tipo": "bebida", "nombre": "Jugo de Mora", "cantidad": 2, "componentes": []},
+        ],
+        "total": 64000,
+        "pagado": 20000,
+        "abrir_cajon": False,
+    }
+
+
 def modo_dry_run() -> int:
-    """Renderiza recibo y comanda de muestra como TEXTO en consola (sin impresora ni BD)."""
+    """Renderiza recibo, prerecibo y comanda de muestra como TEXTO (sin impresora ni BD)."""
     for payload, render_fn in ((_payload_demo(), imprimir_recibo),
                                (_payload_demo_transfer(), imprimir_recibo),
+                               (_payload_demo_prerecibo(), imprimir_prerecibo),
                                (_payload_demo_comanda(), imprimir_comanda)):
         dummy = _DummyPrinter()
         render_fn(dummy, payload)
@@ -459,6 +530,8 @@ def _imprimir_trabajo(conn, trabajo, printer_cfg) -> bool:
         printer = abrir_impresora(printer_cfg)
         if tipo == "comanda":
             imprimir_comanda(printer, payload)
+        elif tipo == "prerecibo":
+            imprimir_prerecibo(printer, payload)
         else:
             imprimir_recibo(printer, payload)
         try:

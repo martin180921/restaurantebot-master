@@ -148,3 +148,35 @@ def enqueue_comanda(pedido_id: int) -> None:
         enqueue_job(RESTAURANTE_ID, "comanda", payload)
     except Exception:
         pass
+
+
+def enqueue_prerecibo(pedido_id: int) -> None:
+    """Encola el PRERECIBO (pre-cuenta) de un pedido — botón "🖨 Ticket".
+
+    Es la cuenta que se entrega al cliente ANTES de pagar: mismos ítems que el recibo
+    + total, encabezado PRERECIBO y la MESA de la que proviene. Sin pago ni cajón. El
+    'pagado' lleva lo ya abonado (total_pagado) para mostrar el saldo si la cuenta es
+    parcial. Tolera fallos: imprimir la pre-cuenta no debe romper el panel.
+    """
+    try:
+        sql = text("""
+            SELECT p.numero_cliente, p.mesa_id, p.items, p.total, p.total_pagado,
+                   m.nombre AS mesa_nombre
+            FROM pedidos p LEFT JOIN mesas m ON m.id = p.mesa_id
+            WHERE p.id = :id
+        """)
+        with engine.connect() as conn:
+            row = conn.execute(sql, {"id": int(pedido_id)}).mappings().first()
+        if not row:
+            return
+        payload = {
+            "pedido_id": int(pedido_id),
+            "mesa": row["mesa_nombre"] or row["numero_cliente"] or f"Pedido #{pedido_id}",
+            "items": items_para_ticket(parse_items(row["items"])),
+            "total": int(row["total"] or 0),
+            "pagado": int(row["total_pagado"] or 0),
+            "abrir_cajon": False,
+        }
+        enqueue_job(RESTAURANTE_ID, "prerecibo", payload)
+    except Exception:
+        pass
