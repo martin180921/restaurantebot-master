@@ -290,10 +290,21 @@ def _ensure_schema():
         ]:
             conn.execute(text(f"ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS {_col} {_ddl}"))
 
-        # num_dia: contador diario del pedido (1, 2, 3… se reinicia cada día). Lo fija
-        # nuevo_pedido al insertar con MAX(num_dia)+1 WHERE fecha::date = CURRENT_DATE.
-        # NULL en pedidos creados antes de esta columna → se muestra el id global.
+        # num_dia: contador diario del pedido (1, 2, 3… se reinicia cada día). Lo asigna
+        # siguiente_num_dia() de forma ATÓMICA vía la tabla contador_dia (no con MAX+1,
+        # que bajo concurrencia daba números duplicados). NULL en pedidos previos a esta
+        # columna → se muestra el id global.
         conn.execute(text("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS num_dia INTEGER"))
+        # contador_dia: una fila por fecha con el último num_dia entregado. El upsert
+        # ON CONFLICT toma el lock de la fila del día → serializa la numeración sin
+        # carreras. La primera vez del día se siembra desde el MAX real para no colisionar
+        # con pedidos ya creados hoy (ver siguiente_num_dia).
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS contador_dia (
+                fecha DATE    PRIMARY KEY,
+                n     INTEGER NOT NULL DEFAULT 0
+            )
+        """))
 
         # Índices del tablero en vivo: el SELECT activo filtra por estado, saldo y fecha
         # de hoy; sin estos cae en seq-scan de toda la tabla bajo carga (ver pedidos.py).
@@ -688,26 +699,99 @@ def inventario_de_items(items):
     return comp_qty, menu_qty
 
 
+class SinStock(Exception):
+    """Se intentó vender más de lo disponible de uno o más ítems CON control de stock.
+    La lanza aplicar_inventario(signo=-1) cuando una opción rastreada no alcanza; al subir
+    por la transacción del INSERT provoca el ROLLBACK del pedido completo (no se vende lo
+    que no hay). 'faltantes' = etiquetas legibles para avisar al mesero/cliente."""
+    def __init__(self, faltantes):
+        self.faltantes = list(faltantes)
+        super().__init__(", ".join(self.faltantes))
+
+
 def aplicar_inventario(conn, items, signo: int) -> None:
     """Aplica el efecto de un pedido sobre el inventario DENTRO de una transacción dada
-    ('conn' debe ser la misma del INSERT/cancelación → atómico). signo=-1 descuenta (al
-    crear el pedido), signo=+1 reintegra (al cancelar antes de 'listo'). Solo toca filas
-    con stock NO NULL (rastreadas); GREATEST(0, …) impide negativos. No lanza: un fallo
-    de inventario no debe abortar la operación principal."""
+    ('conn' debe ser la misma del INSERT/cancelación → atómico). Solo toca filas con stock
+    NO NULL (rastreadas).
+
+    signo=+1 (reintegro al cancelar): suma sin tope; nunca falla.
+    signo=-1 (descuento al crear): descuento CONDICIONAL y atómico. Cada UPDATE solo aplica
+      si 'stock >= n' (WHERE … AND stock >= :n); bajo READ COMMITTED un UPDATE en espera
+      re-evalúa el WHERE sobre la versión ya commiteada de la fila, así dos pedidos por la
+      última porción NO pueden sobrevender. Si una opción rastreada no alcanza, acumula su
+      etiqueta y, al terminar, lanza SinStock → revienta el txn (rollback del INSERT). Las
+      filas se recorren ORDENADAS para fijar un orden de bloqueo determinista (sin deadlocks
+      entre pedidos concurrentes)."""
     comp_qty, menu_qty = inventario_de_items(items)
-    try:
-        for (grupo, nombre_l), n in comp_qty.items():
+
+    if int(signo) > 0:  # reintegro: solo suma, sin tope superior
+        # sorted() también aquí → mismo orden de bloqueo que el descuento, así una
+        # cancelación nunca hace deadlock con una creación/otra cancelación concurrente.
+        for (grupo, nombre_l), n in sorted(comp_qty.items()):
             conn.execute(text(
-                "UPDATE menu_componentes SET stock = GREATEST(0, stock + :delta) "
-                "WHERE grupo = :g AND LOWER(nombre) = :n AND stock IS NOT NULL"
-            ), {"delta": int(signo) * int(n), "g": grupo, "n": nombre_l})
-        for mid, n in menu_qty.items():
+                "UPDATE menu_componentes SET stock = stock + :n "
+                "WHERE grupo = :g AND LOWER(nombre) = :nom AND stock IS NOT NULL"
+            ), {"n": int(n), "g": grupo, "nom": nombre_l})
+        for mid, n in sorted(menu_qty.items()):
             conn.execute(text(
-                "UPDATE menu SET stock = GREATEST(0, stock + :delta) "
-                "WHERE id = :id AND stock IS NOT NULL"
-            ), {"delta": int(signo) * int(n), "id": int(mid)})
-    except Exception:
-        pass
+                "UPDATE menu SET stock = stock + :n WHERE id = :id AND stock IS NOT NULL"
+            ), {"n": int(n), "id": int(mid)})
+        return
+
+    # Descuento (-1): guarda atómica con detección de faltantes.
+    faltan = []
+    for (grupo, nombre_l), n in sorted(comp_qty.items()):
+        ok = conn.execute(text(
+            "UPDATE menu_componentes SET stock = stock - :n "
+            "WHERE grupo = :g AND LOWER(nombre) = :nom AND stock IS NOT NULL AND stock >= :n "
+            "RETURNING id"
+        ), {"n": int(n), "g": grupo, "nom": nombre_l}).first()
+        # ok=None puede ser 'no rastreada' (ilimitada → se ignora) o 'no alcanza'. Solo
+        # es faltante si EXISTE una fila rastreada con ese nombre.
+        if ok is None and conn.execute(text(
+            "SELECT 1 FROM menu_componentes "
+            "WHERE grupo = :g AND LOWER(nombre) = :nom AND stock IS NOT NULL"
+        ), {"g": grupo, "nom": nombre_l}).first():
+            faltan.append(f"{GRUPO_LABEL.get(grupo, grupo)}: {nombre_l}")
+
+    for mid, n in sorted(menu_qty.items()):
+        ok = conn.execute(text(
+            "UPDATE menu SET stock = stock - :n "
+            "WHERE id = :id AND stock IS NOT NULL AND stock >= :n RETURNING nombre"
+        ), {"n": int(n), "id": int(mid)}).first()
+        if ok is None:
+            nom = conn.execute(text(
+                "SELECT nombre FROM menu WHERE id = :id AND stock IS NOT NULL"
+            ), {"id": int(mid)}).scalar()
+            if nom is not None:
+                faltan.append(str(nom))
+
+    if faltan:
+        raise SinStock(faltan)
+
+
+def siguiente_num_dia(conn) -> int:
+    """Número de pedido del día (1, 2, 3…), atómico y libre de carreras. Debe llamarse
+    DENTRO de la transacción del INSERT del pedido.
+
+    Usa contador_dia (una fila por fecha): el siguiente número es 1 + el MÁXIMO entre el
+    contador y el MAX(num_dia) real de hoy. El GREATEST hace el contador auto-reparable: si
+    algún writer fuera de esta vía (INSERT manual, script) dejó un num_dia por encima del
+    contador, la siguiente asignación salta por encima y nunca colisiona. El lock de fila del
+    ON CONFLICT serializa la numeración y, al tomarse al inicio del txn, fija un punto de
+    serialización común para todas las creaciones de pedido (evita deadlocks de inventario)."""
+    return int(conn.execute(text("""
+        INSERT INTO contador_dia (fecha, n)
+        VALUES (CURRENT_DATE,
+                COALESCE((SELECT MAX(num_dia) FROM pedidos
+                          WHERE fecha::date = CURRENT_DATE), 0) + 1)
+        ON CONFLICT (fecha) DO UPDATE SET n = GREATEST(
+            contador_dia.n,
+            COALESCE((SELECT MAX(num_dia) FROM pedidos
+                      WHERE fecha::date = CURRENT_DATE), 0)
+        ) + 1
+        RETURNING n
+    """)).scalar_one())
 
 
 def resumen_disponibilidad_componentes() -> dict:

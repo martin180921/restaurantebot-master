@@ -851,9 +851,16 @@ def _norm(s) -> str:
     return "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
 
 
+# Techo de INTEGER en Postgres. Un precio/stock por encima (celda gigante o fat-finger)
+# reventaba el UPDATE con NumericValueOutOfRange y abortaba TODA la importación con un
+# stacktrace. Acotamos al rango válido para que una celda absurda nunca tumbe la hoja.
+_INT32_MAX = 2_147_483_647
+
+
 def _parse_int(v):
-    """int >= 0 desde celda numérica o texto ('25.000'/'$25,000' → 25000); None si está
-    en blanco. Distingue número (uso directo) de texto (quita separadores de miles)."""
+    """int en [0, _INT32_MAX] desde celda numérica o texto ('25.000'/'$25,000' → 25000);
+    None si está en blanco. Distingue número (uso directo) de texto (quita separadores de
+    miles). Se acota al rango de INTEGER de Postgres para no abortar el import entero."""
     if v is None:
         return None
     try:
@@ -865,7 +872,7 @@ def _parse_int(v):
         return None
     if isinstance(v, numbers.Number):
         try:
-            return max(0, int(round(float(v))))
+            return max(0, min(_INT32_MAX, int(round(float(v)))))
         except (TypeError, ValueError):
             return None
     s = str(v).strip().replace("$", "").replace(" ", "")
@@ -873,7 +880,7 @@ def _parse_int(v):
         return None
     s = s.replace(".", "").replace(",", "")
     try:
-        return max(0, int(s))
+        return max(0, min(_INT32_MAX, int(s)))
     except ValueError:
         return None
 
@@ -952,7 +959,10 @@ def _leer_dataframe(archivo):
         except UnicodeDecodeError:
             archivo.seek(0)
             return pd.read_csv(archivo, dtype=str, encoding="latin-1")
-    return pd.read_excel(archivo)
+    # dtype=str también en .xlsx (paridad con el CSV): evita que un nombre numérico
+    # ('100') llegue como float ('100.0') y que pandas infiera tipos raros; los parsers
+    # (_parse_int/_parse_activo/_celda_texto) ya normalizan texto y blancos (NaN).
+    return pd.read_excel(archivo, dtype=str)
 
 
 def _calc_stock(actual, valor, sumar: bool, existe: bool):
@@ -1266,7 +1276,12 @@ def _render_importar():
     filas, errores = _parse_filas(df)
 
     st.markdown('<div class="section-title">Vista previa</div>', unsafe_allow_html=True)
-    st.dataframe(df, use_container_width=True, height=240)
+    # st.dataframe serializa a Arrow y puede lanzar con columnas de tipos mixtos/raros.
+    # La vista previa es cosmética: si falla, no debe bloquear la importación.
+    try:
+        st.dataframe(df, use_container_width=True, height=240)
+    except Exception:
+        st.caption("Vista previa no disponible para este archivo; la importación sí puede continuar.")
 
     if errores:
         st.warning("Avisos:\n" + "\n".join(f"- {e}" for e in errores))
@@ -1293,7 +1308,13 @@ def _render_importar():
 
     if st.button(f"📥 Importar {len(filas)} ítem(s)", type="primary",
                  use_container_width=True, key="btn_importar_menu"):
-        res = importar_menu(filas, modo_stock)
+        # El import es atómico (engine.begin): si algo revienta, NO queda nada a medias.
+        # Capturamos el fallo para mostrar un mensaje claro en vez de un stacktrace rojo.
+        try:
+            res = importar_menu(filas, modo_stock)
+        except Exception as e:
+            st.error(f"No se pudo importar (no se aplicó ningún cambio): {html.escape(str(e))}")
+            return
         st.session_state["import_resultado"] = res
         st.session_state["import_nonce"] = nonce + 1   # limpia el uploader y la vista previa
         st.rerun()

@@ -20,6 +20,7 @@ TRUNCATE TABLE
     movimientos_caja,
     print_jobs,
     pedidos,
+    contador_dia,
     cierres_caja,
     turnos_caja,
     claves_mesero,
@@ -29,4 +30,4 @@ RESTART IDENTITY CASCADE;
 COMMIT;
 
 -- para psql
-psql $DATABASE_URL -c "TRUNCATE TABLE pago_lineas, pagos, auditoria, sesiones_empleado, movimientos_caja, print_jobs, pedidos, cierres_caja, turnos_caja, claves_mesero, sesiones RESTART IDENTITY CASCADE;"
+psql $DATABASE_URL -c "TRUNCATE TABLE pago_lineas, pagos, auditoria, sesiones_empleado, movimientos_caja, print_jobs, pedidos, contador_dia, cierres_caja, turnos_caja, claves_mesero, sesiones RESTART IDENTITY CASCADE;"

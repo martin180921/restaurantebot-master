@@ -473,7 +473,9 @@ def reclamar_trabajo(conn, restaurante_id: int):
     """Toma UN trabajo 'pendiente' y lo pasa a 'imprimiendo' atómicamente.
 
     FOR UPDATE SKIP LOCKED evita que dos agentes (o dos hilos) impriman el mismo
-    ticket. Incrementa 'intentos'. Devuelve {id, payload} o None.
+    ticket. Incrementa 'intentos' (1 en el primer claim, 2+ en cada reintento) y lo
+    devuelve para que _imprimir_trabajo no reabra el cajón en reimpresiones. Devuelve
+    {id, tipo, payload, intentos} o None.
     """
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(
@@ -487,7 +489,7 @@ def reclamar_trabajo(conn, restaurante_id: int):
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1
             )
-            RETURNING id, tipo, payload
+            RETURNING id, tipo, payload, intentos
             """,
             (restaurante_id,),
         )
@@ -524,6 +526,17 @@ def _imprimir_trabajo(conn, trabajo, printer_cfg) -> bool:
     payload = trabajo["payload"]
     if isinstance(payload, str):  # por si el driver no deserializa el JSONB
         payload = json.loads(payload)
+
+    # Anti doble-cajón: el pulso de apertura SOLO se manda en el PRIMER intento. Si un
+    # recibo falló a mitad de impresión DESPUÉS de abrir el cajón (sin papel, buffer, USB
+    # suelto) y el janitor lo re-encola, al reimprimirlo NO debe reabrir el cajón —eso
+    # descuadraría el arqueo y es una superficie de robo—. reclamar_trabajo deja intentos=1
+    # en el primer claim y 2+ en cada reintento. El recibo (texto) sí se reimprime entero;
+    # lo único que se suprime es el pulso del cajón.
+    intentos = int(trabajo.get("intentos") or 1)
+    if intentos > 1 and isinstance(payload, dict) and payload.get("abrir_cajon"):
+        payload = dict(payload, abrir_cajon=False)
+        print(f"[agent] job #{job_id} es reintento #{intentos}: el cajón NO se reabre")
 
     print(f"[agent] imprimiendo job #{job_id} ({tipo}, cajon={payload.get('abrir_cajon')})")
     try:

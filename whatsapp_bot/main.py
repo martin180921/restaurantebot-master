@@ -40,7 +40,17 @@ def _normalizar_db_url(url):
 DATABASE_URL = _normalizar_db_url(os.getenv("DATABASE_URL"))
 # C5: pre_ping descarta conexiones muertas y recycle las renueva antes del
 # timeout del servidor (Railway corta las conexiones inactivas).
-engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_recycle=1800)
+# P-POOL: techo EXPLÍCITO de conexiones por proceso (igual que el panel y app_cliente).
+# Las tres patas comparten una sola Postgres pequeña; sin tope, cada proceso abriría
+# hasta 15 conexiones y una avalancha agotaría el límite del plan. 5+5=10/proceso.
+engine = create_engine(
+    DATABASE_URL,
+    pool_pre_ping=True,
+    pool_recycle=1800,
+    pool_size=5,
+    max_overflow=5,
+    pool_timeout=10,
+)
 
 # C4/C7: si faltan credenciales de Twilio no reventamos al importar; avisamos y
 # degradamos con elegancia (init_db y /webhook siguen respondiendo).

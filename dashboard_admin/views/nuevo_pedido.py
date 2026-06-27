@@ -19,38 +19,47 @@ import html
 from db import (engine, titulo_seccion, cargar_mesas_activas, componentes_activos_por_grupo,
                 cargar_catalogo, disponibles, precio_plato_dia,
                 num_acompanamientos, fmt_money, flash, drain_toasts,
-                fee_entrega, upsert_cliente, aplicar_inventario,
-                resumen_disponibilidad_componentes, agotado_por_stock,
+                fee_entrega, upsert_cliente, aplicar_inventario, SinStock,
+                siguiente_num_dia, resumen_disponibilidad_componentes, agotado_por_stock,
                 stock_int, STOCK_BAJO, GRUPO_LABEL)
 from utils.print_jobs import enqueue_comanda
 
 
 # ── DB: crear pedido de mesa ────────────────────────────────────────────────────
 def crear_pedido_manual(mesa_id: int, mesa_nombre: str, items: list, total: int,
-                        nota_general=None):
-    with engine.begin() as conn:
-        nuevo_id = conn.execute(text("""
-            INSERT INTO pedidos
-              (num_dia, numero_cliente, items, total, estado, mesa_id, tipo_entrega, nota_general)
-            VALUES (
-              (SELECT COALESCE(MAX(num_dia), 0) + 1 FROM pedidos WHERE fecha::date = CURRENT_DATE),
-              :numero, :items, :total, 'pendiente', :mesa_id, 'mesa', :ng
-            )
-            RETURNING id
-        """), {
-            "numero":  mesa_nombre,
-            "items":   json.dumps(items, ensure_ascii=False),
-            "total":   total,
-            "mesa_id": mesa_id,
-            "ng":      (nota_general or None),
-        }).scalar_one()
-        # Descuento inmediato del inventario (mismo txn que el INSERT → atómico): evita
-        # vender dos veces lo que ya está en cocina. Solo afecta ítems con stock rastreado.
-        aplicar_inventario(conn, items, -1)
+                        nota_general=None) -> bool:
+    """Crea un pedido de mesa con numeración diaria atómica (siguiente_num_dia) y descuento
+    de inventario con guarda. Devuelve True si se creó; False si se rechazó por falta de
+    stock (en ese caso NADA quedó insertado y se avisa qué se agotó)."""
+    try:
+        with engine.begin() as conn:
+            # num_dia atómico ANTES del INSERT: toma el lock del día y serializa la creación.
+            num = siguiente_num_dia(conn)
+            nuevo_id = conn.execute(text("""
+                INSERT INTO pedidos
+                  (num_dia, numero_cliente, items, total, estado, mesa_id, tipo_entrega, nota_general)
+                VALUES (:num, :numero, :items, :total, 'pendiente', :mesa_id, 'mesa', :ng)
+                RETURNING id
+            """), {
+                "num":     num,
+                "numero":  mesa_nombre,
+                "items":   json.dumps(items, ensure_ascii=False),
+                "total":   total,
+                "mesa_id": mesa_id,
+                "ng":      (nota_general or None),
+            }).scalar_one()
+            # Descuento inmediato del inventario (mismo txn que el INSERT → atómico): si una
+            # opción rastreada no alcanza, SinStock revienta el txn y el pedido NO se crea
+            # (no se sobrevende lo que ya está en cocina).
+            aplicar_inventario(conn, items, -1)
+    except SinStock as e:
+        flash(f"🚫 Se agotó: {e}. Quítalo del pedido y vuelve a confirmar.", "🚫")
+        return False
     # Flujo de cocina simplificado: ya no hay "Iniciar preparación", así que la comanda
     # se imprime al confirmar el pedido. Tolera fallos: no debe romper la creación.
     enqueue_comanda(int(nuevo_id))
     flash(f"Pedido para {mesa_nombre} creado", "✅")
+    return True
 
 
 # ── DB: crear pedido de domicilio / para llevar ─────────────────────────────────
@@ -60,30 +69,34 @@ def crear_pedido_manual(mesa_id: int, mesa_nombre: str, items: list, total: int,
 # informativos para que el repartidor lleve el cambio. Aparece en Monitor → Pedidos web.
 def crear_pedido_entrega(tipo: str, items: list, total: int, *, cliente_nombre,
                          cliente_telefono, direccion, metodo_pago, paga_con, fee,
-                         nota_general=None):
+                         nota_general=None) -> bool:
+    """Crea un pedido de domicilio / para llevar. Devuelve True si se creó; False si se
+    rechazó por falta de stock (nada queda insertado)."""
     etq = "Domicilio" if tipo == "domicilio" else "Para llevar"
     nombre = (cliente_nombre or "").strip()
     telefono = (cliente_telefono or "").strip()
     numero = nombre or telefono or etq          # numero_cliente es NOT NULL (legado)
-    with engine.begin() as conn:
-        nuevo_id = conn.execute(text("""
-            INSERT INTO pedidos
-              (num_dia, numero_cliente, items, total, estado, tipo_entrega, cliente_nombre,
-               cliente_telefono, direccion, metodo_pago, paga_con, fee, nota_general)
-            VALUES (
-              (SELECT COALESCE(MAX(num_dia), 0) + 1 FROM pedidos WHERE fecha::date = CURRENT_DATE),
-              :nc, :items, :total, 'pendiente', :te, :cn, :ct, :dir, :mp, :pc, :fee, :ng
-            )
-            RETURNING id
-        """), {
-            "nc": numero, "items": json.dumps(items, ensure_ascii=False),
-            "total": int(total), "te": tipo, "cn": (nombre or None),
-            "ct": (telefono or None), "dir": ((direccion or "").strip() or None),
-            "mp": metodo_pago, "pc": int(paga_con or 0), "fee": int(fee or 0),
-            "ng": (nota_general or None),
-        }).scalar_one()
-        # Descuento de inventario en el mismo txn (igual que en los pedidos de mesa).
-        aplicar_inventario(conn, items, -1)
+    try:
+        with engine.begin() as conn:
+            num = siguiente_num_dia(conn)
+            nuevo_id = conn.execute(text("""
+                INSERT INTO pedidos
+                  (num_dia, numero_cliente, items, total, estado, tipo_entrega, cliente_nombre,
+                   cliente_telefono, direccion, metodo_pago, paga_con, fee, nota_general)
+                VALUES (:num, :nc, :items, :total, 'pendiente', :te, :cn, :ct, :dir, :mp, :pc, :fee, :ng)
+                RETURNING id
+            """), {
+                "num": num, "nc": numero, "items": json.dumps(items, ensure_ascii=False),
+                "total": int(total), "te": tipo, "cn": (nombre or None),
+                "ct": (telefono or None), "dir": ((direccion or "").strip() or None),
+                "mp": metodo_pago, "pc": int(paga_con or 0), "fee": int(fee or 0),
+                "ng": (nota_general or None),
+            }).scalar_one()
+            # Descuento de inventario en el mismo txn (igual que en los pedidos de mesa).
+            aplicar_inventario(conn, items, -1)
+    except SinStock as e:
+        flash(f"🚫 Se agotó: {e}. Quítalo del pedido y vuelve a confirmar.", "🚫")
+        return False
     enqueue_comanda(int(nuevo_id))
     # Alimenta la base de clientes (para autocompletar futuros pedidos). Tolerante.
     if telefono:
@@ -93,6 +106,7 @@ def crear_pedido_entrega(tipo: str, items: list, total: int, *, cliente_nombre,
         except Exception:
             pass
     flash(f"Pedido {etq} creado", "✅")
+    return True
 
 
 # ── Helpers de catálogo ─────────────────────────────────────────────────────────
@@ -543,14 +557,17 @@ def _form_fragment():
         if st.button("✓ Confirmar pedido", type="primary", key="btn_confirmar_manual",
                      use_container_width=True, disabled=(not ok_pd or falta_dir)):
             if es_mesa:
-                crear_pedido_manual(mesa_id, mesa_labels[mesa_id], items, total,
-                                    (nota_general or "").strip())
+                ok = crear_pedido_manual(mesa_id, mesa_labels[mesa_id], items, total,
+                                         (nota_general or "").strip())
             else:
-                crear_pedido_entrega(tipo_val, items, total, cliente_nombre=cli_nombre,
-                                     cliente_telefono=cli_tel, direccion=cli_dir,
-                                     metodo_pago=metodo_pago, paga_con=paga_con, fee=fee,
-                                     nota_general=(nota_general or "").strip())
-            _limpiar_pedido()
+                ok = crear_pedido_entrega(tipo_val, items, total, cliente_nombre=cli_nombre,
+                                          cliente_telefono=cli_tel, direccion=cli_dir,
+                                          metodo_pago=metodo_pago, paga_con=paga_con, fee=fee,
+                                          nota_general=(nota_general or "").strip())
+            # Solo vaciamos el carrito si el pedido se creó. Si se rechazó por falta de
+            # stock, lo conservamos para que el mesero quite el ítem agotado y reintente.
+            if ok:
+                _limpiar_pedido()
             st.rerun(scope="fragment")
 
         st.markdown("<br>", unsafe_allow_html=True)

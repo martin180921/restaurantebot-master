@@ -62,7 +62,20 @@ def _normalizar_db_url(url):
 
 DATABASE_URL = _normalizar_db_url(os.getenv("DATABASE_URL"))
 # C5: pre_ping + recycle para no reutilizar conexiones que Railway ya cerró.
-engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_recycle=1800)
+# P-POOL: techo EXPLÍCITO de conexiones por proceso (igual que el panel). Sin él,
+# SQLAlchemy abre hasta pool_size=5 + max_overflow=10 = 15 por proceso y, con tres
+# servicios sobre una sola Postgres pequeña, una avalancha de QRs (muchos móviles a la
+# vez) agota el límite del plan → 'FATAL: too many connections' (cae todo). Lo acotamos
+# a 5+5=10/proceso y pool_timeout=10 hace que una espera por contención falle rápido con
+# error claro, en vez de congelar el envío del pedido los 30 s del default.
+engine = create_engine(
+    DATABASE_URL,
+    pool_pre_ping=True,
+    pool_recycle=1800,
+    pool_size=5,
+    max_overflow=5,
+    pool_timeout=10,
+)
 
 
 # ── Esquema defensivo (aditivo) ────────────────────────────────────────────────
@@ -116,11 +129,20 @@ def _ensure_schema():
                 ("cliente_telefono", "VARCHAR(40)"), ("direccion", "TEXT"),
                 ("metodo_pago", "VARCHAR(20)"), ("paga_con", "INTEGER"),
                 ("fee", "INTEGER NOT NULL DEFAULT 0"), ("nota_general", "TEXT"),
-                # num_dia: contador diario del pedido (lo fija el INSERT con MAX+1). Lo
-                # comparten panel/app; aquí lo garantizamos por si el bot no migró aún.
+                # num_dia: contador diario del pedido. Lo asigna _siguiente_num_dia() de
+                # forma atómica vía contador_dia (no con MAX+1, que duplicaba bajo carrera).
                 ("num_dia", "INTEGER"),
             ]:
                 conn.execute(text(f"ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS {_col} {_ddl}"))
+            # contador_dia: una fila por fecha con el último num_dia entregado. El upsert
+            # ON CONFLICT toma el lock de la fila del día → numeración serializada sin
+            # carreras. Compartida con el panel (db.siguiente_num_dia).
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS contador_dia (
+                    fecha DATE    PRIMARY KEY,
+                    n     INTEGER NOT NULL DEFAULT 0
+                )
+            """))
             # Mesas: las lee el flujo de QR (resolver ?table= y selector manual). El bot
             # es el dueño; aquí solo garantizamos la tabla y la FK mesa_id en pedidos.
             conn.execute(text("""
@@ -317,12 +339,44 @@ def upsert_cliente(telefono: str, nombre=None, direccion=None):
         pass
 
 
+class SinStock(Exception):
+    """Se pidió más de lo disponible de uno o más ítems CON control de stock. La lanza
+    _descontar_inventario; al subir por el txn del INSERT provoca el ROLLBACK del pedido
+    (no se vende lo que no hay). 'faltantes' = etiquetas legibles para avisar al comensal."""
+    def __init__(self, faltantes):
+        self.faltantes = list(faltantes)
+        super().__init__(", ".join(self.faltantes))
+
+
+def _siguiente_num_dia(conn) -> int:
+    """num_dia atómico (1, 2, 3…) vía contador_dia, sin carreras. Debe llamarse DENTRO del
+    txn del INSERT. El siguiente número es 1 + el MÁXIMO entre el contador y el MAX(num_dia)
+    real de hoy (GREATEST → auto-reparable ante writers externos). El lock de fila del
+    ON CONFLICT serializa la numeración. Espejo EXACTO de db.siguiente_num_dia del panel
+    (app aislada, misma tabla compartida)."""
+    return int(conn.execute(text("""
+        INSERT INTO contador_dia (fecha, n)
+        VALUES (CURRENT_DATE,
+                COALESCE((SELECT MAX(num_dia) FROM pedidos
+                          WHERE fecha::date = CURRENT_DATE), 0) + 1)
+        ON CONFLICT (fecha) DO UPDATE SET n = GREATEST(
+            contador_dia.n,
+            COALESCE((SELECT MAX(num_dia) FROM pedidos
+                      WHERE fecha::date = CURRENT_DATE), 0)
+        ) + 1
+        RETURNING n
+    """)).scalar_one())
+
+
 def _descontar_inventario(conn, items) -> None:
     """Descuenta el stock del pedido en el MISMO txn que el INSERT (atómico). Solo toca
-    filas con stock NO NULL (rastreadas): componentes del Plato del Día por (grupo,
-    nombre) — entrada/principio/proteína + cada acompañamiento elegido — y los platos a
-    la carta por menu_id × cantidad. GREATEST(0, …) evita negativos. No lanza: un fallo
-    de inventario no debe tumbar el pedido del cliente."""
+    filas con stock NO NULL (rastreadas): componentes del Plato del Día por (grupo, nombre)
+    — entrada/principio/proteína + cada acompañamiento elegido — y los platos a la carta por
+    menu_id × cantidad. Descuento CONDICIONAL (WHERE … AND stock >= :n): bajo READ COMMITTED
+    un UPDATE en espera re-evalúa el WHERE sobre la versión ya commiteada, así dos comensales
+    por la última porción NO pueden sobrevender. Si una opción rastreada no alcanza, lanza
+    SinStock → revienta el txn (rollback del pedido). Recorre ORDENADO (orden de bloqueo
+    determinista → sin deadlocks entre pedidos concurrentes)."""
     comp_qty, menu_qty = {}, {}
     for it in (items or []):
         if not isinstance(it, dict):
@@ -347,18 +401,36 @@ def _descontar_inventario(conn, items) -> None:
             except (TypeError, ValueError):
                 continue
             menu_qty[mid] = menu_qty.get(mid, 0) + cant
-    try:
-        for (grupo, nombre_l), n in comp_qty.items():
-            conn.execute(text(
-                "UPDATE menu_componentes SET stock = GREATEST(0, stock - :n) "
-                "WHERE grupo = :g AND LOWER(nombre) = :nom AND stock IS NOT NULL"
-            ), {"n": int(n), "g": grupo, "nom": nombre_l})
-        for mid, n in menu_qty.items():
-            conn.execute(text(
-                "UPDATE menu SET stock = GREATEST(0, stock - :n) WHERE id = :id AND stock IS NOT NULL"
-            ), {"n": int(n), "id": int(mid)})
-    except Exception:
-        pass
+
+    faltan = []
+    for (grupo, nombre_l), n in sorted(comp_qty.items()):
+        ok = conn.execute(text(
+            "UPDATE menu_componentes SET stock = stock - :n "
+            "WHERE grupo = :g AND LOWER(nombre) = :nom AND stock IS NOT NULL AND stock >= :n "
+            "RETURNING id"
+        ), {"n": int(n), "g": grupo, "nom": nombre_l}).first()
+        # ok=None: o no lleva control (ilimitada → se ignora) o no alcanza. Solo es
+        # faltante si EXISTE una fila rastreada con ese nombre.
+        if ok is None and conn.execute(text(
+            "SELECT 1 FROM menu_componentes "
+            "WHERE grupo = :g AND LOWER(nombre) = :nom AND stock IS NOT NULL"
+        ), {"g": grupo, "nom": nombre_l}).first():
+            faltan.append(f"{_GRUPO_LABEL.get(grupo, grupo)}: {nombre_l}")
+
+    for mid, n in sorted(menu_qty.items()):
+        ok = conn.execute(text(
+            "UPDATE menu SET stock = stock - :n "
+            "WHERE id = :id AND stock IS NOT NULL AND stock >= :n RETURNING nombre"
+        ), {"n": int(n), "id": int(mid)}).first()
+        if ok is None:
+            nom = conn.execute(text(
+                "SELECT nombre FROM menu WHERE id = :id AND stock IS NOT NULL"
+            ), {"id": int(mid)}).scalar()
+            if nom is not None:
+                faltan.append(str(nom))
+
+    if faltan:
+        raise SinStock(faltan)
 
 
 # ── Comanda de cocina (cola de impresión) ───────────────────────────────────────
@@ -464,20 +536,22 @@ def guardar_pedido(numero_cliente, items, total, *, tipo_entrega, cliente_nombre
     (como antes). Lleva datos del cliente + método de pago/cambio + recargo de entrega;
     el cobro real lo registra la caja al entregar. Descuenta inventario en el mismo txn."""
     with engine.begin() as conn:
+        num = _siguiente_num_dia(conn)
         nuevo_id = int(conn.execute(text("""
             INSERT INTO pedidos
-              (numero_cliente, items, total, estado, tipo_entrega, cliente_nombre,
+              (num_dia, numero_cliente, items, total, estado, tipo_entrega, cliente_nombre,
                cliente_telefono, direccion, metodo_pago, paga_con, fee, nota_general)
             VALUES
-              (:nc, :items, :total, 'pendiente', :te, :cn, :ct, :dir, :mp, :pc, :fee, :ng)
+              (:num, :nc, :items, :total, 'pendiente', :te, :cn, :ct, :dir, :mp, :pc, :fee, :ng)
             RETURNING id
         """), {
-            "nc": numero_cliente, "items": json.dumps(items, ensure_ascii=False),
+            "num": num, "nc": numero_cliente, "items": json.dumps(items, ensure_ascii=False),
             "total": int(total), "te": tipo_entrega, "cn": cliente_nombre,
             "ct": cliente_telefono, "dir": (direccion or None), "mp": metodo_pago,
             "pc": int(paga_con or 0), "fee": int(fee or 0), "ng": (nota_general or None),
         }).scalar())
-        # Descuento inmediato del inventario (mismo txn): evita revender lo ya pedido.
+        # Descuento inmediato del inventario (mismo txn): evita revender lo ya pedido. Si no
+        # alcanza, SinStock revienta el txn → el pedido NO se crea.
         _descontar_inventario(conn, items)
         return nuevo_id
 
@@ -491,21 +565,20 @@ def guardar_pedido_mesa(mesa_id, mesa_nombre, items, total, *, para_llevar, fee,
     llevar; el cobro se hace luego en caja (no se captura pago aquí)."""
     label = f"[QR] {mesa_nombre}" + (" · Para llevar" if para_llevar else "")
     with engine.begin() as conn:
+        num = _siguiente_num_dia(conn)
         nuevo_id = int(conn.execute(text("""
             INSERT INTO pedidos
               (num_dia, numero_cliente, items, total, estado, mesa_id, tipo_entrega,
                fee, nota_general)
-            VALUES (
-              (SELECT COALESCE(MAX(num_dia), 0) + 1 FROM pedidos WHERE fecha::date = CURRENT_DATE),
-              :nc, :items, :total, 'pendiente', :mesa_id, :te, :fee, :ng
-            )
+            VALUES (:num, :nc, :items, :total, 'pendiente', :mesa_id, :te, :fee, :ng)
             RETURNING id
         """), {
-            "nc": mesa_nombre, "items": json.dumps(items, ensure_ascii=False),
+            "num": num, "nc": mesa_nombre, "items": json.dumps(items, ensure_ascii=False),
             "total": int(total), "mesa_id": int(mesa_id), "te": TIPO_QR,
             "fee": int(fee or 0), "ng": (nota_general or None),
         }).scalar())
-        # Descuento inmediato del inventario (mismo txn): evita revender lo ya pedido.
+        # Descuento inmediato del inventario (mismo txn): evita revender lo ya pedido. Si no
+        # alcanza, SinStock revienta el txn → el pedido NO se crea.
         _descontar_inventario(conn, items)
     # Comanda fuera del txn del pedido: un fallo de impresión no revierte la venta.
     _encolar_comanda(nuevo_id, label, items)
@@ -1062,26 +1135,33 @@ def _dialog_confirmar():
             elif pedidos_activos_mesa(mesa_id) >= MAX_ACTIVAS_POR_MESA:
                 st.warning("Esta mesa ya tiene varios pedidos en curso. Avísale a un mesero.")
             else:
-                nuevo_id = guardar_pedido_mesa(
-                    mesa_id, mesa_nombre, p["items"], p["total"],
-                    para_llevar=p["para_llevar"], fee=p["fee"], nota_general=p["nota"],
-                )
-                st.session_state["ultimo_envio"] = ahora
-                st.session_state["pedido_enviado"] = {
-                    "id": nuevo_id,
-                    "tipo": ("🛍️ Para llevar" if p["para_llevar"] else f"🪑 {mesa_nombre}"),
-                    "total": p["total"],
-                }
-                # Limpia la carta y la config de platos del día. La MESA se conserva: el
-                # comensal sigue en la misma mesa y puede pedir de nuevo (req #3).
-                st.session_state["cart"] = {}
-                for k in [k for k in st.session_state if str(k).startswith("pd_")]:
-                    del st.session_state[k]
-                st.session_state.pop("notas_generales", None)
-                st.session_state.pop("c_modo_mesa", None)
-                st.session_state["pd_qty"] = 0
-                st.session_state["pedido_pendiente"] = None
-                st.rerun()
+                try:
+                    nuevo_id = guardar_pedido_mesa(
+                        mesa_id, mesa_nombre, p["items"], p["total"],
+                        para_llevar=p["para_llevar"], fee=p["fee"], nota_general=p["nota"],
+                    )
+                except SinStock as e:
+                    # Se agotó algo mientras decidían: NO se creó el pedido. Conservamos la
+                    # carta para que toquen «Seguir editando» y lo quiten (y no quemamos el
+                    # cooldown, así pueden reintentar enseguida).
+                    st.warning(f"😔 Se agotó: {e}. Toca «← Seguir editando» y quítalo del pedido.")
+                else:
+                    st.session_state["ultimo_envio"] = ahora
+                    st.session_state["pedido_enviado"] = {
+                        "id": nuevo_id,
+                        "tipo": ("🛍️ Para llevar" if p["para_llevar"] else f"🪑 {mesa_nombre}"),
+                        "total": p["total"],
+                    }
+                    # Limpia la carta y la config de platos del día. La MESA se conserva: el
+                    # comensal sigue en la misma mesa y puede pedir de nuevo (req #3).
+                    st.session_state["cart"] = {}
+                    for k in [k for k in st.session_state if str(k).startswith("pd_")]:
+                        del st.session_state[k]
+                    st.session_state.pop("notas_generales", None)
+                    st.session_state.pop("c_modo_mesa", None)
+                    st.session_state["pd_qty"] = 0
+                    st.session_state["pedido_pendiente"] = None
+                    st.rerun()
     with c2:
         if st.button("← Seguir editando", use_container_width=True, key="conf_volver"):
             st.session_state["pedido_pendiente"] = None
@@ -1257,27 +1337,32 @@ def _carta_delivery(comp, cat, ajustes):
         elif pedidos_activos_telefono(gate["telefono"]) >= MAX_ACTIVAS_POR_TEL:
             st.toast("Ya tienes varios pedidos en curso. Llámanos para otro.", icon="🚦")
         else:
-            nuevo_id = guardar_pedido(
-                gate["nombre"], items, total,
-                tipo_entrega=gate["tipo_entrega"], cliente_nombre=gate["nombre"],
-                cliente_telefono=gate["telefono"], direccion=gate["direccion"],
-                metodo_pago=metodo_pago, paga_con=paga_con,
-                fee=fee, nota_general=(notas or "").strip(),
-            )
-            upsert_cliente(gate["telefono"], gate["nombre"], gate["direccion"] or None)
-            st.session_state["ultimo_envio"] = ahora
-            st.session_state["pedido_enviado"] = {
-                "id": nuevo_id, "tipo": TIPO_LABEL.get(gate["tipo_entrega"], ""), "total": total,
-            }
-            # Limpia la carta y la configuración de platos del día.
-            st.session_state["cart"] = {}
-            for k in [k for k in st.session_state if str(k).startswith("pd_")]:
-                del st.session_state[k]
-            st.session_state.pop("notas_generales", None)
-            st.session_state.pop("c_metodo", None)
-            st.session_state.pop("c_paga_con", None)
-            st.session_state["pd_qty"] = 0
-            st.rerun(scope="app")
+            try:
+                nuevo_id = guardar_pedido(
+                    gate["nombre"], items, total,
+                    tipo_entrega=gate["tipo_entrega"], cliente_nombre=gate["nombre"],
+                    cliente_telefono=gate["telefono"], direccion=gate["direccion"],
+                    metodo_pago=metodo_pago, paga_con=paga_con,
+                    fee=fee, nota_general=(notas or "").strip(),
+                )
+            except SinStock as e:
+                # Se agotó algo: el pedido NO se creó. Conservamos el carrito para quitarlo.
+                st.warning(f"😔 Se agotó: {e}. Quítalo del carrito y vuelve a enviar.")
+            else:
+                upsert_cliente(gate["telefono"], gate["nombre"], gate["direccion"] or None)
+                st.session_state["ultimo_envio"] = ahora
+                st.session_state["pedido_enviado"] = {
+                    "id": nuevo_id, "tipo": TIPO_LABEL.get(gate["tipo_entrega"], ""), "total": total,
+                }
+                # Limpia la carta y la configuración de platos del día.
+                st.session_state["cart"] = {}
+                for k in [k for k in st.session_state if str(k).startswith("pd_")]:
+                    del st.session_state[k]
+                st.session_state.pop("notas_generales", None)
+                st.session_state.pop("c_metodo", None)
+                st.session_state.pop("c_paga_con", None)
+                st.session_state["pd_qty"] = 0
+                st.rerun(scope="app")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
