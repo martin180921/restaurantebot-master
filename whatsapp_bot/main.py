@@ -78,14 +78,40 @@ def init_db():
         conn.execute(text(
             "ALTER TABLE menu ADD COLUMN IF NOT EXISTS agotado_hasta DATE"
         ))
-        count = conn.execute(text("SELECT COUNT(*) FROM menu")).scalar()
-        if count == 0:
-            conn.execute(text("""
-                INSERT INTO menu (nombre, precio, activo, orden) VALUES
-                ('Hamburguesa', 25000, TRUE, 1),
-                ('Pizza',       35000, TRUE, 2),
-                ('Ensalada',    18000, TRUE, 3)
-            """))
+        # ── Marca persistente de "ya sembrado" (one-time seed) ─────────────────
+        # Antes el menú de ejemplo se reinsertaba CADA vez que la tabla quedaba
+        # vacía (COUNT==0) en un reinicio. Eso "resucitaba" los platos de ejemplo
+        # cada vez que el restaurante borraba toda una sección y el bot se reiniciaba
+        # (de ahí que los borrados "reaparecieran solos"). Ahora la semilla corre
+        # SOLO la primerísima vez: dejamos una marca en 'ajustes' y nunca volvemos a
+        # sembrar, aunque el restaurante deje una sección vacía a propósito.
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS ajustes (
+                clave VARCHAR(50) PRIMARY KEY,
+                valor TEXT        NOT NULL
+            )
+        """))
+
+        def _ya_sembrado(clave: str) -> bool:
+            return conn.execute(
+                text("SELECT 1 FROM ajustes WHERE clave = :k"), {"k": clave}
+            ).scalar() is not None
+
+        def _marcar_sembrado(clave: str):
+            conn.execute(text(
+                "INSERT INTO ajustes (clave, valor) VALUES (:k, '1') "
+                "ON CONFLICT (clave) DO NOTHING"
+            ), {"k": clave})
+
+        if not _ya_sembrado('seed_menu'):
+            if conn.execute(text("SELECT COUNT(*) FROM menu")).scalar() == 0:
+                conn.execute(text("""
+                    INSERT INTO menu (nombre, precio, activo, orden) VALUES
+                    ('Hamburguesa', 25000, TRUE, 1),
+                    ('Pizza',       35000, TRUE, 2),
+                    ('Ensalada',    18000, TRUE, 3)
+                """))
+            _marcar_sembrado('seed_menu')
 
         # ── Mesas: gestión dinámica de mesas del restaurante ───────────────────
         conn.execute(text("""
@@ -194,18 +220,21 @@ def init_db():
                 agotado_hasta DATE
             )
         """))
-        # Semilla SOLO en la primera inicialización (tabla vacía): así no se
-        # "resucitan" opciones que el restaurante haya borrado en redeploys.
-        if conn.execute(text("SELECT COUNT(*) FROM menu_componentes")).scalar() == 0:
-            conn.execute(text("""
-                INSERT INTO menu_componentes (grupo, nombre, orden) VALUES
-                ('entrada', 'Fruta', 1), ('entrada', 'Huevo', 2), ('entrada', 'Sopa del día', 3),
-                ('principio', 'Frijol', 1), ('principio', 'Lenteja', 2),
-                ('proteina', 'Res', 1), ('proteina', 'Cerdo', 2), ('proteina', 'Pechuga', 3),
-                ('acompanamiento', 'Arroz', 1), ('acompanamiento', 'Maduro', 2),
-                ('acompanamiento', 'Papa', 3), ('acompanamiento', 'Ensalada', 4),
-                ('bebida', 'Limonada', 1), ('bebida', 'Jugo del día', 2)
-            """))
+        # Semilla SOLO la primerísima vez (marca persistente en 'ajustes'): nunca se
+        # vuelve a sembrar, aunque el restaurante borre todas las opciones a propósito.
+        # Antes corría con COUNT==0 y "resucitaba" las opciones borradas en cada reinicio.
+        if not _ya_sembrado('seed_componentes'):
+            if conn.execute(text("SELECT COUNT(*) FROM menu_componentes")).scalar() == 0:
+                conn.execute(text("""
+                    INSERT INTO menu_componentes (grupo, nombre, orden) VALUES
+                    ('entrada', 'Fruta', 1), ('entrada', 'Huevo', 2), ('entrada', 'Sopa del día', 3),
+                    ('principio', 'Frijol', 1), ('principio', 'Lenteja', 2),
+                    ('proteina', 'Res', 1), ('proteina', 'Cerdo', 2), ('proteina', 'Pechuga', 3),
+                    ('acompanamiento', 'Arroz', 1), ('acompanamiento', 'Maduro', 2),
+                    ('acompanamiento', 'Papa', 3), ('acompanamiento', 'Ensalada', 4),
+                    ('bebida', 'Limonada', 1), ('bebida', 'Jugo del día', 2)
+                """))
+            _marcar_sembrado('seed_componentes')
 
         # Categoría + descripción del catálogo 'menu': especiales (con resumen de
         # lo que incluyen), a la carta y bebidas. Las filas existentes quedan como
