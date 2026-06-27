@@ -50,16 +50,26 @@ def _items_payload(ids) -> list[dict]:
 
 def enqueue_recibo(ids, titulo: str, total: int, abono: int, metodo: str,
                    recibido: int | None = None, submetodo: str | None = None,
-                   comprobante: str | None = None) -> None:
+                   comprobante: str | None = None, desglose: list | None = None) -> None:
     """Encola el ticket de un cobro recién commiteado.
 
-    Regla del cajón SAT: solo se abre en efectivo (abrir_cajon = metodo=='efectivo').
+    Regla del cajón SAT: solo se abre cuando hubo efectivo (abrir_cajon).
     'submetodo'/'comprobante' detallan la transferencia (Nequi/Daviplata/Bre-B + n.º de
-    transacción) en el ticket. Tolera cualquier fallo: la impresión no debe tumbar el
-    cobro ya registrado.
+    transacción) en el ticket.
+
+    'desglose' (opcional) es la lista de tramos de un pago MIXTO
+    [{metodo, monto, submetodo?, comprobante?}]: cuando una sola persona paga UNA cuenta
+    repartiendo el monto entre efectivo y transferencia, se imprime UN solo ticket con
+    ambos tramos en vez de dos recibos. Con desglose, 'metodo' global es 'mixto' y el
+    cajón se abre si algún tramo fue en efectivo.
+
+    Tolera cualquier fallo: la impresión no debe tumbar el cobro ya registrado.
     """
     try:
         saldo = max(0, int(total) - int(abono))
+        desg = [d for d in (desglose or []) if int(d.get("monto") or 0) > 0]
+        tiene_efectivo = (metodo == "efectivo") or any(
+            str(d.get("metodo")) == "efectivo" for d in desg)
         payload = {
             "mesa": titulo,
             "items": _items_payload(ids),
@@ -71,9 +81,23 @@ def enqueue_recibo(ids, titulo: str, total: int, abono: int, metodo: str,
             "comprobante": comprobante or None,
             "recibido": int(recibido) if recibido is not None else None,
             "cambio": max(0, int(recibido) - int(abono)) if recibido is not None else 0,
-            "abrir_cajon": metodo == "efectivo",
+            "abrir_cajon": tiene_efectivo,
             "pedido_ids": [int(i) for i in ids],
         }
+        if desg:
+            tramos = []
+            for d in desg:
+                tramo = {"metodo": str(d.get("metodo")),
+                         "monto": int(d.get("monto") or 0),
+                         "submetodo": d.get("submetodo") or None,
+                         "comprobante": d.get("comprobante") or None}
+                # Tender del tramo en efectivo → Recibido/Cambio en el ticket.
+                if d.get("recibido") is not None:
+                    rec = int(d.get("recibido"))
+                    tramo["recibido"] = rec
+                    tramo["cambio"] = max(0, rec - int(tramo["monto"]))
+                tramos.append(tramo)
+            payload["desglose"] = tramos
         enqueue_job(RESTAURANTE_ID, "recibo", payload)
     except Exception:
         # El cobro ya está en la BD; un fallo de encolado no debe propagarse a la UI.

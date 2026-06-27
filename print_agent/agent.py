@@ -162,25 +162,48 @@ def imprimir_recibo(printer, payload: dict) -> None:
 
     # 4) Totales y desglose de pago.
     printer.text(linea_precio("Total", payload.get("total", 0), ANCHO_B) + "\n")
-    printer.set(bold=True)
-    # En transferencia, anexa la billetera (Nequi/Daviplata/Bre-B) a la etiqueta del
-    # método: 'Pagado (Transferencia · Nequi)'. En efectivo queda 'Pagado (Efectivo)'.
-    metodo = str(payload.get("metodo", "")).capitalize()
-    if payload.get("metodo") == "transferencia":
-        sub = SUBMETODO_LABEL.get(str(payload.get("submetodo") or "").lower())
-        if sub:
-            metodo = f"{metodo} · {sub}"
-    printer.text(linea_precio(f"Pagado ({metodo})", payload.get("pagado", 0), ANCHO_B) + "\n")
-    printer.set(bold=False)
+    # Pago MIXTO (payload['desglose']): una sola persona pagó esta cuenta repartiendo
+    # el monto entre efectivo y transferencia → imprimimos el total pagado y debajo cada
+    # tramo, en UN solo ticket. En un cobro de método único mantenemos la línea de siempre.
+    desglose = payload.get("desglose") or []
+    if desglose:
+        printer.set(bold=True)
+        printer.text(linea_precio("Pagado (Mixto)", payload.get("pagado", 0), ANCHO_B) + "\n")
+        printer.set(bold=False)
+        for tramo in desglose:
+            etiqueta = str(tramo.get("metodo", "")).capitalize()
+            if tramo.get("metodo") == "transferencia":
+                sub = SUBMETODO_LABEL.get(str(tramo.get("submetodo") or "").lower())
+                if sub:
+                    etiqueta = f"{etiqueta} · {sub}"
+            printer.text(linea_precio(f"  {etiqueta}", tramo.get("monto", 0), ANCHO_B) + "\n")
+            comp_t = str(tramo.get("comprobante") or "").strip()
+            if tramo.get("metodo") == "transferencia" and comp_t:
+                printer.text(f"  Comp. {comp_t}\n")
+            # Tender del tramo en efectivo (Recibido/Cambio), si vino.
+            if tramo.get("metodo") == "efectivo" and tramo.get("recibido") is not None:
+                printer.text(linea_precio("  Recibido", tramo.get("recibido", 0), ANCHO_B) + "\n")
+                printer.text(linea_precio("  Cambio", tramo.get("cambio", 0), ANCHO_B) + "\n")
+    else:
+        printer.set(bold=True)
+        # En transferencia, anexa la billetera (Nequi/Daviplata/Bre-B) a la etiqueta del
+        # método: 'Pagado (Transferencia · Nequi)'. En efectivo queda 'Pagado (Efectivo)'.
+        metodo = str(payload.get("metodo", "")).capitalize()
+        if payload.get("metodo") == "transferencia":
+            sub = SUBMETODO_LABEL.get(str(payload.get("submetodo") or "").lower())
+            if sub:
+                metodo = f"{metodo} · {sub}"
+        printer.text(linea_precio(f"Pagado ({metodo})", payload.get("pagado", 0), ANCHO_B) + "\n")
+        printer.set(bold=False)
 
-    # Comprobante de la transferencia (n.º de transacción), si se registró.
-    comprobante = str(payload.get("comprobante") or "").strip()
-    if payload.get("metodo") == "transferencia" and comprobante:
-        printer.text(f"Comp. {comprobante}\n")
+        # Comprobante de la transferencia (n.º de transacción), si se registró.
+        comprobante = str(payload.get("comprobante") or "").strip()
+        if payload.get("metodo") == "transferencia" and comprobante:
+            printer.text(f"Comp. {comprobante}\n")
 
-    if payload.get("metodo") == "efectivo" and payload.get("recibido") is not None:
-        printer.text(linea_precio("Recibido", payload.get("recibido", 0), ANCHO_B) + "\n")
-        printer.text(linea_precio("Cambio", payload.get("cambio", 0), ANCHO_B) + "\n")
+        if payload.get("metodo") == "efectivo" and payload.get("recibido") is not None:
+            printer.text(linea_precio("Recibido", payload.get("recibido", 0), ANCHO_B) + "\n")
+            printer.text(linea_precio("Cambio", payload.get("cambio", 0), ANCHO_B) + "\n")
 
     saldo = int(payload.get("saldo", 0) or 0)
     if saldo > 0:
