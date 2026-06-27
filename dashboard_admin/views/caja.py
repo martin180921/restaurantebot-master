@@ -623,6 +623,24 @@ def _render_cierre():
         unsafe_allow_html=True,
     )
 
+    # Resultado del último cierre (REVELACIÓN del conteo a ciegas): tras finalizar el turno se
+    # muestra aquí, prominente, si la caja cuadró o cuánto faltó/sobró. Se consume una sola vez
+    # (la caja contó a ciegas, así que este es el momento en que se entera del resultado).
+    _res = st.session_state.pop("_cierre_resultado", None)
+    if _res:
+        dif = int(_res["diferencia"])
+        contado = int(_res["efectivo_real"])
+        if dif == 0:
+            _pill("#dcfce7", "#86efac", "#14532d",
+                  f"✅ Caja cuadrada. Contaste ${fmt_money(contado)} y coincide con lo esperado.")
+        elif dif < 0:
+            _pill("#fef3c7", "#fcd34d", "#92400e",
+                  f"⚠️ Faltante en caja: -${fmt_money(-dif)} (contaste ${fmt_money(contado)}).")
+        else:
+            _pill("#e9e7fb", "#bcb4f0", "#4b43b0",
+                  f"ℹ️ Sobrante en caja: +${fmt_money(dif)} (contaste ${fmt_money(contado)}).")
+        st.markdown("<div style='height:10px;'></div>", unsafe_allow_html=True)
+
     cierre = cierre_activo()
 
     # ── ESTADO A: caja cerrada (sin turno activo) ───────────────────────────────
@@ -664,7 +682,28 @@ def _render_cierre():
         neto_mov = neto_movimientos(int(cierre["id"]))
         total_esperado = monto_apertura + efvo_esp + neto_mov
 
-        # Banner de turno abierto.
+        # ¿Se revela lo ESPERADO? El conteo a ciegas (control anti-descuadre) oculta a la CAJA
+        # cuánto debería haber: el empleado cuenta, cierra y SOLO ENTONCES ve si cuadró. El admin
+        # (see_revenue → único con visibilidad de ventas) sí ve lo esperado y la diferencia en vivo.
+        ver_esperado = auth.can("see_revenue")
+
+        # Banner de turno abierto. El lado derecho muestra lo esperado solo al admin; a la caja
+        # le explica el conteo a ciegas en su lugar.
+        if ver_esperado:
+            lado_html = (
+                '<div style="text-align:right;">'
+                '<div class="metric-label">Esperado en caja</div>'
+                f'<div class="order-total" style="font-size:1.4rem;">${fmt_money(total_esperado)}</div>'
+                '</div>'
+            )
+        else:
+            lado_html = (
+                '<div style="text-align:right; max-width:240px;">'
+                '<div class="metric-label">🙈 Conteo a ciegas</div>'
+                '<div style="font-size:0.8rem; color:#6b6b64; line-height:1.3;">Cuenta el efectivo y '
+                'cierra; al finalizar el sistema te dirá si cuadra.</div>'
+                '</div>'
+            )
         st.markdown(f"""
         <div class="order-card" style="border-left:4px solid #16a34a; margin-bottom:1rem;">
           <div style="display:flex; justify-content:space-between; align-items:center;">
@@ -673,19 +712,20 @@ def _render_cierre():
               <div style="font-family:'DM Sans',sans-serif; font-size:1.2rem; font-weight:600; color:#26262b;">
                 Desde las {_hora(cierre["fecha_apertura"])}</div>
             </div>
-            <div style="text-align:right;">
-              <div class="metric-label">Esperado en caja</div>
-              <div class="order-total" style="font-size:1.4rem;">${fmt_money(total_esperado)}</div>
-            </div>
+            {lado_html}
           </div>
         </div>
         """, unsafe_allow_html=True)
 
-        # Métricas en vivo del turno.
-        m1, m2, m3 = st.columns(3)
-        _metric(m1, f"${fmt_money(monto_apertura)}", "Base de Apertura")
-        _metric(m2, f"${fmt_money(efvo_esp)}", "💵 Ventas Efectivo Esperadas", "metric-green")
-        _metric(m3, f"${fmt_money(transf_esp)}", "💳 Ventas Transferencia Esperadas", "metric-blue")
+        # Métricas en vivo del turno. Las ventas ESPERADAS solo para quien ve ingresos (admin);
+        # a la caja se le muestra únicamente la base (no compromete el conteo a ciegas).
+        if ver_esperado:
+            m1, m2, m3 = st.columns(3)
+            _metric(m1, f"${fmt_money(monto_apertura)}", "Base de Apertura")
+            _metric(m2, f"${fmt_money(efvo_esp)}", "💵 Ventas Efectivo Esperadas", "metric-green")
+            _metric(m3, f"${fmt_money(transf_esp)}", "💳 Ventas Transferencia Esperadas", "metric-blue")
+        else:
+            _metric(st.columns(1)[0], f"${fmt_money(monto_apertura)}", "Base de Apertura")
 
         cols = st.columns([3, 1])
         with cols[1]:
@@ -709,6 +749,12 @@ def _render_cierre():
                 unsafe_allow_html=True,
             )
 
+            # value por defecto: el admin (ve ingresos) arranca con lo esperado para verificar
+            # rápido; a la CAJA se le deja en 0 — conteo a ciegas: no debe ver el esperado, ni
+            # siquiera prellenado en el campo.
+            efvo_default = max(0, total_esperado) if ver_esperado else 0
+            transf_default = max(0, transf_esp) if ver_esperado else 0
+
             f1, f2 = st.columns(2)
             with f1:
                 # value se acota a >=0: 'total_esperado' puede salir NEGATIVO si los gastos /
@@ -716,38 +762,44 @@ def _render_cierre():
                 # value < min_value rompía el number_input. La diferencia sigue usando el
                 # total_esperado real (negativo) más abajo.
                 efectivo_real = int(st.number_input(
-                    "Efectivo Físico Contado ($)", min_value=0, value=max(0, total_esperado),
+                    "Efectivo Físico Contado ($)", min_value=0, value=efvo_default,
                     step=1000, format="%d", key=f"efectivo_real_{cierre['id']}",
                     help="Dinero en efectivo realmente contado en la caja.",
                 ) or 0)
             with f2:
                 transferencia_real = int(st.number_input(
-                    "Transferencias Verificadas en Banco ($)", min_value=0, value=max(0, transf_esp),
+                    "Transferencias Verificadas en Banco ($)", min_value=0, value=transf_default,
                     step=1000, format="%d", key=f"transferencia_real_{cierre['id']}",
                     help="Transferencias confirmadas en la cuenta bancaria.",
                 ) or 0)
 
-            # Cálculo en vivo de la diferencia de caja (solo efectivo).
+            # Diferencia de caja (solo efectivo). Se calcula siempre, pero el conteo a ciegas
+            # solo la REVELA tras cerrar: la caja no la ve en vivo (no podría "cuadrar a mano"),
+            # el admin sí.
             diferencia = efectivo_real - total_esperado
             st.markdown("<div style='height:4px;'></div>", unsafe_allow_html=True)
-            if diferencia == 0:
-                _pill("#dcfce7", "#86efac", "#14532d", "✅ Caja cuadrada perfectamente.")
-            elif diferencia < 0:
-                _pill("#fef3c7", "#fcd34d", "#92400e",
-                      f"⚠️ Faltante en caja: -${fmt_money(-diferencia)}")
-            else:
-                _pill("#e9e7fb", "#bcb4f0", "#4b43b0",
-                      f"ℹ️ Sobrante en caja: +${fmt_money(diferencia)}")
+            if ver_esperado:
+                if diferencia == 0:
+                    _pill("#dcfce7", "#86efac", "#14532d", "✅ Caja cuadrada perfectamente.")
+                elif diferencia < 0:
+                    _pill("#fef3c7", "#fcd34d", "#92400e",
+                          f"⚠️ Faltante en caja: -${fmt_money(-diferencia)}")
+                else:
+                    _pill("#e9e7fb", "#bcb4f0", "#4b43b0",
+                          f"ℹ️ Sobrante en caja: +${fmt_money(diferencia)}")
 
-            # Contraste de transferencias (contexto; no afecta la caja física).
-            dif_transf = transferencia_real - transf_esp
-            if dif_transf == 0:
-                transf_txt = "coinciden con lo esperado"
-            elif dif_transf < 0:
-                transf_txt = f"faltan ${fmt_money(-dif_transf)} por verificar"
+                # Contraste de transferencias (contexto; no afecta la caja física).
+                dif_transf = transferencia_real - transf_esp
+                if dif_transf == 0:
+                    transf_txt = "coinciden con lo esperado"
+                elif dif_transf < 0:
+                    transf_txt = f"faltan ${fmt_money(-dif_transf)} por verificar"
+                else:
+                    transf_txt = f"hay ${fmt_money(dif_transf)} de más sobre lo esperado"
+                st.caption(f"💳 Transferencias verificadas vs. esperadas: {transf_txt}.")
             else:
-                transf_txt = f"hay ${fmt_money(dif_transf)} de más sobre lo esperado"
-            st.caption(f"💳 Transferencias verificadas vs. esperadas: {transf_txt}.")
+                st.caption("🙈 Conteo a ciegas: cuenta el efectivo y las transferencias y finaliza "
+                           "el turno. Al cerrar verás si la caja cuadró o si falta/sobra.")
 
             st.markdown("<div style='height:6px;'></div>", unsafe_allow_html=True)
             if st.button("Finalizar Turno y Cerrar Caja", key="btn_finalizar_cierre",
@@ -760,6 +812,13 @@ def _render_cierre():
                     estado = f"faltante ${fmt_money(-diferencia)}"
                 else:
                     estado = f"sobrante ${fmt_money(diferencia)}"
+                # Guarda el resultado para REVELARLO en el próximo render (clave del conteo a
+                # ciegas: la caja recién aquí se entera de si cuadró o cuánto faltó/sobró).
+                st.session_state["_cierre_resultado"] = {
+                    "diferencia": int(diferencia),
+                    "efectivo_real": int(efectivo_real),
+                    "total_esperado": int(total_esperado),
+                }
                 flash(f"Turno cerrado · caja {estado}", "💰")
                 st.rerun()
 
