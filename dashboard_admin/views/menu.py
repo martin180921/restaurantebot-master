@@ -79,6 +79,87 @@ def _stock_chip(stock) -> str:
             f'📦 {s}</span>')
 
 
+# ── Disponibilidad y acordeón del menú (UI) ──────────────────────────────────────
+def _disponible_hoy(row) -> bool:
+    """True si la fila (plato o componente) se puede SERVIR hoy: activa, sin 86 manual
+    del día y con stock (o ilimitada). Es el criterio para subirla a la sección superior
+    'Disponibles' de su categoría; lo demás (inactivo / 86 / agotado) baja al fondo."""
+    return (bool(row["activo"])
+            and not _agotado_hoy(row.get("agotado_hasta"))
+            and not agotado_por_stock(row.get("stock")))
+
+
+def _partir_disponibles(sub):
+    """(disponibles, no_disponibles) conservando el orden por 'orden' dentro de cada
+    grupo (sub ya viene ordenado por cargar_catalogo()/cargar_componentes())."""
+    disp, no = [], []
+    if sub is not None and not sub.empty:
+        for _, row in sub.iterrows():
+            (disp if _disponible_hoy(row) else no).append(row)
+    return disp, no
+
+
+def _resumen_cat(sub) -> str:
+    """Texto para la cabecera de un acordeón de categoría: 'N disponibles · M no disp.'."""
+    disp, no = _partir_disponibles(sub)
+    if not disp and not no:
+        return "vacío"
+    txt = f"{len(disp)} disponible" + ("s" if len(disp) != 1 else "")
+    if no:
+        txt += f" · {len(no)} no disp."
+    return txt
+
+
+def _subseccion(texto: str, color: str) -> str:
+    """Encabezado de sub-sección (Disponibles / No disponibles) dentro de una categoría."""
+    return (f'<div style="font-family:\'DM Sans\',sans-serif; font-size:0.78rem; '
+            f'font-weight:600; color:{color}; letter-spacing:0.05em; '
+            f'text-transform:uppercase; margin:0.7rem 0 0.5rem 0;">{texto}</div>')
+
+
+def _inject_accordion_css():
+    """Estilo de las cabeceras de acordeón del Menú (botones con key 'acc_*'): ancho
+    completo, alineadas a la izquierda y con aspecto de cabecera plegable (no de botón).
+    Se inyecta DESPUÉS del CSS global de panel.py; la variante anclada en
+    div[data-testid="stColumn"] iguala/gana la especificidad de las reglas de columna
+    (mismo patrón que los botones semánticos del panel)."""
+    st.markdown("""
+    <style>
+    [class*="st-key-acc_"] button,
+    div[data-testid="stColumn"] [class*="st-key-acc_"] .stButton > button {
+        text-align: left !important; justify-content: flex-start !important;
+        background: #fbfbf9 !important; border: 1px solid #ececec !important;
+        border-radius: 12px !important; padding: 12px 16px !important;
+        font-size: 0.95rem !important; font-weight: 600 !important;
+        color: #26262b !important; margin: 6px 0 !important; min-height: 0 !important;
+    }
+    [class*="st-key-acc_"] button:hover,
+    div[data-testid="stColumn"] [class*="st-key-acc_"] .stButton > button:hover {
+        background: #f2f1ed !important; border-color: #d8d6cf !important; color: #26262b !important;
+    }
+    [class*="st-key-acc_"] button p,
+    div[data-testid="stColumn"] [class*="st-key-acc_"] .stButton > button p {
+        text-align: left !important; margin: 0 !important; width: 100% !important; font-weight: 600 !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+
+def _acc_header(key: str, label: str, resumen: str = "") -> bool:
+    """Cabecera de una sección de acordeón. El estado abierto/cerrado vive en
+    session_state['acc_open_<key>'] para SOBREVIVIR a los st.rerun() de cada acción de la
+    tarjeta (activar / 86 / editar / eliminar): st.expander reinicia su estado en cada
+    rerun, por eso aquí se gestiona a mano. Devuelve True si la sección queda desplegada."""
+    open_key = f"acc_open_{key}"
+    abierto = bool(st.session_state.get(open_key, False))
+    chevron = "▾" if abierto else "▸"
+    extra = f"   ·   {resumen}" if resumen else ""
+    if st.button(f"{chevron}   {label}{extra}", key=f"acc_{key}", use_container_width=True):
+        st.session_state[open_key] = not abierto
+        st.rerun()
+    return bool(st.session_state.get(open_key, False))
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # DB: componentes del Plato del Día (tabla menu_componentes)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -352,7 +433,11 @@ def _render_grupo(sub, grupo: str):
         st.markdown('<p style="color:#a3a39b; font-size:0.82rem;">Sin opciones.</p>',
                     unsafe_allow_html=True)
     else:
-        for _, row in sub.iterrows():
+        # Disponibles primero; inactivos / agotados / 86 bajan al fondo del grupo (mismo
+        # criterio que las categorías del catálogo). La columna es estrecha, así que aquí
+        # solo se REORDENA, sin encabezados de sub-sección.
+        disp, no = _partir_disponibles(sub)
+        for row in disp + no:
             _componente_card(row, grupo)
 
     # Alta rápida de una opción (la clave se rota con un nonce para limpiar el input).
@@ -441,7 +526,7 @@ def _render_catalogo_tab(categoria: str, label: str, con_precio: bool):
     col_lista, col_form = st.columns([2, 1])
 
     with col_lista:
-        st.markdown(f'<div class="section-title">{label}</div>', unsafe_allow_html=True)
+        # El título de la categoría ya lo muestra la cabecera del acordeón (ver render()).
         if not con_precio:
             st.caption(f"Precio plano de la categoría: ${fmt_money(precio_especiales())}. "
                        "Cámbialo en ⚙️ Ajustes (se aplica a todas por igual).")
@@ -450,8 +535,23 @@ def _render_catalogo_tab(categoria: str, label: str, con_precio: bool):
             st.markdown('<p style="color:#a3a39b; font-size:0.85rem;">No hay platos en esta sección.</p>',
                         unsafe_allow_html=True)
         else:
-            for _, row in sub.iterrows():
-                _item_card(row, categoria, con_precio)
+            # Disponibles (activo + con stock + sin 86) ARRIBA; el resto (inactivo /
+            # agotado / 86) en una sección aparte ABAJO. Así se ve de inmediato lo que se
+            # puede vender, sin filtrar visualmente lo no disponible.
+            disp, no = _partir_disponibles(sub)
+            st.markdown(_subseccion(f"● Disponibles · {len(disp)}", "#15803d"),
+                        unsafe_allow_html=True)
+            if disp:
+                for row in disp:
+                    _item_card(row, categoria, con_precio)
+            else:
+                st.markdown('<p style="color:#a3a39b; font-size:0.82rem;">Ninguno disponible ahora.</p>',
+                            unsafe_allow_html=True)
+            if no:
+                st.markdown(_subseccion(f"○ No disponibles · {len(no)}", "#a3a39b"),
+                            unsafe_allow_html=True)
+                for row in no:
+                    _item_card(row, categoria, con_precio)
 
     with col_form:
         _item_form(categoria, label, con_precio)
@@ -1309,21 +1409,33 @@ def render():
         _render_readonly()
         return
 
-    # Inventario e Importar se movieron a 💰 Caja (siguen definidos abajo y se llaman
-    # desde views/caja.py). Aquí el Menú queda enfocado en la carta y los ajustes.
-    t1, t2, t3, t4, t5, t6 = st.tabs([
-        "🍽️ Plato del Día", "⭐ Especiales", "📋 A la carta", "🍟 Adicionales",
-        "🥤 Bebidas", "⚙️ Ajustes",
-    ])
-    with t1:
+    # Acordeón vertical (reemplaza las pestañas): cada categoría se pliega/despliega de
+    # forma independiente para reducir el desplazamiento cuando la carta crece. El estado
+    # de apertura vive en session_state (ver _acc_header) y sobrevive a los st.rerun() de
+    # cada acción. Inventario e Importar se movieron a 💰 Caja (siguen definidos arriba y
+    # se llaman desde views/caja.py); aquí el Menú se enfoca en la carta y los ajustes.
+    _inject_accordion_css()
+    st.session_state.setdefault("acc_open_plato_dia", True)  # la principal, abierta al entrar
+
+    df_cat = cargar_catalogo()
+    df_comp = cargar_componentes()
+
+    # 🍽️ Plato del Día (componentes por grupo)
+    n_pd = len(_partir_disponibles(df_comp)[0])
+    if _acc_header("plato_dia", "🍽️ Plato del Día", f"{n_pd} opción(es) activa(s)"):
         _render_plato_dia()
-    with t2:
-        _render_catalogo_tab("especial", "Especiales", con_precio=False)
-    with t3:
-        _render_catalogo_tab("a_la_carta", "A la carta", con_precio=True)
-    with t4:
-        _render_catalogo_tab("adicional", "Adicionales", con_precio=True)
-    with t5:
-        _render_catalogo_tab("bebida", "Bebidas", con_precio=True)
-    with t6:
+
+    # Catálogo: Especiales / A la carta / Adicionales / Bebidas
+    for cat, label, con_precio in [("especial", "⭐ Especiales", False),
+                                   ("a_la_carta", "📋 A la carta", True),
+                                   ("adicional", "🍟 Adicionales", True),
+                                   ("bebida", "🥤 Bebidas", True)]:
+        sub = (df_cat[df_cat["categoria"] == cat]
+               if df_cat is not None and not df_cat.empty else df_cat)
+        if _acc_header(cat, label, _resumen_cat(sub)):
+            # _render_catalogo_tab espera la etiqueta SIN emoji (la del formulario).
+            _render_catalogo_tab(cat, label.split(" ", 1)[1], con_precio=con_precio)
+
+    # ⚙️ Ajustes (precios planos + recargo de entrega)
+    if _acc_header("ajustes", "⚙️ Ajustes"):
         _render_ajustes()

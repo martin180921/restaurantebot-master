@@ -774,7 +774,9 @@ def _render_mobile_shell():
 # SHELL ESCRITORIO (admin / caja) · navegación · contenido · pedidos en vivo
 # ══════════════════════════════════════════════════════════════════════════════
 def _render_desktop_shell():
-    col_nav, col_content, col_pedidos = st.columns([0.7, 3.3, 2.0], gap="medium")
+    # Proporciones: el panel de Pedidos (derecha) se estrechó (2.0 → 1.7) para dar más
+    # ancho al contenido (3.3 → 3.6), donde vive el Menú con sus categorías en acordeón.
+    col_nav, col_content, col_pedidos = st.columns([0.7, 3.6, 1.7], gap="medium")
 
     with col_nav:
         with st.container(border=True):
