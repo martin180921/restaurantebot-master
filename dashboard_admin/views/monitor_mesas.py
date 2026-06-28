@@ -283,6 +283,8 @@ def _abrir_dialogo_pendiente() -> None:
         pedidos.dialog_cancelar(d["pid"], d["uid"])
     elif kind == "descuento":
         pedidos.dialog_descuento(d["pid"], d["saldo"], d["uid"])
+    elif kind == "nota":
+        pedidos.dialog_nota(d["pid"], d["num_dia"], d["estado"], d["uid"])
     elif kind == "cambiar_mesa":
         _dialog_cambiar_mesa(d["origen_id"], d["nombre"], d["ids"], d["mesas_libres"], d["uid"])
 
@@ -596,13 +598,17 @@ def _detalle_pedido(row, idx: int):
 
     # Quién tomó el pedido (columna 'mesero'): NULL/vacío en los de QR/cliente → no se muestra.
     mesero_html = _mesero_html(row.get("mesero"))
+    # Nota del pedido (puede añadirse/editarse tras enviarlo con 📝 Nota).
+    nota_txt = _txt(row.get("nota_general")).strip()
+    nota_html = (f'<div style="font-size:0.8rem; color:#b45309; margin-top:4px;">📝 '
+                 f'{html.escape(nota_txt)}</div>') if nota_txt else ""
 
     st.markdown(f"""
     <div class="order-card mon-card"{borde}>
       <div style="display:flex; justify-content:space-between; align-items:flex-start;">
         <div>
           <div class="order-id">Pedido #{num_dia}{qr_chip}</div>{mesero_html}
-          <div class="order-items">{items}</div>
+          <div class="order-items">{items}</div>{nota_html}
           <div class="order-fecha">{fecha}</div>
         </div>
         <div style="text-align:right;">{pedidos.badge_html(estado)}<div class="order-total" style="margin-top:8px;">${fmt_money(saldo)}</div>{abono_html}{chip}</div>
@@ -610,7 +616,7 @@ def _detalle_pedido(row, idx: int):
     </div>
     """, unsafe_allow_html=True)
 
-    b1, b2, b3, b4, b5, b6 = st.columns(6)
+    b1, b2, b3, b4, b5, b6, b7 = st.columns(7)
     with b1:
         btn_label = pedidos.ESTADO_LABEL_BTN.get(estado)
         if btn_label and st.button(btn_label, key=f"avanzar_{uid}", type="primary",
@@ -645,6 +651,11 @@ def _detalle_pedido(row, idx: int):
             pedidos.flash(f"Comanda reenviada · Pedido #{pid}", "🍳")
             st.rerun()
     with b6:
+        # Añadir/editar la nota del pedido ya enviado (sin candado de rol: tarea de salón).
+        if st.button("📝 Nota", key=f"nota_{uid}", use_container_width=True,
+                     help="Añadir o editar la nota del pedido"):
+            _pedir_dialogo("nota", pid=int(pid), num_dia=num_dia, estado=estado, uid=uid)
+    with b7:
         # Anti-skimming: si la cuenta ya tocó caja (cobro iniciado / abono / pago), el
         # botón queda BLOQUEADO. Fase 3: modal centrado compartido con el tablero.
         if pedidos.puede_cancelar(row):
@@ -796,7 +807,7 @@ def _web_card(row, idx: int):
         unsafe_allow_html=True,
     )
 
-    b1, b2, b3, b4, b5, b6 = st.columns(6)
+    b1, b2, b3, b4, b5, b6, b7 = st.columns(7)
     with b1:
         btn_label = pedidos.ESTADO_LABEL_BTN.get(estado)
         if btn_label and st.button(btn_label, key=f"avanzar_{uid}", type="primary",
@@ -828,6 +839,11 @@ def _web_card(row, idx: int):
             pedidos.flash(f"Comanda reenviada · Pedido #{pid}", "🍳")
             st.rerun()
     with b6:
+        # Añadir/editar la nota del pedido web ya enviado (cambio de último momento).
+        if st.button("📝 Nota", key=f"nota_{uid}", use_container_width=True,
+                     help="Añadir o editar la nota del pedido"):
+            _pedir_dialogo("nota", pid=int(pid), num_dia=num_dia, estado=estado, uid=uid)
+    with b7:
         # Anti-skimming: bloqueado si la cuenta ya tocó caja (cobro iniciado / abono / pago).
         if pedidos.puede_cancelar(row):
             if st.button("✕ Cancelar", key=f"cancelar_{uid}", use_container_width=True):

@@ -155,7 +155,7 @@ def enqueue_comanda(pedido_id: int) -> None:
     """
     try:
         sql = text("""
-            SELECT p.numero_cliente, p.mesa_id, p.items, m.nombre AS mesa_nombre
+            SELECT p.numero_cliente, p.mesa_id, p.items, p.nota_general, m.nombre AS mesa_nombre
             FROM pedidos p LEFT JOIN mesas m ON m.id = p.mesa_id
             WHERE p.id = :id
         """)
@@ -167,6 +167,9 @@ def enqueue_comanda(pedido_id: int) -> None:
             "pedido_id": int(pedido_id),
             "mesa": row["mesa_nombre"] or row["numero_cliente"] or f"Pedido #{pedido_id}",
             "items": items_para_ticket(parse_items(row["items"])),
+            # Nota general del pedido (puede haberse añadido tras enviarlo) para que la
+            # cocina la vea en la comanda. NULL/vacía → el agente no imprime nada.
+            "nota": (str(row["nota_general"]).strip() or None) if row["nota_general"] else None,
             "abrir_cajon": False,
         }
         enqueue_job(RESTAURANTE_ID, "comanda", payload)

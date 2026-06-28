@@ -234,6 +234,14 @@ def imprimir_comanda(printer, payload: dict) -> None:
     printer.text("-" * ANCHO + "\n")
     # Ítems grandes (doble alto) para leerse de lejos; componentes en tamaño normal.
     _imprimir_items(printer, payload.get("items", []), grande=True)
+    # Nota general del pedido (cambio de último momento, alergia…): destacada y en grande
+    # para que la cocina no la pase por alto. Vacía/ausente → no se imprime.
+    nota = str(payload.get("nota") or "").strip()
+    if nota:
+        printer.text("-" * ANCHO + "\n")
+        printer.set(bold=True, double_height=True)
+        printer.text(f"NOTA: {nota}\n")
+        printer.set(bold=False, double_height=False)
     printer.text("-" * ANCHO + "\n")
     printer.cut()
 
@@ -388,6 +396,7 @@ def _payload_demo_comanda() -> dict:
             {"tipo": "especial", "nombre": "Bisteck a caballo", "cantidad": 1, "componentes": []},
             {"tipo": "bebida", "nombre": "Coca-Cola 350ml", "cantidad": 3, "componentes": []},
         ],
+        "nota": "Cambio: ahora es PARA LLEVAR",
         "abrir_cajon": False,
     }
 

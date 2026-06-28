@@ -709,6 +709,53 @@ def dialog_cancelar(pid: int, uid: str):
             st.rerun()
 
 
+# ── Nota de un pedido YA creado (añadir/editar después de enviarlo) ──────────────
+def actualizar_nota(pedido_id: int, nota: str) -> None:
+    """Reemplaza la nota general de un pedido existente (vacía → NULL) e invalida la
+    caché del tablero para que el cambio se vea de inmediato."""
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE pedidos SET nota_general = :n WHERE id = :id"),
+                     {"n": ((nota or "").strip() or None), "id": int(pedido_id)})
+    refrescar_pedidos()
+
+
+@st.dialog("📝 Nota del pedido")
+def dialog_nota(pid: int, num_dia, estado: str, uid: str):
+    """Añade o edita la nota de un pedido ya enviado (cambio de último momento, alergia,
+    'para llevar', etc.). La nota la ven caja y el monitor; con la casilla marcada se
+    reimprime la comanda para que la cocina vea la nota nueva (solo si sigue en cocina)."""
+    pid = int(pid)
+    with engine.connect() as conn:
+        actual = conn.execute(text("SELECT nota_general FROM pedidos WHERE id = :id"),
+                              {"id": pid}).scalar()
+    actual = (actual or "").strip()
+
+    st.markdown(f"Nota del **pedido #{num_dia}**. La ven caja y cocina.")
+    texto = st.text_area("Nota", value=actual, key=f"nota_txt_{uid}",
+                         label_visibility="collapsed",
+                         placeholder="Ej: sin cebolla, alergia al maní, ahora para llevar…")
+
+    # Reimprimir la comanda solo tiene sentido si el pedido sigue en cocina.
+    activa = estado in ESTADOS_ACTIVOS
+    reimprimir = (st.checkbox("🍳 Reimprimir comanda con la nota", value=True,
+                              key=f"nota_reimp_{uid}",
+                              help="Envía la comanda de nuevo a la cocina con esta nota.")
+                  if activa else False)
+
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("💾 Guardar nota", key=f"nota_guardar_{uid}", type="primary",
+                     use_container_width=True):
+            actualizar_nota(pid, texto)
+            if reimprimir:
+                enqueue_comanda(pid)
+            flash(f"Nota guardada · Pedido #{num_dia}", "📝")
+            st.rerun()
+    with c2:
+        if st.button("Volver", key=f"nota_volver_{uid}", use_container_width=True):
+            st.rerun()
+
+
 # ── Modal de cobro: efectivo/transferencia y abonos parciales (Fase: pagos) ──────
 # Pop-up centrado compartido entre el tablero y el monitor de mesas
 # (pedidos.dialog_cobrar). 'ids' = pedidos a cobrar (uno o varios); 'titulo' = mesa
