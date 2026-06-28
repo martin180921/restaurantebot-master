@@ -26,6 +26,16 @@ from db import (engine, titulo_seccion, cargar_mesas_activas, componentes_activo
 from utils.print_jobs import enqueue_comanda
 
 
+# El recargo de entrega se cobra una vez por CADA plato del pedido: Plato del Día,
+# Especiales y A la carta. Las Bebidas y los Adicionales NO suman recargo.
+FEE_TIPOS = ("plato_dia", "especial", "item")
+
+
+def _n_platos_recargo(items) -> int:
+    """Nº de platos (unidades) que cuentan para el recargo de entrega."""
+    return sum(int(it.get("cantidad", 0)) for it in items if it.get("tipo") in FEE_TIPOS)
+
+
 # ── DB: crear pedido de mesa ────────────────────────────────────────────────────
 def crear_pedido_manual(mesa_id: int, mesa_nombre: str, items: list, total: int,
                         nota_general=None) -> bool:
@@ -620,8 +630,10 @@ def _form_fragment():
 
         subtotal = sum(int(it["precio"]) * int(it["cantidad"]) for it in items)
         # Recargo de entrega: aplica a domicilio Y para llevar (mesa = 0), igual que la
-        # app pública. total = subtotal + recargo.
-        fee = 0 if es_mesa else fee_entrega()
+        # app pública. Se cobra una vez por CADA plato (no bebidas/adicionales).
+        fee_unit = 0 if es_mesa else fee_entrega()
+        n_platos = _n_platos_recargo(items)
+        fee = fee_unit * n_platos
         total = subtotal + fee
         for it in items:
             if it.get("tipo") == "plato_dia":
@@ -655,7 +667,7 @@ def _form_fragment():
             recargo_lbl = "Domicilio" if es_domicilio else "Para llevar"
             st.markdown(f"""
             <div style="display:flex; justify-content:space-between; padding:6px 0; font-size:0.85rem;">
-                <span style="color:#6b6b64;">Recargo · {recargo_lbl}</span>
+                <span style="color:#6b6b64;">Recargo · {recargo_lbl} ({n_platos} × ${fmt_money(fee_unit)})</span>
                 <span style="color:#6b6b64;">${fmt_money(fee)}</span>
             </div>""", unsafe_allow_html=True)
 

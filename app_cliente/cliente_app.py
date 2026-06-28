@@ -47,6 +47,15 @@ RESTAURANTE_ID = int(os.getenv("RESTAURANTE_ID", "1"))
 TIPO_QR = "mesa_qr"
 TIPO_LABEL = {"domicilio": "🛵 Domicilio", "para_llevar": "🛍️ Para Llevar"}
 
+# El recargo de entrega se cobra una vez por CADA plato del pedido: Plato del Día,
+# Especiales y A la carta. Las Bebidas y los Adicionales NO suman recargo.
+FEE_TIPOS = ("plato_dia", "especial", "item")
+
+
+def _n_platos_recargo(items) -> int:
+    """Nº de platos (unidades) que cuentan para el recargo de entrega."""
+    return sum(int(it.get("cantidad", 0)) for it in items if it.get("tipo") in FEE_TIPOS)
+
 
 def _normalizar_db_url(url):
     """Valida/normaliza DATABASE_URL (C7): 'postgres://' → 'postgresql://'."""
@@ -1319,10 +1328,12 @@ def _carta_mesa(comp, cat, ajustes):
     modo_lbl = st.radio("¿Cómo lo quieres?", ["🍽️ Para comer aquí", "🛍️ Para llevar"],
                         horizontal=True, label_visibility="collapsed", key="c_modo_mesa")
     para_llevar = modo_lbl.startswith("🛍️")
-    fee = fee_llevar if para_llevar else 0
+    n_platos = _n_platos_recargo(items)
+    fee = fee_llevar * n_platos if para_llevar else 0
     total = subtotal + fee
 
-    fee_html = (f'<div class="c-fee"><span>Recargo · Para llevar</span>'
+    fee_html = (f'<div class="c-fee"><span>Recargo · Para llevar '
+                f'({n_platos} × ${fmt_money(fee_llevar)})</span>'
                 f'<span>${fmt_money(fee)}</span></div>') if fee else ""
     st.markdown(
         f'<div class="c-summary">{_filas_resumen_html(items)}{fee_html}'
@@ -1372,13 +1383,17 @@ def _carta_delivery(comp, cat, ajustes):
                     unsafe_allow_html=True)
         return
 
+    n_platos = _n_platos_recargo(items)
+    fee_total = fee * n_platos
     subtotal = sum(int(it["precio"]) * int(it["cantidad"]) for it in items)
-    total = subtotal + fee
+    total = subtotal + fee_total
 
     fee_lbl = "Domicilio" if gate["tipo_entrega"] == "domicilio" else "Para llevar"
+    fee_html = (f'<div class="c-fee"><span>Recargo · {fee_lbl} '
+                f'({n_platos} × ${fmt_money(fee)})</span>'
+                f'<span>${fmt_money(fee_total)}</span></div>') if fee_total else ""
     st.markdown(
-        f'<div class="c-summary">{_filas_resumen_html(items)}'
-        f'<div class="c-fee"><span>Recargo · {fee_lbl}</span><span>${fmt_money(fee)}</span></div>'
+        f'<div class="c-summary">{_filas_resumen_html(items)}{fee_html}'
         f'<div class="c-total"><span>Total</span><span>${fmt_money(total)}</span></div></div>',
         unsafe_allow_html=True,
     )
@@ -1427,7 +1442,7 @@ def _carta_delivery(comp, cat, ajustes):
                     tipo_entrega=gate["tipo_entrega"], cliente_nombre=gate["nombre"],
                     cliente_telefono=gate["telefono"], direccion=gate["direccion"],
                     metodo_pago=metodo_pago, paga_con=paga_con,
-                    fee=fee, nota_general=(notas or "").strip(),
+                    fee=fee_total, nota_general=(notas or "").strip(),
                 )
             except SinStock as e:
                 # Se agotó algo: el pedido NO se creó. Conservamos el carrito para quitarlo.
