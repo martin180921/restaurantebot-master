@@ -5,6 +5,7 @@ from sqlalchemy import text, bindparam
 import pandas as pd
 import json
 import html
+import time
 from datetime import datetime
 
 import auth
@@ -1002,6 +1003,18 @@ def dialog_cobrar(ids, titulo, total, uid):
                 "saldo_antes": int(total), "saldo_despues": int(max(0, total - abono)),
                 "por_plato": bool(por_plato),
             })
+            # Recordatorio de cambio: si el cobro fue en efectivo (puro o el tramo de
+            # efectivo de un mixto) y sobró dinero, deja un aviso que el Monitor mantiene
+            # unos minutos para que el cajero no olvide cuánto vuelto sacar del cajón.
+            cambio_dar = 0
+            if es_efectivo and recibe > abono:
+                cambio_dar = recibe - abono
+            elif es_mixto and ef_monto > 0 and recibe_ef > ef_monto:
+                cambio_dar = recibe_ef - ef_monto
+            if cambio_dar > 0:
+                st.session_state["cambio_pendiente"] = {
+                    "monto": int(cambio_dar), "titulo": str(titulo), "ts": time.time(),
+                }
             st.session_state.pop(f"_cobro_lock_{uid}", None)
             if abono >= total:
                 flash(f"Pago completo · {titulo} · ${fmt_money(total)}", "💵")

@@ -85,6 +85,7 @@ CREATE TABLE IF NOT EXISTS pedidos (
     estado              VARCHAR(30)  NOT NULL DEFAULT 'pendiente',
     fecha               TIMESTAMP    NOT NULL DEFAULT NOW(),
     mesa_id             INTEGER      REFERENCES mesas(id),
+    mesero              VARCHAR(120),                          -- quién tomó el pedido (NULL si lo armó el cliente)
     motivo_cancelacion  TEXT,
     cancelled_at        TIMESTAMP,
     pagado              BOOLEAN      NOT NULL DEFAULT FALSE,
@@ -269,6 +270,7 @@ ALTER TABLE menu    ADD COLUMN IF NOT EXISTS descripcion TEXT;
 ALTER TABLE menu             ADD COLUMN IF NOT EXISTS stock INTEGER;  -- inventario diario (NULL = ilimitado)
 ALTER TABLE menu_componentes ADD COLUMN IF NOT EXISTS stock INTEGER;  -- inventario diario por componente
 ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS mesa_id INTEGER REFERENCES mesas(id);
+ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS mesero VARCHAR(120);
 ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS motivo_cancelacion TEXT;
 ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP;
 ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS pagado BOOLEAN NOT NULL DEFAULT FALSE;

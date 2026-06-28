@@ -61,6 +61,9 @@ engine = create_engine(
 def _ensure_schema():
     with engine.begin() as conn:
         conn.execute(text("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS motivo_cancelacion TEXT"))
+        # mesero: quién tomó el pedido (nombre del actor en sesión al crearlo). NULL en los
+        # pedidos del cliente (app pública / QR), que no los arma personal. Lo muestra el Monitor.
+        conn.execute(text("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS mesero VARCHAR(120)"))
         # cancelled_at: marca de tiempo de la cancelación, para el historial del
         # administrador (agrupa los cancelados por día). Se rellena al cancelar; los
         # cancelados previos a esta columna quedan NULL y caen bajo su 'fecha' de creación.
@@ -678,7 +681,18 @@ def inventario_de_items(items):
         # entrada/principio/proteína/bebida descuentan UNA porción de su componente; los
         # acompañamientos, una por cada uno elegido (con repetición). Un especial solo
         # trae entrada/bebida → los demás grupos faltan en su cfg y se omiten solos.
+        # Principio 'mitad y mitad' (mixto): config['principio_mixto'] = [compA, compB]
+        # lleva los nombres REALES de los dos principios combinados; descuenta UNA porción
+        # de CADA uno (el campo 'principio' es solo la etiqueta '½ A · ½ B' para mostrar e
+        # imprimir). Sin esa lista, el principio descuenta como un componente normal.
+        mixto = cfg.get("principio_mixto")
         for g in ("entrada", "principio", "proteina", "bebida"):
+            if g == "principio" and mixto:
+                for nom in mixto:
+                    if nom:
+                        k = ("principio", str(nom).strip().lower())
+                        comp_qty[k] = comp_qty.get(k, 0) + cant
+                continue
             v = cfg.get(g)
             if v:
                 k = (g, str(v).strip().lower())

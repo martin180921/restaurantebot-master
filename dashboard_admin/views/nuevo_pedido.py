@@ -16,6 +16,7 @@ from sqlalchemy import text
 import json
 import html
 
+import auth
 from db import (engine, titulo_seccion, cargar_mesas_activas, componentes_activos_por_grupo,
                 cargar_catalogo, disponibles, precio_plato_dia,
                 num_acompanamientos, fmt_money, flash, drain_toasts,
@@ -31,14 +32,15 @@ def crear_pedido_manual(mesa_id: int, mesa_nombre: str, items: list, total: int,
     """Crea un pedido de mesa con numeración diaria atómica (siguiente_num_dia) y descuento
     de inventario con guarda. Devuelve True si se creó; False si se rechazó por falta de
     stock (en ese caso NADA quedó insertado y se avisa qué se agotó)."""
+    mesero = auth.actor()[0]  # quién toma el pedido (nombre del actor en sesión)
     try:
         with engine.begin() as conn:
             # num_dia atómico ANTES del INSERT: toma el lock del día y serializa la creación.
             num = siguiente_num_dia(conn)
             nuevo_id = conn.execute(text("""
                 INSERT INTO pedidos
-                  (num_dia, numero_cliente, items, total, estado, mesa_id, tipo_entrega, nota_general)
-                VALUES (:num, :numero, :items, :total, 'pendiente', :mesa_id, 'mesa', :ng)
+                  (num_dia, numero_cliente, items, total, estado, mesa_id, tipo_entrega, nota_general, mesero)
+                VALUES (:num, :numero, :items, :total, 'pendiente', :mesa_id, 'mesa', :ng, :mesero)
                 RETURNING id
             """), {
                 "num":     num,
@@ -47,6 +49,7 @@ def crear_pedido_manual(mesa_id: int, mesa_nombre: str, items: list, total: int,
                 "total":   total,
                 "mesa_id": mesa_id,
                 "ng":      (nota_general or None),
+                "mesero":  mesero,
             }).scalar_one()
             # Descuento inmediato del inventario (mismo txn que el INSERT → atómico): si una
             # opción rastreada no alcanza, SinStock revienta el txn y el pedido NO se crea
@@ -76,21 +79,22 @@ def crear_pedido_entrega(tipo: str, items: list, total: int, *, cliente_nombre,
     nombre = (cliente_nombre or "").strip()
     telefono = (cliente_telefono or "").strip()
     numero = nombre or telefono or etq          # numero_cliente es NOT NULL (legado)
+    mesero = auth.actor()[0]  # quién toma el pedido de entrega desde el POS del mesero
     try:
         with engine.begin() as conn:
             num = siguiente_num_dia(conn)
             nuevo_id = conn.execute(text("""
                 INSERT INTO pedidos
                   (num_dia, numero_cliente, items, total, estado, tipo_entrega, cliente_nombre,
-                   cliente_telefono, direccion, metodo_pago, paga_con, fee, nota_general)
-                VALUES (:num, :nc, :items, :total, 'pendiente', :te, :cn, :ct, :dir, :mp, :pc, :fee, :ng)
+                   cliente_telefono, direccion, metodo_pago, paga_con, fee, nota_general, mesero)
+                VALUES (:num, :nc, :items, :total, 'pendiente', :te, :cn, :ct, :dir, :mp, :pc, :fee, :ng, :mesero)
                 RETURNING id
             """), {
                 "num": num, "nc": numero, "items": json.dumps(items, ensure_ascii=False),
                 "total": int(total), "te": tipo, "cn": (nombre or None),
                 "ct": (telefono or None), "dir": ((direccion or "").strip() or None),
                 "mp": metodo_pago, "pc": int(paga_con or 0), "fee": int(fee or 0),
-                "ng": (nota_general or None),
+                "ng": (nota_general or None), "mesero": mesero,
             }).scalar_one()
             # Descuento de inventario en el mismo txn (igual que en los pedidos de mesa).
             aplicar_inventario(conn, items, -1)
@@ -187,19 +191,43 @@ def _default_grupo_sel(opciones) -> str:
     return NINGUNO
 
 
-def _selector_grupo(uid, grupo, opciones, label, *, default_ninguno=False):
+def _segunda_disp(opciones) -> str:
+    """Nombre de la 2ª opción DISPONIBLE (para preseleccionar la 'otra mitad' de un mixto y
+    no repetir la 1ª). Cae en la 1ª si solo hay una; en 'Ninguno' si no hay ninguna."""
+    disp = [o["nombre"] for o in opciones if not agotado_por_stock(o.get("stock"))]
+    if len(disp) >= 2:
+        return disp[1]
+    return disp[0] if disp else NINGUNO
+
+
+def _grupo_label(texto) -> str:
+    """Título de un grupo del Plato del Día (Entrada / Principio / Carnes / Acompañamientos…).
+    Más grande y oscuro que el resto del configurador para que el mesero ubique cada paso
+    de un vistazo al buscar el Plato del Día."""
+    return (f'<div style="font-size:1rem; color:#1a1a1f; font-weight:700; '
+            f'margin:14px 0 4px 0; letter-spacing:0.01em;">{texto}</div>')
+
+
+def _selector_grupo(uid, grupo, opciones, label, *, default_ninguno=False, default_nombre=None,
+                    mostrar_label=True):
     """Selector de UNA opción (entrada/principio/proteína) en botones — no st.radio —
     para poder deshabilitar individualmente las opciones agotadas (los radios de
     Streamlit no permiten desactivar opciones sueltas) y mostrar las porciones que
     quedan. 'Ninguno' siempre disponible. Devuelve el nombre elegido, o None (Ninguno).
     default_ninguno=True arranca en 'Ninguno' (para extras opcionales, p. ej. la
-    entrada/bebida incluidas en un especial); por defecto arranca en la 1ª disponible."""
+    entrada/bebida incluidas en un especial); default_nombre fija la opción inicial (lo usa
+    la 2ª mitad de un mixto); mostrar_label=False omite el título (cuando ya lo pintó quien
+    llama, p. ej. el selector de principio con su casilla de mixto); por defecto arranca en
+    la 1ª disponible."""
     key = f"pdpos_{uid}_{grupo}"
     if key not in st.session_state:
-        st.session_state[key] = NINGUNO if default_ninguno else _default_grupo_sel(opciones)
+        if default_nombre is not None:
+            st.session_state[key] = default_nombre
+        else:
+            st.session_state[key] = NINGUNO if default_ninguno else _default_grupo_sel(opciones)
     sel = st.session_state.get(key)
-    st.markdown(f'<div style="font-size:0.75rem; color:#6b6b64; margin-top:6px;">{label}</div>',
-                unsafe_allow_html=True)
+    if mostrar_label:
+        st.markdown(_grupo_label(label), unsafe_allow_html=True)
     botones = [{"nombre": NINGUNO, "stock": None, "disabled": False}]
     for o in opciones:
         botones.append({"nombre": o["nombre"], "stock": o.get("stock"),
@@ -219,6 +247,38 @@ def _selector_grupo(uid, grupo, opciones, label, *, default_ninguno=False):
                     st.session_state[key] = nombre
                     st.rerun(scope="fragment")
     return None if sel == NINGUNO else sel
+
+
+def _selector_principio(uid, opciones, label="Principio"):
+    """Selector del Principio con opción 'mitad y mitad' (mixto): un check despliega dos
+    sub-selectores para combinar DOS principios. Devuelve (texto, comps):
+      · texto → lo que se guarda en config['principio'] (un nombre, o 'Mitad A / Mitad B').
+      · comps → None en sencillo; [A, B] en mixto, para que el inventario descuente AMBOS.
+    Colapsa a sencillo si falta una mitad o las dos son iguales. La casilla solo aparece
+    cuando hay al menos dos principios disponibles (con uno, mezclar no tiene sentido)."""
+    disp = [o for o in opciones if not agotado_por_stock(o.get("stock"))]
+    if len(disp) < 2:
+        return _selector_grupo(uid, "principio", opciones, label), None
+
+    # El título del grupo encabeza; la casilla de mixto queda justo debajo para que se lea
+    # como una opción del Principio (no del grupo anterior).
+    st.markdown(_grupo_label(label), unsafe_allow_html=True)
+    es_mixto = st.checkbox("Mitad y mitad (combinar dos principios)",
+                           key=f"pdpos_{uid}_pmixto")
+    if not es_mixto:
+        return _selector_grupo(uid, "principio", opciones, label, mostrar_label=False), None
+
+    a = _selector_grupo(uid, "principio_a", opciones, "Primera mitad")
+    b = _selector_grupo(uid, "principio_b", opciones, "Segunda mitad",
+                        default_nombre=_segunda_disp(opciones))
+    if not a and not b:
+        return None, None
+    if not a or not b or a == b:        # una sola mitad elegida, o las dos iguales → sencillo
+        return (a or b), None
+    # Etiqueta SOLO-ASCII a propósito: este texto se imprime en la comanda térmica (80mm) y
+    # un '½'/'·' puede salir como basura según el codepage de la impresora. "Mitad X / Mitad Y"
+    # se lee igual de claro en pantalla y en papel.
+    return f"Mitad {a} / Mitad {b}", [a, b]
 
 
 def _render_alerta_cocina():
@@ -293,7 +353,9 @@ def _seccion_plato_dia(comp, precio, n):
 
         # Selectores con porciones restantes; las opciones en 0 quedan deshabilitadas.
         entrada   = _selector_grupo(uid, "entrada",   comp["entrada"],   "Entrada")
-        principio = _selector_grupo(uid, "principio", comp["principio"], "Principio")
+        # Principio admite 'mitad y mitad' (mixto): principio_mixto trae los dos componentes
+        # reales para que el inventario descuente ambos; principio es la etiqueta a mostrar.
+        principio, principio_mixto = _selector_principio(uid, comp["principio"], "Principio")
         proteina  = _selector_grupo(uid, "proteina",  comp["proteina"],  "Carnes o Proteína")
         # Bebida del día (incluida en el precio plano): solo se ofrece si el restaurante
         # configuró opciones de bebida para el Plato del Día. "Ninguno" permite omitirla.
@@ -302,8 +364,7 @@ def _seccion_plato_dia(comp, precio, n):
 
         cuentas = st.session_state.setdefault(f"pdpos_{uid}_acomp", {})
         elegidos = sum(cuentas.values())
-        st.markdown(f'<div style="font-size:0.75rem; color:#6b6b64; margin-top:6px;">'
-                    f'Acompañamientos ({elegidos}/{n})</div>', unsafe_allow_html=True)
+        st.markdown(_grupo_label(f"Acompañamientos ({elegidos}/{n})"), unsafe_allow_html=True)
         for a in comp["acompanamiento"]:
             aid = str(a["id"])
             stock_a = a.get("stock")
@@ -347,6 +408,8 @@ def _seccion_plato_dia(comp, precio, n):
 
         cfg = {"entrada": entrada, "principio": principio, "proteina": proteina,
                "acompanamientos": acomp_list}
+        if principio_mixto:
+            cfg["principio_mixto"] = principio_mixto
         if bebida:
             cfg["bebida"] = bebida
         plates.append({

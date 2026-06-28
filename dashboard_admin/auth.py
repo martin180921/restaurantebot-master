@@ -43,7 +43,9 @@ ROLE_VIEWS = {
     # ventas, Cancelaciones y Personal (marcaje de turno) en pestañas.
     ADMIN:  ["monitor", "menu", "mesas", "nuevo", "caja", "meseros", "admin"],
     CAJA:   ["monitor", "menu", "mesas", "nuevo", "caja", "meseros"],
-    MESERO: ["nuevo", "mesas", "monitor", "menu"],  # sin caja ni gestión de meseros
+    # Mesero NO gestiona mesas (crear/editar/borrar es tarea de caja/admin): solo toma
+    # pedidos (nuevo), ve el salón en vivo (monitor) y consulta el menú (solo lectura).
+    MESERO: ["nuevo", "monitor", "menu"],  # sin caja, sin gestión de mesas ni meseros
 }
 
 # Vista de aterrizaje por rol (la primera tarea de cada uno).

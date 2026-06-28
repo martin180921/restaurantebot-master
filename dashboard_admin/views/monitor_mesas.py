@@ -44,12 +44,68 @@ CARD_TINT = {
 # luego se borra solo (ver poda en _monitor_en_vivo).
 TRANSFER_WINDOW = 120  # s
 
+# Recordatorio de cambio: tras un cobro en efectivo con vuelto, pedidos.dialog_cobrar deja
+# session_state['cambio_pendiente'] = {monto, titulo, ts}. El Monitor lo muestra como banner
+# durante esta ventana (segundos) para que el cajero no olvide cuánto sacar del cajón; el
+# refresco de 30 s lo deja expirar solo, y un botón "Entregado" lo descarta antes.
+CAMBIO_WINDOW = 45  # s
+
 
 def _mesa_corto(nombre) -> str:
     """Etiqueta corta de una mesa para la metadata de transferencia: los dígitos del
     nombre ('Mesa 5' → '5') o, si no los hay, el nombre tal cual ('Terraza')."""
     s = str(nombre or "").strip()
     return "".join(c for c in s if c.isdigit()) or s
+
+
+def _banner_cambio(suf: str) -> None:
+    """Banner persistente con el cambio a entregar tras un cobro en efectivo. Lo deja
+    pedidos.dialog_cobrar en session_state; se muestra arriba del Monitor durante
+    CAMBIO_WINDOW s (o hasta que el cajero pulse 'Entregado'). 'suf' hace única la clave
+    del botón porque st.tabs ejecuta los dos fragmentos (salón y web) en cada render."""
+    info = st.session_state.get("cambio_pendiente")
+    if not info:
+        return
+    # Expira solo: el refresco de 30 s re-evalúa esto y lo descarta pasada la ventana.
+    if time.time() - float(info.get("ts", 0)) > CAMBIO_WINDOW:
+        st.session_state.pop("cambio_pendiente", None)
+        return
+    monto = int(info.get("monto", 0) or 0)
+    titulo = html.escape(str(info.get("titulo", "")))
+    c_msg, c_btn = st.columns([5, 1])
+    with c_msg:
+        st.markdown(
+            '<div style="background:#fef3c7; border:1px solid #f59e0b; border-radius:14px; '
+            'padding:0.9rem 1.2rem; display:flex; align-items:center; gap:14px;">'
+            '<span style="font-size:1.9rem; line-height:1;">💵</span>'
+            '<div><div style="font-family:\'DM Sans\',sans-serif; font-weight:700; '
+            f'font-size:1.2rem; color:#92400e;">Entregar cambio: ${fmt_money(monto)}</div>'
+            f'<div style="font-size:0.82rem; color:#b45309;">{titulo} · recuérdalo antes de '
+            'cerrar el cajón</div></div></div>',
+            unsafe_allow_html=True,
+        )
+    with c_btn:
+        # Rerun COMPLETO (no de fragmento) para que el banner desaparezca de ambas pestañas.
+        if st.button("✓ Entregado", key=f"cambio_ok_{suf}", use_container_width=True):
+            st.session_state.pop("cambio_pendiente", None)
+            _reanudar_refresco()   # ya entregó el cambio del cobro → reanuda el refresco en vivo
+            st.rerun()
+    st.markdown("<br>", unsafe_allow_html=True)
+
+
+def _mesero_html(mesero) -> str:
+    """Línea '🧑‍🍳 Tomó: <nombre>' para la tarjeta del pedido. Cadena vacía si la columna
+    'mesero' viene NULL/NaN/vacía (pedidos del cliente por QR o app pública)."""
+    try:
+        if mesero is None or pd.isna(mesero):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    nombre = str(mesero).strip()
+    if not nombre:
+        return ""
+    return (f'<div style="font-size:0.78rem; color:#6b6b64; margin-top:2px;">'
+            f'🧑‍🍳 Tomó: <b style="color:#45443e;">{html.escape(nombre)}</b></div>')
 
 
 # ── Cobro ───────────────────────────────────────────────────────────────────────
@@ -232,6 +288,7 @@ def _abrir_dialogo_pendiente() -> None:
 
 
 def _monitor_en_vivo():
+    _banner_cambio("salon")  # recordatorio de cambio del último cobro en efectivo
     st.markdown(titulo_seccion('🖥️ Monitor de mesas'), unsafe_allow_html=True)
 
     mesas = cargar_mesas_activas()
@@ -537,11 +594,14 @@ def _detalle_pedido(row, idx: int):
                'font-size:0.68rem; font-weight:700; margin-left:6px; vertical-align:middle;">'
                '📲 QR auto-servicio</span>') if es_qr else ""
 
+    # Quién tomó el pedido (columna 'mesero'): NULL/vacío en los de QR/cliente → no se muestra.
+    mesero_html = _mesero_html(row.get("mesero"))
+
     st.markdown(f"""
     <div class="order-card mon-card"{borde}>
       <div style="display:flex; justify-content:space-between; align-items:flex-start;">
         <div>
-          <div class="order-id">Pedido #{num_dia}{qr_chip}</div>
+          <div class="order-id">Pedido #{num_dia}{qr_chip}</div>{mesero_html}
           <div class="order-items">{items}</div>
           <div class="order-fecha">{fecha}</div>
         </div>
@@ -622,6 +682,7 @@ def _txt(valor) -> str:
 
 
 def _web_en_vivo():
+    _banner_cambio("web")  # mismo recordatorio de cambio en la pestaña de pedidos web
     st.markdown(titulo_seccion('🛵 Pedidos web · Domicilio y Para Llevar'),
                 unsafe_allow_html=True)
 
@@ -717,6 +778,7 @@ def _web_card(row, idx: int):
         f'<div>'
         f'<span class="badge" style="background:{bg}; color:{fg}; border:1px solid {bg};">{etiqueta}</span>'
         f'<div class="order-id" style="margin-top:6px;">Pedido #{num_dia}</div>'
+        f'{_mesero_html(row.get("mesero"))}'
         f'<div class="order-num">{contacto}</div>'
         f'{dir_html}'
         f'<div class="order-items">{items}</div>'

@@ -301,6 +301,7 @@ def init_db():
             ("paga_con",         "INTEGER"),
             ("fee",              "INTEGER NOT NULL DEFAULT 0"),
             ("nota_general",     "TEXT"),
+            ("mesero",           "VARCHAR(120)"),  # quién tomó el pedido (NULL en pedidos del cliente)
         ]:
             conn.execute(text(f"ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS {_col} {_ddl}"))
         conn.execute(text(
