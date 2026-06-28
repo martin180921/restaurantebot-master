@@ -390,18 +390,24 @@ def _render_plato_dia():
         unsafe_allow_html=True,
     )
 
+    # Cada grupo (Entrada / Principio / Proteína / Acompañamientos / Bebida) es ahora un
+    # acordeón a lo ANCHO en vez de una columna alta: las opciones crecían mucho hacia
+    # abajo. Solo se despliega el grupo que el admin está editando; el primero queda
+    # abierto para orientar. El estado abierto/cerrado sobrevive a los st.rerun() de cada
+    # acción (mismo mecanismo _acc_header que los acordeones del catálogo).
     df = cargar_componentes()
-    cols = st.columns(len(GRUPOS_COMPONENTE))
-    for col, grupo in zip(cols, GRUPOS_COMPONENTE):
-        with col:
-            _render_grupo(df[df["grupo"] == grupo] if not df.empty else df, grupo)
+    for idx, grupo in enumerate(GRUPOS_COMPONENTE):
+        sub = df[df["grupo"] == grupo] if not df.empty else df
+        _render_grupo(sub, grupo, default_open=(idx == 0))
 
 
-def _render_grupo(sub, grupo: str):
+def _render_grupo(sub, grupo: str, *, default_open: bool = False):
     label = GRUPO_LABEL.get(grupo, grupo.capitalize())
     activos = int((sub["activo"] == True).sum()) if not sub.empty else 0
-    st.markdown(f'<div class="section-title">{label} · {activos} activo(s)</div>',
-                unsafe_allow_html=True)
+    if not _acc_header(f"grupo_{grupo}", f"{label} · {activos} activo(s)",
+                       default_open=default_open):
+        return
+
     if grupo == "entrada":
         st.caption("Las sopas activas aparecen aquí junto a Fruta y Huevo. "
                    "Desactiva o marca 86 una sopa para ocultarla del día.")
@@ -411,23 +417,31 @@ def _render_grupo(sub, grupo: str):
                     unsafe_allow_html=True)
     else:
         # Disponibles primero; inactivos / agotados / 86 bajan al fondo del grupo (mismo
-        # criterio que las categorías del catálogo). La columna es estrecha, así que aquí
-        # solo se REORDENA, sin encabezados de sub-sección.
+        # criterio que las categorías del catálogo). Dentro del acordeón las tarjetas van
+        # en una rejilla de 3 para no volver a alargar la pantalla.
         disp, no = _partir_disponibles(sub)
-        for row in disp + no:
-            _componente_card(row, grupo)
+        cards = disp + no
+        ncols = 3
+        for i in range(0, len(cards), ncols):
+            fila = st.columns(ncols)
+            for j, col in enumerate(fila):
+                if i + j < len(cards):
+                    with col:
+                        _componente_card(cards[i + j], grupo)
 
     # Alta rápida de una opción (la clave se rota con un nonce para limpiar el input).
+    # En una columna estrecha para no estirar el botón a todo el ancho del acordeón.
     nonce = st.session_state.get(f"nonce_add_{grupo}", 0)
-    nuevo = st.text_input("Agregar", key=f"add_comp_{grupo}_{nonce}",
-                          placeholder="Nueva opción…", label_visibility="collapsed")
-    if st.button("➕ Agregar", key=f"btn_add_comp_{grupo}", use_container_width=True):
-        if nuevo.strip():
-            agregar_componente(grupo, nuevo)
-            st.session_state[f"nonce_add_{grupo}"] = nonce + 1
-            st.rerun()
-        else:
-            st.warning("Escribe un nombre.")
+    with st.columns([1, 2])[0]:
+        nuevo = st.text_input("Agregar", key=f"add_comp_{grupo}_{nonce}",
+                              placeholder="Nueva opción…", label_visibility="collapsed")
+        if st.button("➕ Agregar", key=f"btn_add_comp_{grupo}", use_container_width=True):
+            if nuevo.strip():
+                agregar_componente(grupo, nuevo)
+                st.session_state[f"nonce_add_{grupo}"] = nonce + 1
+                st.rerun()
+            else:
+                st.warning("Escribe un nombre.")
 
 
 def _componente_card(row, grupo: str):
