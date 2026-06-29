@@ -20,6 +20,7 @@ import time
 import auth
 from db import fmt_money, cargar_mesas_activas, saldo_pedido, titulo_seccion
 from views import pedidos
+from views import nuevo_pedido as npos
 
 
 # ── Colores de estado de mesa (paleta Light Mode existente) ─────────────────────
@@ -238,7 +239,8 @@ def render():
     # se fija al CREAR el fragmento, así que lo decidimos aquí (scope app) según la bandera.
     # Con un diálogo abierto → run_every=None: el fragmento no se auto-relanza y no descuadra
     # el modal. Sin diálogo → "30s" en vivo, como siempre.
-    rv = None if st.session_state.get("_mon_refresco_pausa") else "30s"
+    rv = (None if (st.session_state.get("_mon_refresco_pausa")
+                   or st.session_state.get("_edit_open")) else "30s")
 
     # Dos vistas aisladas: el salón (mesas) y los pedidos web (Domicilio / Para Llevar).
     tab_salon, tab_web = st.tabs(["🪑 Salón", "🛵 Pedidos web"])
@@ -252,6 +254,12 @@ def render():
     # Abre (una sola vez) el diálogo que pidió una tarjeta, ya FUERA de los fragmentos:
     # así es estable (como en caja) y los fragmentos quedan pausados mientras esté abierto.
     _abrir_dialogo_pendiente()
+
+    # Ventana de edición de pedido web: despacho PERSISTENTE (se re-pinta en cada rerun
+    # mientras esté abierta), también fuera de los fragmentos. La cierran sus botones.
+    if st.session_state.get("_edit_open"):
+        _dialog_editar(int(st.session_state["_edit_open"]),
+                       st.session_state.get("_edit_uid", ""))
 
 
 # ── Ventanas del monitor: abrir sin que el refresco de 30 s las descuadre ────────
@@ -287,6 +295,346 @@ def _abrir_dialogo_pendiente() -> None:
         pedidos.dialog_nota(d["pid"], d["num_dia"], d["estado"], d["uid"])
     elif kind == "cambiar_mesa":
         _dialog_cambiar_mesa(d["origen_id"], d["nombre"], d["ids"], d["mesas_libres"], d["uid"])
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# VENTANA: EDITAR PEDIDO DE ENTREGA (Domicilio / Para Llevar)
+# ══════════════════════════════════════════════════════════════════════════════
+# El cliente llama para agregar/quitar algo cuando el pedido ya está en cocina. Esta
+# ventana edita una COPIA de trabajo de los items (st.session_state["_edit_items_<pid>"])
+# y solo escribe al guardar (pedidos.actualizar_pedido_entrega, que ajusta el inventario
+# por el delta de forma atómica).
+#
+# IMPORTANTE (Streamlit): dentro de un @st.dialog NO se puede usar st.rerun(scope="fragment")
+# (solo vale en reruns de fragmento), así que NO se reutiliza el configurador del POS
+# —que sí lo usa— ni se envuelve el diálogo en un fragmento. Los botones de +/−/agregar usan
+# CALLBACKS on_click (mutan la copia de trabajo ANTES del re-render, manteniendo el modal
+# abierto); guardar/cancelar sí cierran con st.rerun(). El diálogo se DESPACHA de forma
+# PERSISTENTE (bandera "_edit_open") en render(): se vuelve a pintar en cada rerun mientras
+# esté abierto. Todas las claves de estado llevan prefijo "_edit_" para aislarlas del POS.
+def _editar_purgar(pid=None) -> None:
+    """Baja la bandera de despacho y limpia TODO el estado de la ventana de edición (copia
+    de trabajo, contadores y widgets). Solo hay una ventana abierta a la vez."""
+    for k in [k for k in list(st.session_state) if str(k).startswith("_edit_")]:
+        del st.session_state[k]
+
+
+def _edit_agregar_catalogo(items: list, tipo: str, prod: dict) -> None:
+    """Suma un producto de catálogo a la copia de trabajo: incrementa la línea si ya
+    existe (mismo tipo+id y sin config), o agrega una línea nueva con cantidad 1."""
+    pid_prod = int(prod["id"])
+    for it in items:
+        if (it.get("tipo") == tipo and int(it.get("id", -1)) == pid_prod
+                and not it.get("config")):
+            it["cantidad"] = int(it.get("cantidad", 1) or 1) + 1
+            return
+    items.append({"tipo": tipo, "id": pid_prod, "nombre": prod["nombre"],
+                  "precio": int(prod["precio"]), "cantidad": 1})
+
+
+# ── Callbacks on_click de la ventana de edición ─────────────────────────────────
+# Mutan la copia de trabajo ANTES del re-render, así el modal queda abierto sin llamar a
+# st.rerun (que cerraría el diálogo). Toleran índices viejos por si el estado cambió.
+def _cb_edit_rm(pid, idx):
+    items = st.session_state.get(f"_edit_items_{pid}")
+    if items and 0 <= idx < len(items):
+        items.pop(idx)
+
+
+def _cb_edit_inc(pid, idx):
+    items = st.session_state.get(f"_edit_items_{pid}")
+    if items and 0 <= idx < len(items):
+        it = items[idx]
+        it["cantidad"] = int(it.get("cantidad", 1) or 1) + 1
+
+
+def _cb_edit_dec(pid, idx):
+    items = st.session_state.get(f"_edit_items_{pid}")
+    if not items or not (0 <= idx < len(items)):
+        return
+    it = items[idx]
+    c = int(it.get("cantidad", 1) or 1)
+    if c > 1:
+        it["cantidad"] = c - 1
+    else:
+        items.pop(idx)
+
+
+def _cb_edit_dup(pid, idx):
+    items = st.session_state.get(f"_edit_items_{pid}")
+    if items and 0 <= idx < len(items):
+        items.append(dict(items[idx]))
+
+
+def _cb_edit_add_cat(pid, tipo, prod):
+    items = st.session_state.get(f"_edit_items_{pid}")
+    if items is not None:
+        _edit_agregar_catalogo(items, tipo, prod)
+
+
+def _cb_edit_acomp(pid, aid, delta, n):
+    counts = st.session_state.setdefault(f"_edit_acomp_{pid}", {})
+    if delta > 0 and sum(counts.values()) >= n:
+        return
+    c = counts.get(aid, 0) + delta
+    if c <= 0:
+        counts.pop(aid, None)
+    else:
+        counts[aid] = c
+
+
+def _cb_edit_add_pd(pid, precio_pd, acomp_names, n):
+    """Arma un Plato del Día desde los selectores + contadores y lo agrega a la copia de
+    trabajo, luego reinicia el sub-formulario para el siguiente plato."""
+    items = st.session_state.get(f"_edit_items_{pid}")
+    if items is None:
+        return
+    counts = st.session_state.get(f"_edit_acomp_{pid}", {})
+    if sum(counts.values()) != n:
+        return
+
+    def _val(g):
+        v = st.session_state.get(f"_edit_pd_{g}_{pid}")
+        return None if (v in (None, "Ninguno", "")) else v
+
+    acomp_list = []
+    for aid, c in counts.items():
+        nombre = acomp_names.get(aid)
+        if nombre:
+            acomp_list += [nombre] * int(c)
+    cfg = {"entrada": _val("entrada"), "principio": _val("principio"),
+           "proteina": _val("proteina"), "acompanamientos": acomp_list}
+    beb = _val("bebida")
+    if beb:
+        cfg["bebida"] = beb
+    nota = (st.session_state.get(f"_edit_pd_nota_{pid}") or "").strip()
+    items.append({"tipo": "plato_dia", "nombre": "Plato del Día", "precio": int(precio_pd),
+                  "cantidad": 1, "config": cfg, "nota": nota})
+    st.session_state[f"_edit_acomp_{pid}"] = {}
+    st.session_state[f"_edit_pd_nota_{pid}"] = ""
+
+
+def _editar_cerrar() -> None:
+    """Cierra la ventana de edición: limpia el estado, reanuda el refresco y re-ejecuta."""
+    _editar_purgar()
+    _reanudar_refresco()
+    st.rerun()
+
+
+def _on_edit_dismiss() -> None:
+    """El usuario cerró el modal con la ✕/Esc. Como el despacho es PERSISTENTE (bandera
+    "_edit_open"), hay que limpiar el estado aquí o el diálogo se reabriría en el siguiente
+    rerun. Streamlit re-ejecuta solo tras el callback, así que NO llamamos st.rerun."""
+    _editar_purgar()
+    _reanudar_refresco()
+
+
+@st.dialog("✏️ Editar pedido", width="large", on_dismiss=_on_edit_dismiss)
+def _dialog_editar(pid, uid):
+    pid = int(pid)
+    items_key = f"_edit_items_{pid}"
+
+    # Lee el pedido del tablero (caché de 8 s). Si ya no está activo, se cerró/cobró.
+    df = pedidos.cargar_pedidos()
+    sub = df[df["id"] == pid] if (not df.empty and "id" in df.columns) else df.iloc[0:0]
+    if sub.empty:
+        st.info("Este pedido ya no está disponible para editar.")
+        if st.button("Cerrar", key="_edit_close_btn", use_container_width=True):
+            _editar_cerrar()
+        return
+    row = sub.iloc[0]
+    estado = row.get("estado", "pendiente")
+    num_dia = row.get("num_dia") or pid
+
+    # Defensa en profundidad: la tarjeta ya oculta el botón fuera de la ventana editable.
+    if not (pedidos.puede_cancelar(row) and estado in ("pendiente", "en preparacion")):
+        st.warning("Ya no se puede editar este pedido (entró a caja o salió de cocina).")
+        if st.button("Cerrar", key="_edit_close_btn", use_container_width=True):
+            _editar_cerrar()
+        return
+
+    # Copia de trabajo (una sola vez por apertura): se edita en memoria y solo se persiste al
+    # guardar. dict(it) por línea para no mutar la caché del tablero. Se siembran también la
+    # nota y el cambio en sus claves de widget para precargarlos sin pelear con Streamlit.
+    if not st.session_state.get(f"_edit_load_{pid}"):
+        st.session_state[items_key] = [dict(it) for it in pedidos.parse_items(row.get("items"))]
+        st.session_state[f"_edit_ng_{pid}"] = _txt(row.get("nota_general"))
+        st.session_state[f"_edit_pc_{pid}"] = pedidos._a_entero(row.get("paga_con"))
+        st.session_state[f"_edit_acomp_{pid}"] = {}
+        st.session_state[f"_edit_load_{pid}"] = True
+    items = st.session_state[items_key]
+
+    df_cat    = npos.cargar_catalogo()
+    comp      = npos.componentes_activos_por_grupo()
+    precio_pd = npos.precio_plato_dia()
+    n_ac      = npos.num_acompanamientos()
+
+    st.markdown(f"**Pedido #{num_dia}** · {pedidos.formatear_fecha(row.get('fecha'))}")
+
+    # ── Productos actuales (modificar / quitar) ─────────────────────────────────
+    st.markdown('<div class="section-title">Productos del pedido</div>', unsafe_allow_html=True)
+    if not items:
+        st.markdown('<p style="color:#b45309; font-size:0.85rem;">El pedido quedó vacío. '
+                    'Agrega productos abajo o cancela la edición.</p>', unsafe_allow_html=True)
+    for idx in range(len(items)):
+        it = items[idx]
+        tipo   = it.get("tipo")
+        nombre = str(it.get("nombre") or "?")
+        precio = pedidos._a_entero(it.get("precio"))
+        cant   = max(1, pedidos._a_entero(it.get("cantidad") or 1))
+        cfg_txt = npos._cfg_text(it) if (tipo == "plato_dia" or it.get("config") or it.get("nota")) else ""
+        c_info, c_ctrl = st.columns([3, 2])
+        with c_info:
+            extra = (f'<div style="font-size:0.74rem; color:#a3a39b;">{html.escape(cfg_txt)}</div>'
+                     if cfg_txt else "")
+            st.markdown(
+                f'<div style="padding:6px 0;"><span style="font-size:0.9rem; color:#26262b;">'
+                f'{cant}× {html.escape(nombre)}</span> '
+                f'<span style="font-size:0.82rem; color:#6b6b64;">${fmt_money(precio * cant)}</span>'
+                f'{extra}</div>', unsafe_allow_html=True)
+        with c_ctrl:
+            if tipo == "plato_dia":
+                # Cada Plato del Día es una instancia con su propia config → quitar o duplicar.
+                d1, d2 = st.columns(2)
+                with d1:
+                    st.button("🗑", key=f"_edit_rm_{pid}_{idx}", use_container_width=True,
+                              help="Quitar este plato", on_click=_cb_edit_rm, args=(pid, idx))
+                with d2:
+                    st.button("＋ Otro", key=f"_edit_dup_{pid}_{idx}", use_container_width=True,
+                              help="Agregar otro igual", on_click=_cb_edit_dup, args=(pid, idx))
+            else:
+                mcol, qcol, pcol = st.columns([1, 1, 1])
+                with mcol:
+                    st.button("−", key=f"_edit_dec_{pid}_{idx}", use_container_width=True,
+                              on_click=_cb_edit_dec, args=(pid, idx))
+                with qcol:
+                    st.markdown(f'<div style="text-align:center; padding:4px 0; font-weight:600;">{cant}</div>',
+                                unsafe_allow_html=True)
+                with pcol:
+                    st.button("+", key=f"_edit_inc_{pid}_{idx}", use_container_width=True,
+                              on_click=_cb_edit_inc, args=(pid, idx))
+
+    # ── Agregar productos ───────────────────────────────────────────────────────
+    st.markdown('<div class="section-title">Agregar productos</div>', unsafe_allow_html=True)
+    SECCIONES = [("especial", "⭐ Especiales"), ("a_la_carta", "🍽️ A la carta"),
+                 ("adicional", "🍟 Adicionales"), ("bebida", "🥤 Bebidas")]
+    for cat, label in SECCIONES:
+        prods = npos._catalogo_seccion(df_cat, cat)
+        if not prods:
+            continue
+        tipo_item = "item" if cat == "a_la_carta" else cat
+        with st.expander(label):
+            for p in prods:
+                ca, cb = st.columns([4, 1])
+                with ca:
+                    desc = (f' · <span style="color:#a3a39b; font-style:italic;">'
+                            f'{html.escape(str(p.get("descripcion")))}</span>'
+                            if p.get("descripcion") else "")
+                    st.markdown(
+                        f'<div style="padding:4px 0; font-size:0.86rem;">'
+                        f'{html.escape(str(p["nombre"]))} '
+                        f'<span style="color:#6b6b64;">${fmt_money(p["precio"])}'
+                        f'{npos._stock_suffix(p.get("stock"))}</span>{desc}</div>',
+                        unsafe_allow_html=True)
+                with cb:
+                    st.button("➕", key=f"_edit_add_{pid}_{cat}_{p['id']}",
+                              use_container_width=True, on_click=_cb_edit_add_cat,
+                              args=(pid, tipo_item, p))
+
+    # Configurador para AGREGAR un Plato del Día (selectores simples + contadores). No usa
+    # los selectores de botón del POS porque esos llaman st.rerun(scope="fragment"), inválido
+    # dentro de un diálogo. El "mitad y mitad" no está aquí: para combinar, agrega dos platos.
+    pd_faltan = [g for g in ("entrada", "principio", "proteina", "acompanamiento")
+                 if not comp.get(g)]
+    if not pd_faltan:
+        with st.expander("🍛 Agregar Plato del Día"):
+            ent_opts = ["Ninguno"] + [a["nombre"] for a in comp["entrada"]]
+            pri_opts = [a["nombre"] for a in comp["principio"]]
+            pro_opts = [a["nombre"] for a in comp["proteina"]]
+            st.selectbox("Entrada", ent_opts, key=f"_edit_pd_entrada_{pid}")
+            st.selectbox("Principio", pri_opts, key=f"_edit_pd_principio_{pid}")
+            st.selectbox("Carnes o Proteína", pro_opts, key=f"_edit_pd_proteina_{pid}")
+            if comp.get("bebida"):
+                beb_opts = ["Ninguno"] + [a["nombre"] for a in comp["bebida"]]
+                st.selectbox("Bebida", beb_opts, key=f"_edit_pd_bebida_{pid}")
+
+            counts = st.session_state.setdefault(f"_edit_acomp_{pid}", {})
+            elegidos = sum(counts.values())
+            acomp_names = {str(a["id"]): a["nombre"] for a in comp["acompanamiento"]}
+            st.markdown(npos._grupo_label(f"Acompañamientos ({elegidos}/{n_ac})"),
+                        unsafe_allow_html=True)
+            for a in comp["acompanamiento"]:
+                aid = str(a["id"])
+                stock_a = a.get("stock")
+                agot = npos.agotado_por_stock(stock_a)
+                c = int(counts.get(aid, 0))
+                ac1, ac2, ac3, ac4 = st.columns([3, 1, 1, 1])
+                with ac1:
+                    color = "#a3a39b" if agot else "#26262b"
+                    st.markdown(f'<div style="padding:4px 0; font-size:0.86rem; color:{color};">'
+                                f'{html.escape(str(a["nombre"]))}{npos._stock_suffix(stock_a)}</div>',
+                                unsafe_allow_html=True)
+                with ac2:
+                    st.button("−", key=f"_edit_acm_{pid}_{aid}", use_container_width=True,
+                              on_click=_cb_edit_acomp, args=(pid, aid, -1, n_ac))
+                with ac3:
+                    st.markdown(f'<div style="text-align:center; padding:4px 0; font-weight:600;">{c}</div>',
+                                unsafe_allow_html=True)
+                with ac4:
+                    tope = (stock_a is not None and c >= int(stock_a))
+                    st.button("+", key=f"_edit_acp_{pid}_{aid}", use_container_width=True,
+                              disabled=(elegidos >= n_ac or agot or tope),
+                              on_click=_cb_edit_acomp, args=(pid, aid, +1, n_ac))
+            st.text_input("Nota del plato", key=f"_edit_pd_nota_{pid}",
+                          label_visibility="collapsed",
+                          placeholder="Nota para este plato (opcional)")
+            st.button("➕ Agregar este plato del día", key=f"_edit_pd_add_{pid}",
+                      use_container_width=True, disabled=(elegidos != n_ac),
+                      on_click=_cb_edit_add_pd, args=(pid, precio_pd, acomp_names, n_ac))
+
+    # ── Totales, nota y pago ────────────────────────────────────────────────────
+    st.markdown("---")
+    subtotal = sum(pedidos._a_entero(it.get("precio")) * max(1, pedidos._a_entero(it.get("cantidad") or 1))
+                   for it in items)
+    fee_unit = npos.fee_entrega()
+    n_platos = npos._n_platos_recargo(items)
+    fee   = fee_unit * n_platos
+    total = subtotal + fee
+    if fee:
+        st.caption(f"Recargo de entrega: {n_platos} × ${fmt_money(fee_unit)} = ${fmt_money(fee)}")
+
+    nota_general = st.text_input("Nota general del pedido", key=f"_edit_ng_{pid}",
+                                 placeholder="Nota general (opcional)")
+
+    metodo = _txt(row.get("metodo_pago"))
+    paga_con_val = pedidos._a_entero(st.session_state.get(f"_edit_pc_{pid}"))
+    if metodo == "efectivo":
+        paga_con_val = int(st.number_input(
+            "¿Con cuánto paga? (para el cambio)", min_value=0, step=1000, format="%d",
+            key=f"_edit_pc_{pid}") or 0)
+        if 0 < total <= paga_con_val:
+            st.caption(f"Cambio: ${fmt_money(paga_con_val - total)}")
+
+    st.markdown(
+        f'<div style="display:flex; justify-content:space-between; padding:8px 0;">'
+        f'<span style="font-family:\'DM Sans\',sans-serif; font-weight:600; color:#26262b;">Total</span>'
+        f'<span style="font-family:\'DM Sans\',sans-serif; font-size:1.3rem; font-weight:600; '
+        f'color:#26262b;">${fmt_money(total)}</span></div>', unsafe_allow_html=True)
+
+    c_save, c_cancel = st.columns(2)
+    with c_save:
+        if st.button("💾 Guardar cambios", key="_edit_save_btn", type="primary",
+                     use_container_width=True, disabled=(not items)):
+            ok, msg = pedidos.actualizar_pedido_entrega(
+                pid, items, total, fee, nota_general, paga_con_val)
+            if ok:
+                pedidos.flash(f"{msg} · Pedido #{num_dia}", "✏️")
+                _editar_cerrar()
+            else:
+                st.error(msg)
+    with c_cancel:
+        if st.button("Cancelar", key="_edit_cancel_btn", use_container_width=True):
+            _editar_cerrar()
 
 
 def _monitor_en_vivo():
@@ -807,7 +1155,7 @@ def _web_card(row, idx: int):
         unsafe_allow_html=True,
     )
 
-    b1, b2, b3, b4, b5, b6, b7 = st.columns(7)
+    b1, b2, b3, b4, b5, b6, b7, b8 = st.columns(8)
     with b1:
         btn_label = pedidos.ESTADO_LABEL_BTN.get(estado)
         if btn_label and st.button(btn_label, key=f"avanzar_{uid}", type="primary",
@@ -844,6 +1192,23 @@ def _web_card(row, idx: int):
                      help="Añadir o editar la nota del pedido"):
             _pedir_dialogo("nota", pid=int(pid), num_dia=num_dia, estado=estado, uid=uid)
     with b7:
+        # Editar items (agregar/quitar/modificar) de un pedido de entrega que aún está en
+        # preparación y no ha tocado caja. Tras cobrar/abonar queda bloqueado (igual que cancelar).
+        editable = pedidos.puede_cancelar(row) and estado in ("pendiente", "en preparacion")
+        if editable:
+            if st.button("✏️ Editar", key=f"editar_{uid}", use_container_width=True,
+                         help="Agregar o modificar productos del pedido"):
+                # Despacho PERSISTENTE (no el one-shot _pedir_dialogo): el editor usa
+                # callbacks on_click y debe re-pintarse en cada rerun mientras esté abierto.
+                st.session_state["_edit_open"] = int(pid)
+                st.session_state["_edit_uid"] = uid
+                st.session_state["_mon_refresco_pausa"] = True
+                st.rerun()
+        else:
+            st.button("✏️ Editar", key=f"editar_{uid}", use_container_width=True,
+                      disabled=True,
+                      help="Solo se puede editar mientras está en preparación y antes de cobrar.")
+    with b8:
         # Anti-skimming: bloqueado si la cuenta ya tocó caja (cobro iniciado / abono / pago).
         if pedidos.puede_cancelar(row):
             if st.button("✕ Cancelar", key=f"cancelar_{uid}", use_container_width=True):

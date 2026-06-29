@@ -13,7 +13,7 @@ import audit
 import empleados
 from db import (engine, titulo_seccion, fmt_money, fecha_corta, flash, drain_toasts,
                 saldo_pedido, cobrado_pedido, _es_pagado, _a_entero,
-                aplicar_inventario)
+                aplicar_inventario, SinStock)
 from utils.print_jobs import enqueue_recibo, enqueue_comanda, enqueue_prerecibo
 from utils.items import (formatear_items_html, lineas_por_categoria,
                          parse_items, etiqueta_item)
@@ -192,6 +192,51 @@ def cancelar_pedido(pedido_id: int, motivo: str = ""):
                     {"motivo": (motivo or "").strip() or None, "total": total_canc})
     flash(f"Pedido #{pedido_id} cancelado", "🗑️")
     st.rerun()
+
+
+# ── Edición de un pedido de domicilio / para llevar (cambios de último momento) ──
+# Reescribe los items de un pedido de entrega que SIGUE en preparación y aún no ha
+# tocado caja (cliente que llama para agregar una bebida, quitar un plato, etc.). El
+# inventario se ajusta por el DELTA dentro de la MISMA transacción: se reintegra lo
+# viejo y se descuenta lo nuevo, así que si algo de lo nuevo no alcanza, SinStock revienta
+# el txn y NADA cambia (ni items ni stock). Reimprime la comanda para que la cocina vea
+# el pedido corregido y deja rastro en el libro mayor.
+def actualizar_pedido_entrega(pid: int, nuevos_items: list, total: int, fee: int,
+                              nota_general: str, paga_con: int) -> tuple:
+    """Aplica una edición de items a un pedido de entrega. Devuelve (ok, mensaje).
+    Solo procede si el pedido está en 'pendiente'/'en preparacion' y no entró a caja."""
+    pid = int(pid)
+    if not nuevos_items:
+        return False, "El pedido no puede quedar vacío."
+    try:
+        with engine.begin() as conn:
+            row = conn.execute(text(
+                "SELECT items, estado, pagado, COALESCE(total_pagado, 0) AS tp, "
+                "COALESCE(cobro_iniciado, FALSE) AS ci FROM pedidos WHERE id = :id FOR UPDATE"
+            ), {"id": pid}).mappings().first()
+            if not row or row["estado"] == "cancelado":
+                return False, "El pedido ya no está disponible."
+            if row["pagado"] or int(row["tp"]) > 0 or row["ci"]:
+                return False, "No se puede editar: la cuenta ya entró a caja."
+            if row["estado"] not in ("pendiente", "en preparacion"):
+                return False, "Solo se puede editar mientras el pedido está en preparación."
+            # Delta de inventario atómico: reintegra lo viejo, luego descuenta lo nuevo. Si
+            # lo nuevo no alcanza, aplicar_inventario(-1) lanza SinStock → ROLLBACK total.
+            aplicar_inventario(conn, row["items"], +1)
+            aplicar_inventario(conn, nuevos_items, -1)
+            conn.execute(text(
+                "UPDATE pedidos SET items = :items, total = :total, fee = :fee, "
+                "nota_general = :ng, paga_con = :pc WHERE id = :id"
+            ), {"items": json.dumps(nuevos_items, ensure_ascii=False), "total": int(total),
+                "fee": int(fee), "ng": ((nota_general or "").strip() or None),
+                "pc": int(paga_con or 0), "id": pid})
+    except SinStock as e:
+        return False, f"Sin stock: {e}. Quita ese ítem y vuelve a guardar."
+    refrescar_pedidos()
+    enqueue_comanda(pid)   # la cocina recibe la comanda actualizada
+    audit.registrar("editar_pedido", "pedido", pid,
+                    {"total": int(total), "fee": int(fee), "n_items": len(nuevos_items)})
+    return True, "Pedido actualizado"
 
 
 # ── Descuentos y cortesías autorizados (FASE 1) ─────────────────────────────────

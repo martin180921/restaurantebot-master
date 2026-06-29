@@ -1,12 +1,13 @@
 """Vista de Resumen: cierre de caja y ventas por día (F2)."""
 import streamlit as st
-from sqlalchemy import text
+from sqlalchemy import text, bindparam
 import pandas as pd
 import json
 from datetime import date
 
 import auth
 from db import engine, fmt_money, saldo_pedido, cobrado_pedido, titulo_seccion
+from utils.items import formatear_items_texto
 
 
 # ── DB ───────────────────────────────────────────────────────────────────────────
@@ -14,13 +15,71 @@ def cargar_pedidos_dia(dia: date):
     """Pedidos cuya fecha cae en el día indicado (compara la parte de fecha)."""
     with engine.connect() as conn:
         rows = conn.execute(text("""
-            SELECT id, numero_cliente, items, total, estado, fecha,
-                   mesa_id, motivo_cancelacion, pagado, total_pagado
+            SELECT id, num_dia, numero_cliente, items, total, estado, fecha,
+                   mesa_id, motivo_cancelacion, pagado, total_pagado,
+                   tipo_entrega, cliente_nombre, metodo_pago, mesero, fee,
+                   descuento_valor, tipo_descuento, motivo_descuento, descuento_autoriza
             FROM pedidos
             WHERE fecha::date = :dia
             ORDER BY fecha
         """), {"dia": dia}).mappings().all()
     return [dict(r) for r in rows]
+
+
+def cargar_metodos_por_pedido(ids) -> dict:
+    """{pedido_id: {metodo: monto}} desde el libro 'pagos', consultado por pedido (no por
+    fecha de pago) para que el método del pedido sea correcto aunque se haya cobrado otro
+    día. Tolerante: si la tabla aún no existe (pre-migración) devuelve {}."""
+    ids = [int(i) for i in ids]
+    if not ids:
+        return {}
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(text(
+                "SELECT pedido_id, metodo, COALESCE(SUM(monto), 0) AS total "
+                "FROM pagos WHERE pedido_id IN :ids GROUP BY pedido_id, metodo"
+            ).bindparams(bindparam("ids", expanding=True)), {"ids": ids}).mappings().all()
+    except Exception:
+        return {}
+    out = {}
+    for r in rows:
+        out.setdefault(int(r["pedido_id"]), {})[r["metodo"]] = int(r["total"])
+    return out
+
+
+# Etiquetas de tipo de entrega para la tabla de pedidos del día.
+_TIPO_LABEL = {
+    "mesa":        "🪑 Mesa",
+    "mesa_qr":     "🪑 Mesa (QR)",
+    "domicilio":   "🛵 Domicilio",
+    "para_llevar": "🛍️ Para llevar",
+}
+
+
+def _tipo_norm(tipo_entrega) -> str:
+    """Normaliza tipo_entrega a una de las categorías de filtro. NULL/desconocido = mesa
+    (los pedidos de salón heredados pueden tener tipo_entrega NULL)."""
+    t = str(tipo_entrega or "").strip().lower()
+    if t in ("domicilio", "para_llevar"):
+        return t
+    if t == "mesa_qr":
+        return "mesa_qr"
+    return "mesa"
+
+
+def _metodo_label(metodos: dict) -> str:
+    """Etiqueta del método de pago real de un pedido a partir de su(s) abono(s)."""
+    if not metodos:
+        return "—"
+    efvo = metodos.get("efectivo", 0)
+    transf = metodos.get("transferencia", 0)
+    if efvo > 0 and transf > 0:
+        return "Mixto"
+    if efvo > 0:
+        return "Efectivo"
+    if transf > 0:
+        return "Transferencia"
+    return ", ".join(sorted(metodos.keys()))
 
 
 def cargar_cobros_por_metodo(dia: date) -> dict:
@@ -168,6 +227,98 @@ def render():
             st.bar_chart(serie, color="#16a34a", height=260)
         else:
             st.markdown('<p style="color:#a3a39b; font-size:0.85rem;">Sin ventas.</p>', unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── Pedidos del día (detalle con filtros) ──────────────────────────────────
+    # Para el administrador: TODOS los movimientos del día —incluidos descuentos y
+    # cancelados— filtrables por tipo de entrega (mesa / domicilio / para llevar) y por
+    # método de pago real (efectivo / transferencia, del libro de pagos).
+    st.markdown('<div class="section-title">Pedidos del día</div>', unsafe_allow_html=True)
+
+    metodos_por_pedido = cargar_metodos_por_pedido([p["id"] for p in pedidos])
+
+    f1, f2, f3 = st.columns(3)
+    with f1:
+        f_tipo = st.selectbox("Tipo", ["Todos", "🪑 Mesa", "🛵 Domicilio", "🛍️ Para llevar"],
+                              key="resumen_f_tipo")
+    with f2:
+        f_metodo = st.selectbox("Método de pago", ["Todos", "💵 Efectivo", "💳 Transferencia"],
+                                key="resumen_f_metodo")
+    with f3:
+        f_estado = st.selectbox("Estado", ["Todos", "Sin cancelados", "Solo cancelados"],
+                                key="resumen_f_estado")
+
+    tipo_pick = {"🪑 Mesa": "mesa", "🛵 Domicilio": "domicilio",
+                 "🛍️ Para llevar": "para_llevar"}.get(f_tipo)
+
+    filas, filtrados = [], []
+    for p in pedidos:
+        pid = int(p["id"])
+        tn = _tipo_norm(p.get("tipo_entrega"))
+        if tipo_pick == "mesa" and tn not in ("mesa", "mesa_qr"):
+            continue
+        if tipo_pick in ("domicilio", "para_llevar") and tn != tipo_pick:
+            continue
+        metodos = metodos_por_pedido.get(pid, {})
+        if f_metodo == "💵 Efectivo" and metodos.get("efectivo", 0) <= 0:
+            continue
+        if f_metodo == "💳 Transferencia" and metodos.get("transferencia", 0) <= 0:
+            continue
+        cancelado = p.get("estado") == "cancelado"
+        if f_estado == "Sin cancelados" and cancelado:
+            continue
+        if f_estado == "Solo cancelados" and not cancelado:
+            continue
+
+        dv = int(p.get("descuento_valor") or 0)
+        desc_txt = ""
+        if dv > 0:
+            tipo_d = str(p.get("tipo_descuento") or "").strip()
+            desc_txt = f"−${fmt_money(dv)}" + (f" ({tipo_d})" if tipo_d else "")
+        motivo = (p.get("motivo_cancelacion") if cancelado else p.get("motivo_descuento")) or ""
+        try:
+            hora = pd.to_datetime(p.get("fecha")).strftime("%H:%M")
+        except Exception:
+            hora = ""
+        quien = (str(p.get("numero_cliente") or "") if tn in ("mesa", "mesa_qr")
+                 else str(p.get("cliente_nombre") or p.get("numero_cliente") or ""))
+
+        filtrados.append(p)
+        filas.append({
+            "#":            p.get("num_dia") or pid,
+            "Hora":         hora,
+            "Tipo":         _TIPO_LABEL.get(tn, "🪑 Mesa"),
+            "Cliente/Mesa": quien,
+            "Items":        formatear_items_texto(p.get("items")),
+            "Total":        f"${fmt_money(int(p.get('total') or 0))}",
+            "Descuento":    desc_txt,
+            "Estado":       "❌ Cancelado" if cancelado else str(p.get("estado") or ""),
+            "Pago":         _metodo_label(metodos),
+            "Cobrado":      f"${fmt_money(cobrado_pedido(p))}",
+            "Saldo":        f"${fmt_money(saldo_pedido(p))}",
+            "Mesero":       str(p.get("mesero") or ""),
+            "Motivo":       motivo,
+        })
+
+    if not filas:
+        st.markdown('<p style="color:#a3a39b; font-size:0.85rem; padding:0.5rem 0;">'
+                    'No hay pedidos que coincidan con los filtros.</p>', unsafe_allow_html=True)
+    else:
+        n_f       = len(filtrados)
+        n_canc_f  = sum(1 for p in filtrados if p.get("estado") == "cancelado")
+        total_f   = sum(int(p.get("total") or 0) for p in filtrados if p.get("estado") != "cancelado")
+        cobr_f    = sum(cobrado_pedido(p) for p in filtrados if p.get("estado") != "cancelado")
+        desc_f    = sum(int(p.get("descuento_valor") or 0) for p in filtrados)
+        st.markdown(
+            f'<p style="color:#6b6b64; font-size:0.82rem; margin:2px 0 8px 0;">'
+            f'{n_f} pedidos · Facturado ${fmt_money(total_f)} · Cobrado ${fmt_money(cobr_f)} · '
+            f'Descuentos ${fmt_money(desc_f)} · Cancelados {n_canc_f}</p>',
+            unsafe_allow_html=True)
+        st.dataframe(pd.DataFrame(filas), hide_index=True, use_container_width=True)
+        st.markdown('<p style="color:#a3a39b; font-size:0.72rem;">El método de pago refleja el '
+                    'cobro real registrado; los pedidos sin cobrar (o pagados antes del libro de '
+                    'pagos) aparecen como “—”.</p>', unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
 
