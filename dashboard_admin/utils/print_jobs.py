@@ -60,6 +60,27 @@ def _meseros_de(ids) -> str | None:
     return " · ".join(nombres) if nombres else None
 
 
+def _entrega_de(ids):
+    """(tipo_entrega, telefono, direccion) cuando el recibo es de UN pedido de entrega
+    (domicilio/para_llevar), para imprimir el contacto del cliente en el ticket. (None, None,
+    None) si es de mesa, de varios pedidos o falla (una cuenta de mesa no tiene una dirección
+    única)."""
+    if len(ids) != 1:
+        return None, None, None
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(text(
+                "SELECT tipo_entrega, cliente_telefono, direccion FROM pedidos WHERE id = :id"
+            ), {"id": int(ids[0])}).mappings().first()
+    except Exception:
+        return None, None, None
+    if not row or str(row.get("tipo_entrega") or "") not in ("domicilio", "para_llevar"):
+        return None, None, None
+    tel = (str(row["cliente_telefono"]).strip() or None) if row["cliente_telefono"] else None
+    direccion = (str(row["direccion"]).strip() or None) if row["direccion"] else None
+    return str(row["tipo_entrega"]), tel, direccion
+
+
 def enqueue_recibo(ids, titulo: str, total: int, abono: int, metodo: str,
                    recibido: int | None = None, submetodo: str | None = None,
                    comprobante: str | None = None, desglose: list | None = None) -> None:
@@ -82,10 +103,14 @@ def enqueue_recibo(ids, titulo: str, total: int, abono: int, metodo: str,
         desg = [d for d in (desglose or []) if int(d.get("monto") or 0) > 0]
         tiene_efectivo = (metodo == "efectivo") or any(
             str(d.get("metodo")) == "efectivo" for d in desg)
+        _tipo_ent, _tel, _dir = _entrega_de(ids)   # H4: contacto de entrega (pedido único)
         payload = {
             "mesa": titulo,
             "items": _items_payload(ids),
             "mesero": _meseros_de(ids),   # H4: empleado(s) que tomaron el/los pedido(s)
+            "tipo_entrega": _tipo_ent,
+            "telefono": _tel,
+            "direccion": _dir,
             "total": int(total),
             "pagado": int(abono),
             "saldo": saldo,
@@ -169,7 +194,7 @@ def enqueue_comanda(pedido_id: int) -> None:
     try:
         sql = text("""
             SELECT p.numero_cliente, p.mesa_id, p.items, p.nota_general, p.mesero,
-                   m.nombre AS mesa_nombre
+                   p.tipo_entrega, p.cliente_telefono, p.direccion, m.nombre AS mesa_nombre
             FROM pedidos p LEFT JOIN mesas m ON m.id = p.mesa_id
             WHERE p.id = :id
         """)
@@ -183,6 +208,10 @@ def enqueue_comanda(pedido_id: int) -> None:
             "items": items_para_ticket(parse_items(row["items"])),
             # H4: empleado que tomó el pedido (NULL en pedidos del cliente / QR).
             "mesero": (str(row["mesero"]).strip() or None) if row["mesero"] else None,
+            # H4: datos de entrega para que el repartidor tenga la dirección en la comanda.
+            "tipo_entrega": row["tipo_entrega"] or None,
+            "telefono": (str(row["cliente_telefono"]).strip() or None) if row["cliente_telefono"] else None,
+            "direccion": (str(row["direccion"]).strip() or None) if row["direccion"] else None,
             # Nota general del pedido (puede haberse añadido tras enviarlo) para que la
             # cocina la vea en la comanda. NULL/vacía → el agente no imprime nada.
             "nota": (str(row["nota_general"]).strip() or None) if row["nota_general"] else None,

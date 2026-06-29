@@ -72,6 +72,28 @@ def _texto_atendio(printer, payload: dict) -> None:
     if mesero:
         printer.text(f"Atendió: {mesero}\n")
 
+
+# Etiqueta del tipo de entrega para el bloque de contacto del ticket.
+ENTREGA_LABEL = {"domicilio": "DOMICILIO", "para_llevar": "PARA LLEVAR"}
+
+
+def _imprimir_contacto(printer, payload: dict) -> None:
+    """Bloque de entrega: tipo (DOMICILIO / PARA LLEVAR) + teléfono + dirección del cliente,
+    cuando el pedido es de entrega. En pedidos de mesa/QR dine-in no trae estos campos →
+    no imprime nada. El repartidor necesita la dirección en el ticket físico, no solo en
+    pantalla. El llamador decide el énfasis (negrita) y dónde va dentro del encabezado."""
+    etiqueta = ENTREGA_LABEL.get(str(payload.get("tipo_entrega") or "").lower())
+    tel = str(payload.get("telefono") or "").strip()
+    direccion = str(payload.get("direccion") or "").strip()
+    if not (etiqueta or tel or direccion):
+        return
+    if etiqueta:
+        printer.text(f"** {etiqueta} **\n")
+    if tel:
+        printer.text(f"Tel: {tel}\n")
+    if direccion:
+        printer.text(f"Dir: {direccion}\n")
+
 # Billeteras de transferencia (submetodo del payload → etiqueta legible en el ticket).
 SUBMETODO_LABEL = {
     "nequi":     "Nequi",
@@ -178,6 +200,8 @@ def imprimir_recibo(printer, payload: dict) -> None:
     printer.text(f"{mesa}\n")
     printer.text(datetime.now().strftime("%d/%m/%Y  %H:%M") + "\n")
     _texto_atendio(printer, payload)   # empleado que tomó el pedido (si lo hay)
+    printer.set(align="left")
+    _imprimir_contacto(printer, payload)   # tipo + tel + dirección si es entrega
     printer.text("-" * ANCHO + "\n")
 
     # 3) Cuerpo en FUENTE B (más pequeña/estrecha): ítems, totales y pago. Ahorra papel
@@ -265,6 +289,10 @@ def imprimir_comanda(printer, payload: dict) -> None:
     printer.text(f"{payload.get('mesa') or '—'}\n")
     printer.text(datetime.now().strftime("%d/%m/%Y  %H:%M") + "\n")
     _texto_atendio(printer, payload)   # empleado que tomó el pedido (si lo hay)
+    # Datos de entrega EN NEGRITA: el repartidor lee la dirección del ticket de cocina.
+    printer.set(align="left", bold=True)
+    _imprimir_contacto(printer, payload)   # tipo + tel + dirección si es entrega
+    printer.set(bold=False)
     printer.text("-" * ANCHO + "\n")
     # Resumen de cantidad ANTES del detalle: cuántos platos+bebidas hay que preparar.
     printer.set(align="left", bold=True)
@@ -330,8 +358,11 @@ def _payload_demo() -> dict:
     """Payload de muestra con la MISMA forma que enqueue_recibo del panel. Efectivo
     con cambio y abrir_cajon=True, para validar de un tiro impresora + cajón."""
     return {
-        "mesa": "Domicilio · Ana (PRUEBA)",
+        "mesa": "Ana (PRUEBA)",
         "mesero": "Carlos",
+        "tipo_entrega": "domicilio",
+        "telefono": "300 123 4567",
+        "direccion": "Calle 10 # 5-23, Barrio Centro, apto 302",
         "items": [
             {"tipo": "plato_dia", "nombre": "Plato del Día", "cantidad": 1,
              "componentes": [["Entrada", "Sopa de Lentejas"], ["Principio", "Frijol"],
@@ -427,8 +458,11 @@ def _payload_demo_comanda() -> dict:
     """Comanda de muestra (misma forma que enqueue_comanda): sin precios ni cajón."""
     return {
         "pedido_id": 0,
-        "mesa": "Domicilio · Ana (PRUEBA)",
+        "mesa": "Ana (PRUEBA)",
         "mesero": "Carlos",
+        "tipo_entrega": "domicilio",
+        "telefono": "300 123 4567",
+        "direccion": "Calle 10 # 5-23, Barrio Centro, apto 302",
         "items": [
             {"tipo": "plato_dia", "nombre": "Plato del Día", "cantidad": 1,
              "componentes": [["Entrada", "Sopa de Lentejas"], ["Principio", "Frijol"],
