@@ -284,8 +284,13 @@ def registrar_retorno_base(base_id: int, monto: int) -> tuple:
 
 # ── Pedidos de domicilio para el flujo del repartidor ───────────────────────────
 def pedidos_domicilio_pendientes():
-    """[{id, nombre, saldo}] de pedidos de domicilio/para_llevar activos y con saldo,
-    para asignarlos a la base de un repartidor. Tolerante a fallos."""
+    """[{id, nombre, saldo}] de pedidos de domicilio/para_llevar de HOY que se pueden asignar
+    a la base de un repartidor: aún ACTIVOS (no entregados ni cancelados), con saldo, y que NO
+    están ya en otra base. Tolerante a fallos.
+
+    Sin el filtro de fecha/estado se arrastraban pedidos viejos (de ayer) que quedaron sin
+    cobrar o sin marcar entregados → aparecían todos en el selector. base_id IS NULL evita
+    además re-ofrecer un pedido que ya va con otro repartidor."""
     try:
         with engine.connect() as conn:
             rows = conn.execute(text("""
@@ -293,20 +298,14 @@ def pedidos_domicilio_pendientes():
                        COALESCE(total_pagado, 0) AS total_pagado, pagado
                 FROM pedidos
                 WHERE tipo_entrega IN ('domicilio', 'para_llevar')
-                  AND estado <> 'cancelado' AND pagado = FALSE
+                  AND estado IN ('pendiente', 'en preparacion', 'listo')
+                  AND pagado = FALSE
+                  AND base_id IS NULL
+                  AND fecha::date = CURRENT_DATE
                 ORDER BY id
             """)).mappings().all()
     except Exception:
         return []
-    out = []
-    for r in rows:
-        d = dict(r)
-        s = saldo_pedido(d)
-        if s > 0:
-            out.append({"id": int(d["id"]),
-                        "nombre": d.get("cliente_nombre") or d.get("numero_cliente") or f"#{d['id']}",
-                        "saldo": s})
-    return out
 
 
 def pedidos_de_base(base_id: int):
