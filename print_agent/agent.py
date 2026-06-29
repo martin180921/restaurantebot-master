@@ -42,8 +42,35 @@ CAT_LABEL = {
     "plato_dia": "PLATO DEL DIA",
     "especial":  "ESPECIALES",
     "item":      "A LA CARTA",
+    "adicional": "ADICIONALES",
     "bebida":    "BEBIDAS",
 }
+
+# Tipos que cuentan en el resumen "PLATOS Y BEBIDAS: N" de la cabecera del ticket.
+# Excluye 'adicional' a propósito (los adicionales son extras, no platos). Mismo criterio
+# que usa el panel para el conteo; se duplica aquí porque el agente es un proceso aislado.
+DISH_TIPOS = ("plato_dia", "especial", "item", "bebida")
+
+
+def _contar_platos(items) -> int:
+    """Nº de unidades de platos + bebidas (sin adicionales) de un ticket, para el resumen
+    de cantidad. Tolerante: un item sin 'tipo' cae en 'item' (a la carta) y cuenta."""
+    total = 0
+    for it in (items or []):
+        if str(it.get("tipo") or "item").lower() in DISH_TIPOS:
+            try:
+                total += int(it.get("cantidad", 1) or 1)
+            except (TypeError, ValueError):
+                total += 1
+    return total
+
+
+def _texto_atendio(printer, payload: dict) -> None:
+    """Imprime 'Atendio: <empleado>' si el payload trae 'mesero' (quién tomó el pedido).
+    Ausente en pedidos armados por el cliente (app pública / QR) → no imprime nada."""
+    mesero = str(payload.get("mesero") or "").strip()
+    if mesero:
+        printer.text(f"Atendió: {mesero}\n")
 
 # Billeteras de transferencia (submetodo del payload → etiqueta legible en el ticket).
 SUBMETODO_LABEL = {
@@ -150,6 +177,7 @@ def imprimir_recibo(printer, payload: dict) -> None:
     mesa = payload.get("mesa") or "—"
     printer.text(f"{mesa}\n")
     printer.text(datetime.now().strftime("%d/%m/%Y  %H:%M") + "\n")
+    _texto_atendio(printer, payload)   # empleado que tomó el pedido (si lo hay)
     printer.text("-" * ANCHO + "\n")
 
     # 3) Cuerpo en FUENTE B (más pequeña/estrecha): ítems, totales y pago. Ahorra papel
@@ -157,6 +185,11 @@ def imprimir_recibo(printer, payload: dict) -> None:
     #    set(font=...) solo emite el comando cuando se pasa font, así que los set() de
     #    _imprimir_items (que no lo pasan) NO la revierten. El cuerpo usa ANCHO_B.
     printer.set(font="b")
+    # Resumen de cantidad ANTES del detalle: cuántos platos+bebidas lleva el pedido.
+    # align="left" explícito: la cabecera venía centrada y los ítems van a la izquierda.
+    printer.set(align="left", bold=True)
+    printer.text(f"PLATOS Y BEBIDAS: {_contar_platos(payload.get('items', []))}\n")
+    printer.set(bold=False)
     _imprimir_items(printer, payload.get("items", []), grande=False)
     printer.text("-" * ANCHO_B + "\n")
 
@@ -231,7 +264,12 @@ def imprimir_comanda(printer, payload: dict) -> None:
     printer.set(align="center", bold=False, double_height=False, double_width=False)
     printer.text(f"{payload.get('mesa') or '—'}\n")
     printer.text(datetime.now().strftime("%d/%m/%Y  %H:%M") + "\n")
+    _texto_atendio(printer, payload)   # empleado que tomó el pedido (si lo hay)
     printer.text("-" * ANCHO + "\n")
+    # Resumen de cantidad ANTES del detalle: cuántos platos+bebidas hay que preparar.
+    printer.set(align="left", bold=True)
+    printer.text(f"PLATOS Y BEBIDAS: {_contar_platos(payload.get('items', []))}\n")
+    printer.set(bold=False)
     # Ítems grandes (doble alto) para leerse de lejos; componentes en tamaño normal.
     _imprimir_items(printer, payload.get("items", []), grande=True)
     # Nota general del pedido (cambio de último momento, alergia…): destacada y en grande
@@ -293,6 +331,7 @@ def _payload_demo() -> dict:
     con cambio y abrir_cajon=True, para validar de un tiro impresora + cajón."""
     return {
         "mesa": "Domicilio · Ana (PRUEBA)",
+        "mesero": "Carlos",
         "items": [
             {"tipo": "plato_dia", "nombre": "Plato del Día", "cantidad": 1,
              "componentes": [["Entrada", "Sopa de Lentejas"], ["Principio", "Frijol"],
@@ -317,6 +356,7 @@ def _payload_demo_transfer() -> dict:
     previsualizar la billetera y el n.º de transacción en el ticket. Sin cajón."""
     return {
         "mesa": "Mesa 4",
+        "mesero": "Lucía",
         "items": [
             {"tipo": "especial", "nombre": "Bandeja Paisa", "cantidad": 2, "componentes": []},
             {"tipo": "bebida", "nombre": "Jugo de Mora", "cantidad": 2, "componentes": []},
@@ -388,6 +428,7 @@ def _payload_demo_comanda() -> dict:
     return {
         "pedido_id": 0,
         "mesa": "Domicilio · Ana (PRUEBA)",
+        "mesero": "Carlos",
         "items": [
             {"tipo": "plato_dia", "nombre": "Plato del Día", "cantidad": 1,
              "componentes": [["Entrada", "Sopa de Lentejas"], ["Principio", "Frijol"],

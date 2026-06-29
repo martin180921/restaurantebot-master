@@ -191,49 +191,95 @@ def registrar_reingreso(gasto_id: int, monto: int):
                     {"gasto_id": int(gasto_id), "monto": int(monto)})
 
 
-def registrar_base_repartidor(cierre_id: int, monto: int, nombre: str, pedidos_ids=None):
-    """Saca efectivo del cajón como base de cambio para un repartidor. 'pedidos_ids' son
-    los pedidos de domicilio que se lleva (se cobran al volver). Queda 'abierto' hasta
-    que el repartidor vuelve, se cobran sus pedidos y devuelve el float sobrante."""
+class _BaseConflict(Exception):
+    """Señal interna (H1): la base no se pudo conciliar — un pedido ya fue tomado por otra
+    base / cobrado, o la base aún tiene saldo por cobrar. Revienta el txn de engine.begin()
+    → ROLLBACK total (ni base ni enlaces ni cierre)."""
+
+
+def registrar_base_repartidor(cierre_id: int, monto: int, nombre: str, pedidos_ids=None) -> tuple:
+    """Saca efectivo del cajón como base de cambio para un repartidor y ENLAZA los pedidos
+    de domicilio que se lleva (pedidos.base_id) para conciliarlos a su regreso. Devuelve
+    (ok, mensaje).
+
+    H1 — enlace atómico y exclusivo: el INSERT de la base y el UPDATE CONDICIONAL de los
+    pedidos (base_id IS NULL AND pagado=FALSE AND no cancelado) viven en la MISMA transacción.
+    Si entre la selección y el envío algún pedido ya entró a otra base o se cobró, el rowcount
+    no cuadra con lo pedido → ROLLBACK total y se pide reintentar. Así un mismo pedido NUNCA
+    queda asignado a dos bases. 'pedidos_ref' (JSON) se conserva solo para la vista/legado."""
     if not auth.can("manage_caja"):
-        return
+        return False, "Sin permiso para gestionar caja."
     ids = [int(i) for i in (pedidos_ids or [])]
-    with engine.begin() as conn:
-        conn.execute(text(
-            "INSERT INTO movimientos_caja (cierre_id, tipo, monto, actor_rol, actor_nombre, "
-            "pedidos_ref, estado) VALUES (:c, 'base_repartidor', :m, :ar, :an, :pr, 'abierto')"
-        ), {"c": int(cierre_id), "m": int(monto), "ar": _actor_rol(),
-            "an": (nombre or "").strip() or None,
-            "pr": (json.dumps(ids) if ids else None)})
+    base_id = None
+    try:
+        with engine.begin() as conn:
+            base_id = conn.execute(text(
+                "INSERT INTO movimientos_caja (cierre_id, tipo, monto, actor_rol, actor_nombre, "
+                "pedidos_ref, estado) VALUES (:c, 'base_repartidor', :m, :ar, :an, :pr, 'abierto') "
+                "RETURNING id"
+            ), {"c": int(cierre_id), "m": int(monto), "ar": _actor_rol(),
+                "an": (nombre or "").strip() or None,
+                "pr": (json.dumps(ids) if ids else None)}).scalar_one()
+            if ids:
+                upd = text(
+                    "UPDATE pedidos SET base_id = :bid "
+                    "WHERE id IN :ids AND base_id IS NULL AND pagado = FALSE "
+                    "AND estado <> 'cancelado'"
+                ).bindparams(bindparam("ids", expanding=True))
+                n = conn.execute(upd, {"bid": int(base_id), "ids": ids}).rowcount or 0
+                if n != len(ids):
+                    raise _BaseConflict()   # revienta el txn → ni base ni enlaces
+    except _BaseConflict:
+        return False, ("Uno o más pedidos ya fueron tomados por otra base o cobrados. "
+                       "Vuelve a abrir la base y elígelos de nuevo.")
     audit.registrar("base_repartidor", "caja", int(cierre_id),
                     {"monto": int(monto), "repartidor": (nombre or "").strip() or None,
-                     "pedidos": ids})
+                     "pedidos": ids, "base_id": int(base_id) if base_id is not None else None})
+    return True, "ok"
 
 
-def registrar_retorno_base(base_id: int, monto: int):
-    """Devuelve al cajón el float sobrante de una base de repartidor y la cierra. Los
-    pedidos ya se cobraron por separado (libro 'pagos'); aquí solo vuelve el cambio
-    que no se usó. Atómico (lee la base con FOR UPDATE y la marca 'cerrado')."""
+def registrar_retorno_base(base_id: int, monto: int) -> tuple:
+    """Devuelve al cajón el float sobrante de una base de repartidor y la cierra. Devuelve
+    (ok, mensaje). Los pedidos ya se cobraron por separado (libro 'pagos'); aquí solo vuelve
+    el cambio que no se usó.
+
+    H1 — no se cierra con cobros pendientes: dentro del MISMO txn (FOR UPDATE sobre la base)
+    se suma el saldo de los pedidos enlazados (base_id). Si es > 0, el repartidor volvió con
+    cobros sin registrar → ROLLBACK y se rechaza el cierre (evita descuadrar la caja). Al
+    cerrar OK se CONSERVA base_id en los pedidos (historial de qué repartidor entregó cada uno)."""
     if not auth.can("manage_caja"):
-        return
+        return False, "Sin permiso para gestionar caja."
     cid = None
-    with engine.begin() as conn:
-        ref = conn.execute(text(
-            "SELECT cierre_id FROM movimientos_caja WHERE id = :id "
-            "AND tipo = 'base_repartidor' AND estado = 'abierto' FOR UPDATE"
-        ), {"id": int(base_id)}).mappings().first()
-        if not ref:
-            return
-        cid = ref["cierre_id"]
-        if int(monto) > 0:
-            conn.execute(text(
-                "INSERT INTO movimientos_caja (cierre_id, tipo, monto, ref_id, actor_rol, "
-                "estado) VALUES (:c, 'retorno_base', :m, :ref, :ar, 'cerrado')"
-            ), {"c": cid, "m": int(monto), "ref": int(base_id), "ar": _actor_rol()})
-        conn.execute(text("UPDATE movimientos_caja SET estado = 'cerrado' WHERE id = :id"),
-                     {"id": int(base_id)})
+    try:
+        with engine.begin() as conn:
+            ref = conn.execute(text(
+                "SELECT cierre_id FROM movimientos_caja WHERE id = :id "
+                "AND tipo = 'base_repartidor' AND estado = 'abierto' FOR UPDATE"
+            ), {"id": int(base_id)}).mappings().first()
+            if not ref:
+                return False, "La base ya estaba cerrada o no existe."
+            cid = ref["cierre_id"]
+            # Fuente de verdad del saldo pendiente: los pedidos enlazados por base_id (no el
+            # JSON pedidos_ref). Si algo sigue sin cobrar, no se deja cerrar la base.
+            saldo_pend = conn.execute(text(
+                "SELECT COALESCE(SUM(total - COALESCE(total_pagado, 0)), 0) FROM pedidos "
+                "WHERE base_id = :bid AND estado <> 'cancelado' AND pagado = FALSE"
+            ), {"bid": int(base_id)}).scalar_one() or 0
+            if int(saldo_pend) > 0:
+                raise _BaseConflict()
+            if int(monto) > 0:
+                conn.execute(text(
+                    "INSERT INTO movimientos_caja (cierre_id, tipo, monto, ref_id, actor_rol, "
+                    "estado) VALUES (:c, 'retorno_base', :m, :ref, :ar, 'cerrado')"
+                ), {"c": cid, "m": int(monto), "ref": int(base_id), "ar": _actor_rol()})
+            conn.execute(text("UPDATE movimientos_caja SET estado = 'cerrado' WHERE id = :id"),
+                         {"id": int(base_id)})
+    except _BaseConflict:
+        return False, ("Aún hay pedidos de esta base sin cobrar. Cóbralos en 💵 Cobrar antes "
+                       "de cerrar la base (evita descuadrar la caja).")
     audit.registrar("retorno_base", "caja", int(cid) if cid is not None else None,
                     {"base_id": int(base_id), "monto": int(monto)})
+    return True, "ok"
 
 
 # ── Pedidos de domicilio para el flujo del repartidor ───────────────────────────
@@ -263,20 +309,17 @@ def pedidos_domicilio_pendientes():
     return out
 
 
-def _pedidos_por_ids(ids):
-    """[{id, nombre, saldo, pagado}] de los pedidos cuyos ids se piden (para el retorno
-    del repartidor). Tolerante a fallos."""
-    ids = [int(i) for i in (ids or [])]
-    if not ids:
-        return []
+def pedidos_de_base(base_id: int):
+    """[{id, nombre, total, cobrado, saldo, pagado, metodo_pago}] de los pedidos ENLAZADOS a
+    una base de repartidor por pedidos.base_id (H1) — la fuente de verdad del flujo del
+    repartidor, en vez del JSON pedidos_ref. Excluye cancelados. Tolerante a fallos."""
     try:
-        sel = text("""
-            SELECT id, numero_cliente, cliente_nombre, total,
-                   COALESCE(total_pagado, 0) AS total_pagado, pagado, estado
-            FROM pedidos WHERE id IN :ids ORDER BY id
-        """).bindparams(bindparam("ids", expanding=True))
         with engine.connect() as conn:
-            rows = conn.execute(sel, {"ids": ids}).mappings().all()
+            rows = conn.execute(text(
+                "SELECT id, numero_cliente, cliente_nombre, total, "
+                "       COALESCE(total_pagado, 0) AS total_pagado, pagado, metodo_pago "
+                "FROM pedidos WHERE base_id = :bid AND estado <> 'cancelado' ORDER BY id"
+            ), {"bid": int(base_id)}).mappings().all()
     except Exception:
         return []
     out = []
@@ -284,7 +327,9 @@ def _pedidos_por_ids(ids):
         d = dict(r)
         out.append({"id": int(d["id"]),
                     "nombre": d.get("cliente_nombre") or d.get("numero_cliente") or f"#{d['id']}",
-                    "saldo": saldo_pedido(d), "estado": d.get("estado")})
+                    "total": int(d["total"] or 0), "cobrado": int(d["total_pagado"] or 0),
+                    "saldo": saldo_pedido(d), "pagado": bool(d["pagado"]),
+                    "metodo_pago": d.get("metodo_pago")})
     return out
 
 
@@ -432,10 +477,15 @@ def _dialog_base(cierre_id: int):
     with c1:
         if st.button("🛵 Entregar base", key="base_confirm", type="primary",
                      use_container_width=True, disabled=(monto <= 0 or not nombre.strip())):
-            registrar_base_repartidor(cierre_id, monto, nombre, ids)
-            extra = f" · {len(ids)} pedido(s)" if ids else ""
-            flash(f"Base entregada · {nombre} · ${fmt_money(monto)}{extra}", "🛵")
-            st.rerun()
+            ok, msg = registrar_base_repartidor(cierre_id, monto, nombre, ids)
+            if ok:
+                extra = f" · {len(ids)} pedido(s)" if ids else ""
+                flash(f"Base entregada · {nombre} · ${fmt_money(monto)}{extra}", "🛵")
+                st.rerun()
+            else:
+                # Conflicto de concurrencia: el modal queda abierto y al reintentar la lista
+                # de pendientes se relee (la función no es cacheada) ya sin los conflictivos.
+                st.error(msg)
     with c2:
         if st.button("Volver", key="base_volver", use_container_width=True):
             st.rerun()
@@ -445,9 +495,20 @@ def _dialog_base(cierre_id: int):
 def _dialog_retorno(base_id: int, base_monto: int, nombre: str = "", pendientes_saldo: int = 0):
     quien = f"**{html.escape(nombre)}** · " if nombre else ""
     st.markdown(f"{quien}base entregada **${fmt_money(base_monto)}**.")
-    if pendientes_saldo > 0:
-        st.warning(f"Aún hay ${fmt_money(pendientes_saldo)} sin cobrar en sus pedidos. "
-                   "Cóbralos antes de cerrar para no descuadrar la caja.")
+    # Conciliación en vivo desde base_id (no confiamos en el saldo que venía de la tarjeta).
+    ordenes = pedidos_de_base(int(base_id))
+    cobrado = sum(o["cobrado"] for o in ordenes)
+    saldo = sum(o["saldo"] for o in ordenes)
+    if ordenes:
+        color = "#16a34a" if saldo == 0 else "#dc2626"
+        st.markdown(
+            f'<div style="font-size:0.85rem; color:#45443e;">{len(ordenes)} pedido(s) · '
+            f'cobrado <b>${fmt_money(cobrado)}</b> · '
+            f'por cobrar <b style="color:{color};">${fmt_money(saldo)}</b></div>',
+            unsafe_allow_html=True)
+    if saldo > 0:
+        st.warning(f"Aún hay ${fmt_money(saldo)} sin cobrar en sus pedidos. Cóbralos antes de "
+                   "cerrar para no descuadrar la caja (el cierre se rechazará).")
     monto = int(st.number_input("Float que devuelve al cajón ($)", min_value=0,
                                 max_value=int(base_monto), value=int(base_monto), step=1000,
                                 format="%d", key=f"ret_monto_{base_id}",
@@ -455,11 +516,15 @@ def _dialog_retorno(base_id: int, base_monto: int, nombre: str = "", pendientes_
                                      "pedidos se registran aparte en 💵 Cobrar.") or 0)
     c1, c2 = st.columns(2)
     with c1:
-        if st.button("🟢 Cerrar base", key=f"ret_confirm_{base_id}",
-                     type="primary", use_container_width=True):
-            registrar_retorno_base(base_id, monto)
-            flash(f"Base cerrada · float devuelto ${fmt_money(monto)}", "🟢")
-            st.rerun()
+        # Doble candado: deshabilitado en UI + rechazado en servidor (registrar_retorno_base).
+        if st.button("🟢 Cerrar base", key=f"ret_confirm_{base_id}", type="primary",
+                     use_container_width=True, disabled=saldo > 0):
+            ok, msg = registrar_retorno_base(base_id, monto)
+            if ok:
+                flash(f"Base cerrada · float devuelto ${fmt_money(monto)}", "🟢")
+                st.rerun()
+            else:
+                st.error(msg)
     with c2:
         if st.button("Volver", key=f"ret_volver_{base_id}", use_container_width=True):
             st.rerun()
@@ -515,18 +580,26 @@ def _seccion_flujo_caja(cierre: dict):
     for b in bases:
         bid = int(b["id"])
         nombre = str(b["actor_nombre"] or "Repartidor")
-        try:
-            ref_ids = json.loads(b.get("pedidos_ref") or "[]")
-        except (ValueError, TypeError):
-            ref_ids = []
-        ordenes = _pedidos_por_ids(ref_ids)
-        pend_saldo = sum(int(o["saldo"]) for o in ordenes)
+        base_monto = int(b["monto"])
+        # Fuente de verdad: los pedidos ENLAZADOS por base_id (H1), no el JSON pedidos_ref.
+        ordenes = pedidos_de_base(bid)
+        n_ped      = len(ordenes)
+        total_ped  = sum(o["total"] for o in ordenes)
+        cobrado_ped = sum(o["cobrado"] for o in ordenes)
+        pend_saldo = sum(o["saldo"] for o in ordenes)
+        color_pend = "#16a34a" if pend_saldo == 0 else "#dc2626"
 
+        # Tarjeta de conciliación: base entregada + cuánto se ha cobrado de sus pedidos y
+        # cuánto falta. Un vistazo dice si el repartidor ya cuadró.
         st.markdown(
             f'<div class="order-card" style="border-left:4px solid #6c5ce0; margin-bottom:6px;">'
-            f'<div style="font-size:0.85rem; color:#45443e;">🛵 Repartidor en ruta · '
-            f'<b>{html.escape(nombre)}</b> · base ${fmt_money(b["monto"])} · '
-            f'{len(ordenes)} pedido(s) · por cobrar ${fmt_money(pend_saldo)}</div></div>',
+            f'<div style="font-size:0.9rem; color:#45443e;">🛵 Repartidor en ruta · '
+            f'<b>{html.escape(nombre)}</b></div>'
+            f'<div style="font-size:0.8rem; color:#6b6b64; margin-top:2px;">'
+            f'Base ${fmt_money(base_monto)} · {n_ped} pedido(s) · '
+            f'cobrado ${fmt_money(cobrado_ped)} de ${fmt_money(total_ped)} · '
+            f'<b style="color:{color_pend};">por cobrar ${fmt_money(pend_saldo)}</b>'
+            f'</div></div>',
             unsafe_allow_html=True,
         )
 
@@ -537,7 +610,7 @@ def _seccion_flujo_caja(cierre: dict):
             oid = int(o["id"])
             col_o, col_b = st.columns([3, 1])
             with col_o:
-                pagado_txt = ("✓ pagado" if o["saldo"] <= 0
+                pagado_txt = ("✓ cobrado" if o["saldo"] <= 0
                               else f'por cobrar ${fmt_money(o["saldo"])}')
                 st.markdown(
                     f'<div style="font-size:0.8rem; color:#6b6b64; padding:4px 0;">'
@@ -550,9 +623,18 @@ def _seccion_flujo_caja(cierre: dict):
                     pedidos.dialog_cobrar([oid], f"Pedido #{oid} · {nombre}",
                                           int(o["saldo"]), f"basecobro_{bid}_{oid}")
 
+        # Cerrar la base queda BLOQUEADO mientras haya saldo por cobrar (defensa también en
+        # el servidor: registrar_retorno_base lo rechaza). Así no se cierra una base con
+        # cobros sin registrar → la caja no se descuadra.
+        cerrar_bloqueado = pend_saldo > 0
         if st.button("🟢 Cerrar base / float devuelto", key=f"btn_ret_{bid}",
-                     use_container_width=True):
-            _dialog_retorno(bid, int(b["monto"]), nombre, pend_saldo)
+                     use_container_width=True, disabled=cerrar_bloqueado,
+                     help=("Cobra primero los pedidos pendientes para poder cerrar."
+                           if cerrar_bloqueado else
+                           "Devuelve el float sobrante y concilia la base.")):
+            _dialog_retorno(bid, base_monto, nombre, pend_saldo)
+        if cerrar_bloqueado:
+            st.caption(f"⚠️ Faltan ${fmt_money(pend_saldo)} por cobrar para cerrar esta base.")
 
     # Histórico compacto del turno + neto.
     movs = movimientos_del_turno(cid)

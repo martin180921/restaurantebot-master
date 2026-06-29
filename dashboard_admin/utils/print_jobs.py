@@ -48,6 +48,18 @@ def _items_payload(ids) -> list[dict]:
     return items_para_ticket(concat)
 
 
+def _meseros_de(ids) -> str | None:
+    """Nombre(s) del/los empleado(s) que tomaron los pedidos 'ids' (columna pedidos.mesero),
+    distintos y unidos por ' · '. None si ninguno (p. ej. pedidos armados por el cliente).
+    Un cobro de mesa puede agrupar varios pedidos → puede haber más de un mesero."""
+    sql = text("SELECT DISTINCT mesero FROM pedidos "
+               "WHERE id = ANY(:ids) AND mesero IS NOT NULL")
+    with engine.connect() as conn:
+        filas = conn.execute(sql, {"ids": [int(i) for i in ids]}).scalars().all()
+    nombres = [str(m).strip() for m in filas if str(m or "").strip()]
+    return " · ".join(nombres) if nombres else None
+
+
 def enqueue_recibo(ids, titulo: str, total: int, abono: int, metodo: str,
                    recibido: int | None = None, submetodo: str | None = None,
                    comprobante: str | None = None, desglose: list | None = None) -> None:
@@ -73,6 +85,7 @@ def enqueue_recibo(ids, titulo: str, total: int, abono: int, metodo: str,
         payload = {
             "mesa": titulo,
             "items": _items_payload(ids),
+            "mesero": _meseros_de(ids),   # H4: empleado(s) que tomaron el/los pedido(s)
             "total": int(total),
             "pagado": int(abono),
             "saldo": saldo,
@@ -155,7 +168,8 @@ def enqueue_comanda(pedido_id: int) -> None:
     """
     try:
         sql = text("""
-            SELECT p.numero_cliente, p.mesa_id, p.items, p.nota_general, m.nombre AS mesa_nombre
+            SELECT p.numero_cliente, p.mesa_id, p.items, p.nota_general, p.mesero,
+                   m.nombre AS mesa_nombre
             FROM pedidos p LEFT JOIN mesas m ON m.id = p.mesa_id
             WHERE p.id = :id
         """)
@@ -167,6 +181,8 @@ def enqueue_comanda(pedido_id: int) -> None:
             "pedido_id": int(pedido_id),
             "mesa": row["mesa_nombre"] or row["numero_cliente"] or f"Pedido #{pedido_id}",
             "items": items_para_ticket(parse_items(row["items"])),
+            # H4: empleado que tomó el pedido (NULL en pedidos del cliente / QR).
+            "mesero": (str(row["mesero"]).strip() or None) if row["mesero"] else None,
             # Nota general del pedido (puede haberse añadido tras enviarlo) para que la
             # cocina la vea en la comanda. NULL/vacía → el agente no imprime nada.
             "nota": (str(row["nota_general"]).strip() or None) if row["nota_general"] else None,

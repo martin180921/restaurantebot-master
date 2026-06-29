@@ -177,6 +177,18 @@ def _ensure_schema():
             "CREATE INDEX IF NOT EXISTS idx_movimientos_caja_cierre "
             "ON movimientos_caja (cierre_id, tipo, estado)"
         ))
+        # base_id (H1): enlace RELACIONAL pedido→base de repartidor. Reemplaza a
+        # 'pedidos_ref' (JSON meramente informativo) como fuente de verdad de qué pedidos
+        # lleva un repartidor. Al entregar una base se fija base_id con un UPDATE CONDICIONAL
+        # (WHERE base_id IS NULL …), de modo que un mismo pedido no puede quedar en dos bases;
+        # y la base no se cierra hasta que el saldo de sus pedidos esté en 0 (ver caja.py).
+        # Sin FK dura aquí (defensivo sobre una BD viva); la versión canónica (schema.sql) sí
+        # la declara. NULL = el pedido no va en ninguna base de repartidor.
+        conn.execute(text("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS base_id INTEGER"))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_pedidos_base ON pedidos (base_id) "
+            "WHERE base_id IS NOT NULL"
+        ))
         # print_jobs: cola de impresión multi-tenant. El panel (cloud/Railway) encola
         # filas 'pendiente'; el Agente de Impresión Local de cada restaurante hace
         # polling por (restaurante_id, estado) y las imprime en su Epson 80mm. 'payload'

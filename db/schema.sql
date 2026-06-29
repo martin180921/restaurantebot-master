@@ -102,9 +102,12 @@ CREATE TABLE IF NOT EXISTS pedidos (
     descuento_valor     INTEGER      NOT NULL DEFAULT 0,      -- rebaja acumulada (gross=total+esto)
     tipo_descuento      VARCHAR(20),                          -- monto | porcentaje | cortesia
     motivo_descuento    TEXT,                                 -- justificación obligatoria
-    descuento_autoriza  VARCHAR(120)                          -- admin que autorizó la rebaja
+    descuento_autoriza  VARCHAR(120),                         -- admin que autorizó la rebaja
+    base_id             INTEGER                               -- H1: base de repartidor que lleva este pedido (FK a movimientos_caja, ver ALTER abajo)
 );
 CREATE INDEX IF NOT EXISTS idx_pedidos_tipo_entrega ON pedidos (tipo_entrega);
+-- H1: pedidos que viajan en una base de repartidor (índice parcial; NULL = no va en base).
+CREATE INDEX IF NOT EXISTS idx_pedidos_base ON pedidos (base_id) WHERE base_id IS NOT NULL;
 -- Índices del tablero en vivo (lectura acotada por estado / saldo / fecha de hoy).
 CREATE INDEX IF NOT EXISTS idx_pedidos_estado    ON pedidos (estado);
 CREATE INDEX IF NOT EXISTS idx_pedidos_fecha     ON pedidos (fecha DESC);
@@ -291,6 +294,17 @@ ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS descuento_valor INTEGER NOT NULL DE
 ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS tipo_descuento VARCHAR(20);
 ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS motivo_descuento TEXT;
 ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS descuento_autoriza VARCHAR(120);
+-- H1: enlace relacional pedido→base de repartidor (concilia el efectivo de domicilios).
+ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS base_id INTEGER;
+-- FK idempotente (Postgres no soporta ADD CONSTRAINT IF NOT EXISTS). ON DELETE SET NULL:
+-- borrar una base nunca debe romper el pedido, solo desligarlo.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'pedidos_base_id_fkey') THEN
+        ALTER TABLE pedidos ADD CONSTRAINT pedidos_base_id_fkey
+            FOREIGN KEY (base_id) REFERENCES movimientos_caja(id) ON DELETE SET NULL;
+    END IF;
+END $$;
 ALTER TABLE print_jobs ADD COLUMN IF NOT EXISTS reclamado_at TIMESTAMP;
 ALTER TABLE sesiones_empleado ADD COLUMN IF NOT EXISTS ultima_actividad TIMESTAMP;
 
