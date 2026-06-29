@@ -28,6 +28,7 @@ import json
 import html
 import time
 import os
+import uuid
 
 load_dotenv()
 
@@ -141,8 +142,14 @@ def _ensure_schema():
                 # num_dia: contador diario del pedido. Lo asigna _siguiente_num_dia() de
                 # forma atómica vía contador_dia (no con MAX+1, que duplicaba bajo carrera).
                 ("num_dia", "INTEGER"),
+                # H3: clave de idempotencia (anti-duplicado en reintentos del comensal).
+                ("idem_key", "VARCHAR(40)"),
             ]:
                 conn.execute(text(f"ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS {_col} {_ddl}"))
+            # H3: árbitro de ON CONFLICT (idem_key). Debe existir ANTES de insertar pedidos.
+            conn.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_pedidos_idem ON pedidos (idem_key)"
+            ))
             # contador_dia: una fila por fecha con el último num_dia entregado. El upsert
             # ON CONFLICT toma el lock de la fila del día → numeración serializada sin
             # carreras. Compartida con el panel (db.siguiente_num_dia).
@@ -551,58 +558,81 @@ def _encolar_comanda(pedido_id: int, mesa_label: str, items) -> None:
 
 def guardar_pedido(numero_cliente, items, total, *, tipo_entrega, cliente_nombre,
                    cliente_telefono, direccion, metodo_pago, paga_con, fee,
-                   nota_general) -> int:
+                   nota_general, idem_key=None) -> int:
     """Pedido de la app pública por WhatsApp / acceso directo: Domicilio o Para Llevar
     (como antes). Lleva datos del cliente + método de pago/cambio + recargo de entrega;
-    el cobro real lo registra la caja al entregar. Descuenta inventario en el mismo txn."""
+    el cobro real lo registra la caja al entregar. Descuenta inventario en el mismo txn.
+
+    H3: 'idem_key' evita pedidos duplicados si el comensal toca "Enviar" dos veces o el
+    móvil reintenta tras un corte de red. ON CONFLICT DO NOTHING → si ya existe, no se
+    descuenta inventario otra vez y se devuelve el id existente."""
     with engine.begin() as conn:
         num = _siguiente_num_dia(conn)
-        nuevo_id = int(conn.execute(text("""
+        nuevo_id = conn.execute(text("""
             INSERT INTO pedidos
               (num_dia, numero_cliente, items, total, estado, tipo_entrega, cliente_nombre,
-               cliente_telefono, direccion, metodo_pago, paga_con, fee, nota_general)
+               cliente_telefono, direccion, metodo_pago, paga_con, fee, nota_general, idem_key)
             VALUES
-              (:num, :nc, :items, :total, 'pendiente', :te, :cn, :ct, :dir, :mp, :pc, :fee, :ng)
+              (:num, :nc, :items, :total, 'pendiente', :te, :cn, :ct, :dir, :mp, :pc, :fee, :ng, :idem)
+            ON CONFLICT (idem_key) DO NOTHING
             RETURNING id
         """), {
             "num": num, "nc": numero_cliente, "items": json.dumps(items, ensure_ascii=False),
             "total": int(total), "te": tipo_entrega, "cn": cliente_nombre,
             "ct": cliente_telefono, "dir": (direccion or None), "mp": metodo_pago,
             "pc": int(paga_con or 0), "fee": int(fee or 0), "ng": (nota_general or None),
-        }).scalar())
+            "idem": idem_key,
+        }).scalar()
+        if nuevo_id is None:
+            # H3: reintento con la misma clave → el pedido ya existe; no re-descuenta.
+            return int(conn.execute(text(
+                "SELECT id FROM pedidos WHERE idem_key = :k"), {"k": idem_key}).scalar() or 0)
         # Descuento inmediato del inventario (mismo txn): evita revender lo ya pedido. Si no
         # alcanza, SinStock revienta el txn → el pedido NO se crea.
         _descontar_inventario(conn, items)
-        return nuevo_id
+        return int(nuevo_id)
 
 
 def guardar_pedido_mesa(mesa_id, mesa_nombre, items, total, *, para_llevar, fee,
-                        nota_general) -> int:
+                        nota_general, idem_key=None) -> int:
     """Inserta un pedido de auto-servicio por QR en el MISMO pipeline que un pedido de
     mesa del POS: tipo_entrega='mesa_qr', mesa_id (FK → mesas), num_dia diario,
     numero_cliente = nombre de la mesa. Descuenta inventario en el mismo txn (atómico) y
     encola la comanda de cocina marcada [QR]. 'fee' solo es > 0 si el comensal pidió para
-    llevar; el cobro se hace luego en caja (no se captura pago aquí)."""
+    llevar; el cobro se hace luego en caja (no se captura pago aquí).
+
+    H3: 'idem_key' evita duplicar el pedido si el comensal reenvía. Solo se descuenta
+    inventario y se encola la comanda cuando el pedido se crea de verdad (no en reintentos)."""
     label = f"[QR] {mesa_nombre}" + (" · Para llevar" if para_llevar else "")
+    creado = False
     with engine.begin() as conn:
         num = _siguiente_num_dia(conn)
-        nuevo_id = int(conn.execute(text("""
+        nuevo_id = conn.execute(text("""
             INSERT INTO pedidos
               (num_dia, numero_cliente, items, total, estado, mesa_id, tipo_entrega,
-               fee, nota_general)
-            VALUES (:num, :nc, :items, :total, 'pendiente', :mesa_id, :te, :fee, :ng)
+               fee, nota_general, idem_key)
+            VALUES (:num, :nc, :items, :total, 'pendiente', :mesa_id, :te, :fee, :ng, :idem)
+            ON CONFLICT (idem_key) DO NOTHING
             RETURNING id
         """), {
             "num": num, "nc": mesa_nombre, "items": json.dumps(items, ensure_ascii=False),
             "total": int(total), "mesa_id": int(mesa_id), "te": TIPO_QR,
-            "fee": int(fee or 0), "ng": (nota_general or None),
-        }).scalar())
-        # Descuento inmediato del inventario (mismo txn): evita revender lo ya pedido. Si no
-        # alcanza, SinStock revienta el txn → el pedido NO se crea.
-        _descontar_inventario(conn, items)
-    # Comanda fuera del txn del pedido: un fallo de impresión no revierte la venta.
-    _encolar_comanda(nuevo_id, label, items)
-    return nuevo_id
+            "fee": int(fee or 0), "ng": (nota_general or None), "idem": idem_key,
+        }).scalar()
+        if nuevo_id is None:
+            # H3: reintento → recupera el id existente, sin re-descontar ni reimprimir.
+            nuevo_id = conn.execute(text(
+                "SELECT id FROM pedidos WHERE idem_key = :k"), {"k": idem_key}).scalar()
+        else:
+            creado = True
+            # Descuento inmediato del inventario (mismo txn): evita revender lo ya pedido. Si
+            # no alcanza, SinStock revienta el txn → el pedido NO se crea.
+            _descontar_inventario(conn, items)
+    # Comanda fuera del txn del pedido: un fallo de impresión no revierte la venta. Solo
+    # en una creación real (en reintentos la comanda ya se encoló la primera vez).
+    if creado and nuevo_id:
+        _encolar_comanda(int(nuevo_id), label, items)
+    return int(nuevo_id or 0)
 
 
 def estado_pedido(pid: int):
@@ -1228,9 +1258,12 @@ def _dialog_confirmar():
                 st.warning("Esta mesa ya tiene varios pedidos en curso. Avísale a un mesero.")
             else:
                 try:
+                    # H3: clave de idempotencia estable → un reenvío no duplica el pedido.
+                    idem = st.session_state.setdefault("qr_idem", str(uuid.uuid4()))
                     nuevo_id = guardar_pedido_mesa(
                         mesa_id, mesa_nombre, p["items"], p["total"],
                         para_llevar=p["para_llevar"], fee=p["fee"], nota_general=p["nota"],
+                        idem_key=idem,
                     )
                 except SinStock as e:
                     # Se agotó algo mientras decidían: NO se creó el pedido. Conservamos la
@@ -1252,6 +1285,7 @@ def _dialog_confirmar():
                         del st.session_state[k]
                     st.session_state.pop("notas_generales", None)
                     st.session_state.pop("c_modo_mesa", None)
+                    st.session_state.pop("qr_idem", None)   # próximo pedido → nueva clave H3
                     st.session_state["pd_qty"] = 0
                     st.session_state["pedido_pendiente"] = None
                     st.rerun()
@@ -1437,12 +1471,15 @@ def _carta_delivery(comp, cat, ajustes):
             st.toast("Ya tienes varios pedidos en curso. Llámanos para otro.", icon="🚦")
         else:
             try:
+                # H3: clave de idempotencia estable → un reenvío / reintento de red no duplica.
+                idem = st.session_state.setdefault("cli_idem", str(uuid.uuid4()))
                 nuevo_id = guardar_pedido(
                     gate["nombre"], items, total,
                     tipo_entrega=gate["tipo_entrega"], cliente_nombre=gate["nombre"],
                     cliente_telefono=gate["telefono"], direccion=gate["direccion"],
                     metodo_pago=metodo_pago, paga_con=paga_con,
                     fee=fee_total, nota_general=(notas or "").strip(),
+                    idem_key=idem,
                 )
             except SinStock as e:
                 # Se agotó algo: el pedido NO se creó. Conservamos el carrito para quitarlo.
@@ -1461,6 +1498,7 @@ def _carta_delivery(comp, cat, ajustes):
                 st.session_state.pop("notas_generales", None)
                 st.session_state.pop("c_metodo", None)
                 st.session_state.pop("c_paga_con", None)
+                st.session_state.pop("cli_idem", None)   # próximo pedido → nueva clave H3
                 st.session_state["pd_qty"] = 0
                 st.rerun(scope="app")
 

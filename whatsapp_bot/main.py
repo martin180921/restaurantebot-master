@@ -302,10 +302,15 @@ def init_db():
             ("fee",              "INTEGER NOT NULL DEFAULT 0"),
             ("nota_general",     "TEXT"),
             ("mesero",           "VARCHAR(120)"),  # quién tomó el pedido (NULL en pedidos del cliente)
+            ("idem_key",         "VARCHAR(40)"),   # H3: clave de idempotencia anti-duplicado
         ]:
             conn.execute(text(f"ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS {_col} {_ddl}"))
         conn.execute(text(
             "CREATE INDEX IF NOT EXISTS idx_pedidos_tipo_entrega ON pedidos (tipo_entrega)"
+        ))
+        # H3: árbitro de ON CONFLICT (idem_key) para crear pedidos de forma idempotente.
+        conn.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_pedidos_idem ON pedidos (idem_key)"
         ))
 
         conn.commit()

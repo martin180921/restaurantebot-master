@@ -15,6 +15,7 @@ import streamlit as st
 from sqlalchemy import text
 import json
 import html
+import uuid
 
 import auth
 from db import (engine, titulo_seccion, cargar_mesas_activas, componentes_activos_por_grupo,
@@ -38,10 +39,14 @@ def _n_platos_recargo(items) -> int:
 
 # ── DB: crear pedido de mesa ────────────────────────────────────────────────────
 def crear_pedido_manual(mesa_id: int, mesa_nombre: str, items: list, total: int,
-                        nota_general=None) -> bool:
+                        nota_general=None, idem_key=None) -> bool:
     """Crea un pedido de mesa con numeración diaria atómica (siguiente_num_dia) y descuento
     de inventario con guarda. Devuelve True si se creó; False si se rechazó por falta de
-    stock (en ese caso NADA quedó insertado y se avisa qué se agotó)."""
+    stock (en ese caso NADA quedó insertado y se avisa qué se agotó).
+
+    H3: 'idem_key' hace la creación idempotente. Un reintento (doble clic / corte de red al
+    confirmar) que reusa la misma clave NO crea un duplicado: ON CONFLICT DO NOTHING → el
+    INSERT no devuelve id → se trata como éxito silencioso (no se re-descuenta ni reimprime)."""
     mesero = auth.actor()[0]  # quién toma el pedido (nombre del actor en sesión)
     try:
         with engine.begin() as conn:
@@ -49,8 +54,9 @@ def crear_pedido_manual(mesa_id: int, mesa_nombre: str, items: list, total: int,
             num = siguiente_num_dia(conn)
             nuevo_id = conn.execute(text("""
                 INSERT INTO pedidos
-                  (num_dia, numero_cliente, items, total, estado, mesa_id, tipo_entrega, nota_general, mesero)
-                VALUES (:num, :numero, :items, :total, 'pendiente', :mesa_id, 'mesa', :ng, :mesero)
+                  (num_dia, numero_cliente, items, total, estado, mesa_id, tipo_entrega, nota_general, mesero, idem_key)
+                VALUES (:num, :numero, :items, :total, 'pendiente', :mesa_id, 'mesa', :ng, :mesero, :idem)
+                ON CONFLICT (idem_key) DO NOTHING
                 RETURNING id
             """), {
                 "num":     num,
@@ -60,7 +66,10 @@ def crear_pedido_manual(mesa_id: int, mesa_nombre: str, items: list, total: int,
                 "mesa_id": mesa_id,
                 "ng":      (nota_general or None),
                 "mesero":  mesero,
-            }).scalar_one()
+                "idem":    idem_key,
+            }).scalar()
+            if nuevo_id is None:
+                return True   # H3: reintento de un pedido ya creado → éxito sin efectos
             # Descuento inmediato del inventario (mismo txn que el INSERT → atómico): si una
             # opción rastreada no alcanza, SinStock revienta el txn y el pedido NO se crea
             # (no se sobrevende lo que ya está en cocina).
@@ -82,9 +91,12 @@ def crear_pedido_manual(mesa_id: int, mesa_nombre: str, items: list, total: int,
 # informativos para que el repartidor lleve el cambio. Aparece en Monitor → Pedidos web.
 def crear_pedido_entrega(tipo: str, items: list, total: int, *, cliente_nombre,
                          cliente_telefono, direccion, metodo_pago, paga_con, fee,
-                         nota_general=None) -> bool:
+                         nota_general=None, idem_key=None) -> bool:
     """Crea un pedido de domicilio / para llevar. Devuelve True si se creó; False si se
-    rechazó por falta de stock (nada queda insertado)."""
+    rechazó por falta de stock (nada queda insertado).
+
+    H3: 'idem_key' hace la creación idempotente (ON CONFLICT DO NOTHING); un reintento con
+    la misma clave no duplica el pedido → éxito silencioso (sin re-descuento ni reimpresión)."""
     etq = "Domicilio" if tipo == "domicilio" else "Para llevar"
     nombre = (cliente_nombre or "").strip()
     telefono = (cliente_telefono or "").strip()
@@ -96,16 +108,19 @@ def crear_pedido_entrega(tipo: str, items: list, total: int, *, cliente_nombre,
             nuevo_id = conn.execute(text("""
                 INSERT INTO pedidos
                   (num_dia, numero_cliente, items, total, estado, tipo_entrega, cliente_nombre,
-                   cliente_telefono, direccion, metodo_pago, paga_con, fee, nota_general, mesero)
-                VALUES (:num, :nc, :items, :total, 'pendiente', :te, :cn, :ct, :dir, :mp, :pc, :fee, :ng, :mesero)
+                   cliente_telefono, direccion, metodo_pago, paga_con, fee, nota_general, mesero, idem_key)
+                VALUES (:num, :nc, :items, :total, 'pendiente', :te, :cn, :ct, :dir, :mp, :pc, :fee, :ng, :mesero, :idem)
+                ON CONFLICT (idem_key) DO NOTHING
                 RETURNING id
             """), {
                 "num": num, "nc": numero, "items": json.dumps(items, ensure_ascii=False),
                 "total": int(total), "te": tipo, "cn": (nombre or None),
                 "ct": (telefono or None), "dir": ((direccion or "").strip() or None),
                 "mp": metodo_pago, "pc": int(paga_con or 0), "fee": int(fee or 0),
-                "ng": (nota_general or None), "mesero": mesero,
-            }).scalar_one()
+                "ng": (nota_general or None), "mesero": mesero, "idem": idem_key,
+            }).scalar()
+            if nuevo_id is None:
+                return True   # H3: reintento de un pedido ya creado → éxito sin efectos
             # Descuento de inventario en el mismo txn (igual que en los pedidos de mesa).
             aplicar_inventario(conn, items, -1)
     except SinStock as e:
@@ -712,16 +727,20 @@ def _form_fragment():
             st.markdown('<p style="color:#b45309; font-size:0.8rem;">Ingresa la dirección de '
                         'entrega antes de confirmar.</p>', unsafe_allow_html=True)
 
+        # H3: clave de idempotencia estable para ESTE carrito (se regenera al limpiarlo).
+        # Un doble clic / reintento reusa la misma clave → no se duplica el pedido.
+        idem_key = st.session_state.setdefault("pos_idem", str(uuid.uuid4()))
         if st.button("✓ Confirmar pedido", type="primary", key="btn_confirmar_manual",
                      use_container_width=True, disabled=(not ok_pd or falta_dir)):
             if es_mesa:
                 ok = crear_pedido_manual(mesa_id, mesa_labels[mesa_id], items, total,
-                                         (nota_general or "").strip())
+                                         (nota_general or "").strip(), idem_key=idem_key)
             else:
                 ok = crear_pedido_entrega(tipo_val, items, total, cliente_nombre=cli_nombre,
                                           cliente_telefono=cli_tel, direccion=cli_dir,
                                           metodo_pago=metodo_pago, paga_con=paga_con, fee=fee,
-                                          nota_general=(nota_general or "").strip())
+                                          nota_general=(nota_general or "").strip(),
+                                          idem_key=idem_key)
             # Solo vaciamos el carrito si el pedido se creó. Si se rechazó por falta de
             # stock, lo conservamos para que el mesero quite el ítem agotado y reintente.
             if ok:
@@ -744,5 +763,5 @@ def _limpiar_pedido():
     for k in [k for k in st.session_state if str(k).startswith("pdpos_")]:
         del st.session_state[k]
     for k in ("nota_general_pos", "ent_nombre", "ent_tel", "ent_dir",
-              "ent_metodo", "ent_pagacon"):
+              "ent_metodo", "ent_pagacon", "pos_idem"):   # pos_idem: nueva clave H3 al próximo pedido
         st.session_state.pop(k, None)

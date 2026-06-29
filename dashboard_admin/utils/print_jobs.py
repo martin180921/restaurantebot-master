@@ -31,6 +31,25 @@ def enqueue_job(restaurante_id: int, tipo: str, payload: dict) -> int:
         }).scalar_one())
 
 
+def _log_fallo_impresion(tipo: str, error, extra: dict | None = None) -> None:
+    """H5: deja rastro en 'auditoria' cuando un encolado de impresión FALLA, para que el
+    fallo no sea silencioso (un pedido que se quedó sin comanda/recibo en la cola y nadie se
+    entera). Lo puede mostrar Caja junto al estado del agente. Best-effort: si ni siquiera
+    esto se puede escribir, no propaga (la operación de negocio ya está commiteada)."""
+    try:
+        detalle = {"tipo": str(tipo), "error": str(error)[:500]}
+        if extra:
+            detalle.update(extra)
+        with engine.begin() as conn:
+            conn.execute(text(
+                "INSERT INTO auditoria (accion, entidad, detalle, restaurante_id) "
+                "VALUES ('print_enqueue_fail', 'print_job', CAST(:det AS JSONB), :rid)"
+            ), {"det": json.dumps(detalle, ensure_ascii=False, default=str),
+                "rid": int(RESTAURANTE_ID)})
+    except Exception:
+        pass
+
+
 def _items_payload(ids) -> list[dict]:
     """Items (modelo por secciones) agregados de los pedidos 'ids' para el ticket.
 
@@ -137,9 +156,10 @@ def enqueue_recibo(ids, titulo: str, total: int, abono: int, metodo: str,
                 tramos.append(tramo)
             payload["desglose"] = tramos
         enqueue_job(RESTAURANTE_ID, "recibo", payload)
-    except Exception:
-        # El cobro ya está en la BD; un fallo de encolado no debe propagarse a la UI.
-        pass
+    except Exception as exc:
+        # El cobro ya está en la BD; un fallo de encolado no debe propagarse a la UI, pero
+        # H5: lo dejamos auditado para que no pase inadvertido (recibo sin imprimir).
+        _log_fallo_impresion("recibo", exc, {"pedido_ids": ids})
 
 
 # ── Salud del Agente de Impresión Local (heartbeat) ─────────────────────────────
@@ -218,8 +238,9 @@ def enqueue_comanda(pedido_id: int) -> None:
             "abrir_cajon": False,
         }
         enqueue_job(RESTAURANTE_ID, "comanda", payload)
-    except Exception:
-        pass
+    except Exception as exc:
+        # H5: la cocina podría quedarse sin comanda; lo auditamos en vez de tragarlo en silencio.
+        _log_fallo_impresion("comanda", exc, {"pedido_id": int(pedido_id)})
 
 
 def enqueue_prerecibo(pedido_id: int) -> None:
@@ -250,5 +271,6 @@ def enqueue_prerecibo(pedido_id: int) -> None:
             "abrir_cajon": False,
         }
         enqueue_job(RESTAURANTE_ID, "prerecibo", payload)
-    except Exception:
-        pass
+    except Exception as exc:
+        # H5: prerecibo (pre-cuenta) que no llegó a la cola → queda auditado, no silenciado.
+        _log_fallo_impresion("prerecibo", exc, {"pedido_id": int(pedido_id)})

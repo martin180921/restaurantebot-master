@@ -103,11 +103,14 @@ CREATE TABLE IF NOT EXISTS pedidos (
     tipo_descuento      VARCHAR(20),                          -- monto | porcentaje | cortesia
     motivo_descuento    TEXT,                                 -- justificación obligatoria
     descuento_autoriza  VARCHAR(120),                         -- admin que autorizó la rebaja
-    base_id             INTEGER                               -- H1: base de repartidor que lleva este pedido (FK a movimientos_caja, ver ALTER abajo)
+    base_id             INTEGER,                              -- H1: base de repartidor que lleva este pedido (FK a movimientos_caja, ver ALTER abajo)
+    idem_key            VARCHAR(40)                           -- H3: clave de idempotencia (anti-duplicado en reintentos)
 );
 CREATE INDEX IF NOT EXISTS idx_pedidos_tipo_entrega ON pedidos (tipo_entrega);
 -- H1: pedidos que viajan en una base de repartidor (índice parcial; NULL = no va en base).
 CREATE INDEX IF NOT EXISTS idx_pedidos_base ON pedidos (base_id) WHERE base_id IS NOT NULL;
+-- H3: árbitro de ON CONFLICT (idem_key). UNIQUE con NULLs distintos → legados sin clave no chocan.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pedidos_idem ON pedidos (idem_key);
 -- Índices del tablero en vivo (lectura acotada por estado / saldo / fecha de hoy).
 CREATE INDEX IF NOT EXISTS idx_pedidos_estado    ON pedidos (estado);
 CREATE INDEX IF NOT EXISTS idx_pedidos_fecha     ON pedidos (fecha DESC);
@@ -303,6 +306,21 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'pedidos_base_id_fkey') THEN
         ALTER TABLE pedidos ADD CONSTRAINT pedidos_base_id_fkey
             FOREIGN KEY (base_id) REFERENCES movimientos_caja(id) ON DELETE SET NULL;
+    END IF;
+END $$;
+-- H3: idempotencia anti-duplicado en la creación de pedidos.
+ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS idem_key VARCHAR(40);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pedidos_idem ON pedidos (idem_key);
+-- H6: invariantes de dinero (NOT VALID: no chocan con datos legados, sí con escrituras nuevas).
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_pedidos_total_no_neg') THEN
+        ALTER TABLE pedidos ADD CONSTRAINT chk_pedidos_total_no_neg
+            CHECK (total >= 0) NOT VALID;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_pedidos_pagado_rango') THEN
+        ALTER TABLE pedidos ADD CONSTRAINT chk_pedidos_pagado_rango
+            CHECK (total_pagado >= 0 AND total_pagado <= total + COALESCE(descuento_valor, 0)) NOT VALID;
     END IF;
 END $$;
 ALTER TABLE print_jobs ADD COLUMN IF NOT EXISTS reclamado_at TIMESTAMP;

@@ -189,6 +189,14 @@ def _ensure_schema():
             "CREATE INDEX IF NOT EXISTS idx_pedidos_base ON pedidos (base_id) "
             "WHERE base_id IS NOT NULL"
         ))
+        # H3: clave de idempotencia. Un reintento (doble clic / corte de red al confirmar) que
+        # reusa la misma clave NO crea un pedido duplicado: el INSERT usa ON CONFLICT (idem_key)
+        # DO NOTHING y este índice único es el árbitro. NULLs son distintos en Postgres → los
+        # pedidos legados sin clave no chocan entre sí.
+        conn.execute(text("ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS idem_key VARCHAR(40)"))
+        conn.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_pedidos_idem ON pedidos (idem_key)"
+        ))
         # print_jobs: cola de impresión multi-tenant. El panel (cloud/Railway) encola
         # filas 'pendiente'; el Agente de Impresión Local de cada restaurante hace
         # polling por (restaurante_id, estado) y las imprime en su Epson 80mm. 'payload'
@@ -440,6 +448,34 @@ try:
     _ensure_schema()
 except Exception:
     pass  # tablas aún sin crear (deploy nuevo): el bot las creará con las columnas
+
+
+def _ensure_constraints():
+    """H6: invariantes de dinero como CHECK ... NOT VALID (no validan filas legadas, sí las
+    nuevas inserciones/updates). En su PROPIA transacción y best-effort, para que un fallo
+    aquí JAMÁS bloquee la creación de columnas esenciales de _ensure_schema(). Guardadas por
+    nombre porque Postgres no soporta ADD CONSTRAINT IF NOT EXISTS."""
+    with engine.begin() as conn:
+        conn.execute(text("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_pedidos_total_no_neg') THEN
+                    ALTER TABLE pedidos ADD CONSTRAINT chk_pedidos_total_no_neg
+                        CHECK (total >= 0) NOT VALID;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_pedidos_pagado_rango') THEN
+                    ALTER TABLE pedidos ADD CONSTRAINT chk_pedidos_pagado_rango
+                        CHECK (total_pagado >= 0
+                               AND total_pagado <= total + COALESCE(descuento_valor, 0)) NOT VALID;
+                END IF;
+            END $$;
+        """))
+
+
+try:
+    _ensure_constraints()
+except Exception:
+    pass  # los CHECK son una red de seguridad; si no se pueden crear, no rompemos el arranque
 
 
 # ── Toasts no bloqueantes (compartidos por todas las vistas) ────────────────────
