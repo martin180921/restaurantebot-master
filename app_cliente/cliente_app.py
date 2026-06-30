@@ -976,12 +976,15 @@ def _seccion_catalogo(productos, tipo, con_desc=False):
     return elegidos
 
 
-def _seccion_especiales(productos, comp):
-    """Especiales: stepper por producto (precio + descripción) y, si el restaurante tiene
-    entradas/bebidas del Plato del Día, dos selectores OPCIONALES (Entrada / Bebida) que
-    van INCLUIDOS sin costo (radio con 'Ninguno', por defecto 'Ninguno'). La selección se
-    comparte para todas las unidades del mismo especial. Si no hay esos componentes, el
-    especial se comporta igual que antes (solo stepper)."""
+def _seccion_con_extras(productos, tipo, comp, con_desc=False):
+    """Sección (Especiales / A la carta) con stepper por producto y, si el restaurante tiene
+    entradas/bebidas del Plato del Día, selectores OPCIONALES (Entrada / Bebida) que van
+    INCLUIDOS sin costo (radio con 'Ninguno', por defecto 'Ninguno').
+
+    Si se piden 2 o más unidades de un mismo producto, la entrada/bebida se elige por CADA
+    unidad ("Unidad #1", "Unidad #2"…) → se emite un ítem (cantidad 1) por unidad, cada uno
+    con su propia config. Con una sola unidad va un único bloque sin cabecera. Si el
+    restaurante no tiene esos componentes, el producto se comporta como un catálogo simple."""
     if not productos:
         st.markdown('<div class="c-empty">No disponible por ahora.</div>', unsafe_allow_html=True)
         return []
@@ -995,12 +998,12 @@ def _seccion_especiales(productos, comp):
     elegidos = []
     for p in productos:
         pid = int(p["id"])
-        key = f"especial:{pid}"
+        key = f"{tipo}:{pid}"
         qty = carrito.get(key, 0)
         c_info, c_step = st.columns([3, 2])
         with c_info:
             desc = (f'<div class="c-desc">{html.escape(str(p.get("descripcion") or ""))}</div>'
-                    if p.get("descripcion") else "")
+                    if con_desc and p.get("descripcion") else "")
             st.markdown(
                 f'<div style="padding:8px 0;"><span class="c-name">{html.escape(str(p["nombre"]))}</span>'
                 f'{desc}<div class="c-price">${fmt_money(p["precio"])}{_disp_suffix(p.get("stock"))}</div></div>',
@@ -1010,31 +1013,43 @@ def _seccion_especiales(productos, comp):
             tope = (p.get("stock") is not None and qty >= int(p["stock"]))
             _stepper(key, qty, permitir_mas=not tope)
 
-        cfg = {}
-        # Extras incluidos: solo cuando el especial está en el carrito y hay componentes.
-        if qty > 0 and (nom_ent or nom_beb):
+        if qty <= 0:
+            continue
+
+        # Sin entrada/bebida configuradas: catálogo simple (un ítem con cantidad N).
+        if not (nom_ent or nom_beb):
+            elegidos.append({"tipo": tipo, "id": pid, "nombre": p["nombre"],
+                             "precio": int(p["precio"]), "cantidad": qty})
+            continue
+
+        # Con extras: una config por unidad. Cabecera "Unidad #i" solo si hay 2 o más.
+        for u in range(qty):
+            base = f"extra_{tipo}_{pid}_{u}"
+            if qty > 1:
+                st.markdown(f'<div class="conf-label" style="font-weight:700;">'
+                            f'{html.escape(str(p["nombre"]))} · Unidad #{u + 1}</div>',
+                            unsafe_allow_html=True)
+            cfg = {}
             if nom_ent:
-                _sanea_radio(f"esp_{pid}_entrada", ["Ninguno"] + nom_ent)
+                _sanea_radio(f"{base}_entrada", ["Ninguno"] + nom_ent)
                 st.markdown('<div class="conf-label">Entrada (incluida)</div>', unsafe_allow_html=True)
-                ent = st.radio("Entrada", ["Ninguno"] + nom_ent, key=f"esp_{pid}_entrada",
+                ent = st.radio("Entrada", ["Ninguno"] + nom_ent, key=f"{base}_entrada",
                                format_func=lambda nm: nm if nm == "Ninguno"
                                else f"{nm}{_disp_suffix(stock_ent.get(nm))}",
                                label_visibility="collapsed")
                 if ent and ent != "Ninguno":
                     cfg["entrada"] = ent
             if nom_beb:
-                _sanea_radio(f"esp_{pid}_bebida", ["Ninguno"] + nom_beb)
+                _sanea_radio(f"{base}_bebida", ["Ninguno"] + nom_beb)
                 st.markdown('<div class="conf-label">Bebida (incluida)</div>', unsafe_allow_html=True)
-                beb = st.radio("Bebida", ["Ninguno"] + nom_beb, key=f"esp_{pid}_bebida",
+                beb = st.radio("Bebida", ["Ninguno"] + nom_beb, key=f"{base}_bebida",
                                format_func=lambda nm: nm if nm == "Ninguno"
                                else f"{nm}{_disp_suffix(stock_beb.get(nm))}",
                                label_visibility="collapsed")
                 if beb and beb != "Ninguno":
                     cfg["bebida"] = beb
-
-        if qty > 0:
-            item = {"tipo": "especial", "id": pid, "nombre": p["nombre"],
-                    "precio": int(p["precio"]), "cantidad": qty}
+            item = {"tipo": tipo, "id": pid, "nombre": p["nombre"],
+                    "precio": int(p["precio"]), "cantidad": 1}
             if cfg:
                 item["config"] = cfg
             elegidos.append(item)
@@ -1291,7 +1306,7 @@ def _dialog_confirmar():
                     # comensal sigue en la misma mesa y puede pedir de nuevo (req #3).
                     st.session_state["cart"] = {}
                     for k in [k for k in st.session_state
-                              if str(k).startswith("pd_") or str(k).startswith("esp_")]:
+                              if str(k).startswith(("pd_", "esp_", "extra_"))]:
                         del st.session_state[k]
                     st.session_state.pop("notas_generales", None)
                     st.session_state.pop("c_modo_mesa", None)
@@ -1314,13 +1329,15 @@ def _render_secciones(comp, cat, ajustes):
     # #1 Plato del Día
     items_pd, ok_pd = _seccion_plato_dia(comp, pd_precio, n_ac)
 
-    # #2 Especiales (con entrada/bebida del Plato del Día incluidas, opcionales)
+    # #2 Especiales (con entrada/bebida del Plato del Día incluidas, opcionales; por unidad
+    # cuando se piden 2 o más)
     st.markdown('<div class="c-section">⭐ Especiales</div>', unsafe_allow_html=True)
-    items_esp = _seccion_especiales(cat.get("especial", []), comp)
+    items_esp = _seccion_con_extras(cat.get("especial", []), "especial", comp, con_desc=True)
 
-    # #3 A la carta (+ sub-grupos Adicionales y Bebidas)
+    # #3 A la carta (con entrada/bebida incluidas, igual que los especiales) + sub-grupos
+    # Adicionales y Bebidas
     st.markdown('<div class="c-section">🍽️ A la carta</div>', unsafe_allow_html=True)
-    items_alc = _seccion_catalogo(cat.get("a_la_carta", []), "item")
+    items_alc = _seccion_con_extras(cat.get("a_la_carta", []), "item", comp)
     items_adi = []
     if cat.get("adicional"):
         st.markdown('<div class="c-sub">🍟 Adicionales</div>', unsafe_allow_html=True)
@@ -1503,7 +1520,7 @@ def _carta_delivery(comp, cat, ajustes):
                 # Limpia la carta y la configuración de platos del día.
                 st.session_state["cart"] = {}
                 for k in [k for k in st.session_state
-                          if str(k).startswith("pd_") or str(k).startswith("esp_")]:
+                          if str(k).startswith(("pd_", "esp_", "extra_"))]:
                     del st.session_state[k]
                 st.session_state.pop("notas_generales", None)
                 st.session_state.pop("c_metodo", None)

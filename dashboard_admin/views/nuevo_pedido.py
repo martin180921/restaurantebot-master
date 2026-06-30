@@ -493,13 +493,17 @@ def _seccion_catalogo(productos, tipo, titulo, con_desc=False):
     return elegidos
 
 
-def _seccion_especiales(productos, comp):
-    """Especiales: mismo stepper que el catálogo (precio + descripción) y, cuando el
-    restaurante tiene entradas/bebidas del Plato del Día configuradas, dos selectores
-    OPCIONALES (Entrada / Bebida) que van INCLUIDOS sin costo. La selección se comparte
-    para todas las unidades del mismo especial (un solo config por producto). Si el
-    restaurante no tiene esos componentes, el especial se comporta igual que antes."""
-    st.markdown(titulo_seccion("⭐ Especiales"), unsafe_allow_html=True)
+def _seccion_con_extras(productos, tipo, titulo, comp, con_desc=False):
+    """Sección (Especiales / A la carta) con stepper por producto y, cuando el restaurante
+    tiene entradas/bebidas del Plato del Día configuradas, selectores OPCIONALES (Entrada /
+    Bebida) que van INCLUIDOS sin costo.
+
+    Si se piden 2 o más unidades de un mismo producto, la entrada/bebida se elige por CADA
+    unidad ("Unidad #1", "Unidad #2"…) → se emite un ítem (cantidad 1) por unidad, cada uno
+    con su propia config. Con una sola unidad va un único bloque sin cabecera. Si el
+    restaurante no tiene esos componentes, el producto se comporta como un catálogo simple
+    (un ítem con cantidad N). 'Ninguno' por defecto en cada selector."""
+    st.markdown(titulo_seccion(titulo), unsafe_allow_html=True)
     if not productos:
         st.markdown('<p style="color:#a3a39b; font-size:0.85rem;">Sin opciones disponibles.</p>',
                     unsafe_allow_html=True)
@@ -510,13 +514,13 @@ def _seccion_especiales(productos, comp):
     elegidos = []
     for p in productos:
         pid = int(p["id"])
-        key = f"especial:{pid}"
+        key = f"{tipo}:{pid}"
         qty = carrito.get(key, 0)
         c_nom, c_qty = st.columns([3, 2])
         with c_nom:
             desc = (f'<div style="font-size:0.76rem; color:#a3a39b; font-style:italic;">'
                     f'{html.escape(str(p.get("descripcion") or ""))}</div>'
-                    if p.get("descripcion") else "")
+                    if con_desc and p.get("descripcion") else "")
             st.markdown(
                 f'<div style="padding:6px 0;"><span style="font-size:0.9rem; color:#26262b;">'
                 f'{html.escape(str(p["nombre"]))}</span>{desc}'
@@ -542,11 +546,22 @@ def _seccion_especiales(productos, comp):
                     carrito[key] = qty + 1
                     st.rerun(scope="fragment")
 
-        cfg = {}
-        # Entrada/bebida del Plato del Día incluidas: solo se ofrecen si el especial está
-        # en el carrito y el restaurante tiene esos componentes. "Ninguno" por defecto.
-        if qty > 0 and (ofrece_entrada or ofrece_bebida):
-            uid = f"esp_{pid}"
+        if qty <= 0:
+            continue
+
+        # Sin entrada/bebida configuradas: catálogo simple (un ítem con cantidad N).
+        if not (ofrece_entrada or ofrece_bebida):
+            elegidos.append({"tipo": tipo, "id": pid, "nombre": p["nombre"],
+                             "precio": int(p["precio"]), "cantidad": qty})
+            continue
+
+        # Con extras: una config por unidad. Cabecera "Unidad #i" solo si hay 2 o más.
+        for u in range(qty):
+            uid = f"{tipo}_{pid}_{u}"
+            if qty > 1:
+                st.markdown(_grupo_label(f'{html.escape(str(p["nombre"]))} · Unidad #{u+1}'),
+                            unsafe_allow_html=True)
+            cfg = {}
             if ofrece_entrada:
                 ent = _selector_grupo(uid, "entrada", comp["entrada"], "Entrada (incluida)",
                                       default_ninguno=True)
@@ -557,10 +572,8 @@ def _seccion_especiales(productos, comp):
                                       default_ninguno=True)
                 if beb:
                     cfg["bebida"] = beb
-
-        if qty > 0:
-            item = {"tipo": "especial", "id": pid, "nombre": p["nombre"],
-                    "precio": int(p["precio"]), "cantidad": qty}
+            item = {"tipo": tipo, "id": pid, "nombre": p["nombre"],
+                    "precio": int(p["precio"]), "cantidad": 1}
             if cfg:
                 item["config"] = cfg
             elegidos.append(item)
@@ -626,9 +639,10 @@ def _form_fragment():
                                         placeholder="Dirección + referencias") or "").strip()
 
         plates, ok_pd = _seccion_plato_dia(comp, precio_pd, n_ac)
-        items_esp = _seccion_especiales(_catalogo_seccion(df_cat, "especial"), comp)
-        items_alc = _seccion_catalogo(_catalogo_seccion(df_cat, "a_la_carta"), "item",
-                                      "🍽️ A la carta")
+        items_esp = _seccion_con_extras(_catalogo_seccion(df_cat, "especial"), "especial",
+                                        "⭐ Especiales", comp, con_desc=True)
+        items_alc = _seccion_con_extras(_catalogo_seccion(df_cat, "a_la_carta"), "item",
+                                        "🍽️ A la carta", comp)
         items_adi = _seccion_catalogo(_catalogo_seccion(df_cat, "adicional"), "adicional",
                                       "🍟 Adicionales", con_desc=True)
         items_beb = _seccion_catalogo(_catalogo_seccion(df_cat, "bebida"), "bebida",

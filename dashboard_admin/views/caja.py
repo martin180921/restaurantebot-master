@@ -733,6 +733,64 @@ def _seccion_flujo_caja(cierre: dict):
                 )
 
 
+# ── Confirmación de cierre (doble chequeo del monto contado) ────────────────────
+@st.dialog("🔒 Confirmar cierre de caja")
+def _dialog_confirmar_cierre(cierre_id: int, efvo_esp: int, transf_esp: int,
+                             efectivo_real: int, transferencia_real: int,
+                             diferencia: int, total_esperado: int):
+    """Reconfirma los montos CONTADOS antes de cerrar el turno. Muestra grandes el efectivo
+    y las transferencias que el cajero está a punto de registrar para que los verifique
+    contra el dinero físico (no revela lo esperado → respeta el conteo a ciegas). Solo al
+    pulsar 'Sí, cerrar caja' se congela el arqueo (irreversible)."""
+    st.markdown(
+        '<div style="color:#45443e; font-size:0.9rem; margin-bottom:10px;">'
+        'Revisa el dinero contado antes de cerrar el turno: verifica que coincida con lo '
+        'que tienes físicamente. Esta acción no se puede deshacer.</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<div style="display:flex; gap:10px; margin-bottom:4px;">'
+        '<div style="flex:1; background:#f6f7f9; border:1px solid #e6e8ec; border-radius:10px; '
+        'padding:10px 14px;">'
+        '<div style="font-size:0.78rem; color:#6b6b64;">💵 Efectivo contado</div>'
+        '<div style="font-family:\'DM Sans\',sans-serif; font-size:1.5rem; font-weight:800; '
+        f'color:#26262b;">${fmt_money(efectivo_real)}</div></div>'
+        '<div style="flex:1; background:#f6f7f9; border:1px solid #e6e8ec; border-radius:10px; '
+        'padding:10px 14px;">'
+        '<div style="font-size:0.78rem; color:#6b6b64;">💳 Transferencias</div>'
+        '<div style="font-family:\'DM Sans\',sans-serif; font-size:1.5rem; font-weight:800; '
+        f'color:#26262b;">${fmt_money(transferencia_real)}</div></div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+    st.caption("Si algún monto no coincide, vuelve y corrígelo antes de cerrar.")
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("✅ Sí, cerrar caja", key="btn_confirmar_cierre_final",
+                     type="primary", use_container_width=True):
+            cerrar_caja(cierre_id, efvo_esp, transf_esp,
+                        efectivo_real, transferencia_real, diferencia)
+            if diferencia == 0:
+                estado = "cuadrada"
+            elif diferencia < 0:
+                estado = f"faltante ${fmt_money(-diferencia)}"
+            else:
+                estado = f"sobrante ${fmt_money(diferencia)}"
+            # Guarda el resultado para REVELARLO en el próximo render (clave del conteo a
+            # ciegas: la caja recién aquí se entera de si cuadró o cuánto faltó/sobró).
+            st.session_state["_cierre_resultado"] = {
+                "diferencia": int(diferencia),
+                "efectivo_real": int(efectivo_real),
+                "total_esperado": int(total_esperado),
+            }
+            flash(f"Turno cerrado · caja {estado}", "💰")
+            st.rerun()
+    with c2:
+        if st.button("← Volver a contar", key="btn_volver_cierre",
+                     use_container_width=True):
+            st.rerun()
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # SECCIÓN: CAJA · CIERRE DE TURNO
 # ══════════════════════════════════════════════════════════════════════════════
@@ -955,25 +1013,14 @@ def _render_cierre():
                            "el turno. Al cerrar verás si la caja cuadró o si falta/sobra.")
 
             st.markdown("<div style='height:6px;'></div>", unsafe_allow_html=True)
+            # Cierre en DOS pasos: el botón abre una confirmación que muestra grandes los
+            # montos contados para que el cajero los verifique contra el dinero físico antes
+            # de congelar el arqueo (evita cerrar con un monto mal tecleado).
             if st.button("Finalizar Turno y Cerrar Caja", key="btn_finalizar_cierre",
                          use_container_width=True):
-                cerrar_caja(int(cierre["id"]), efvo_esp, transf_esp,
-                            efectivo_real, transferencia_real, diferencia)
-                if diferencia == 0:
-                    estado = "cuadrada"
-                elif diferencia < 0:
-                    estado = f"faltante ${fmt_money(-diferencia)}"
-                else:
-                    estado = f"sobrante ${fmt_money(diferencia)}"
-                # Guarda el resultado para REVELARLO en el próximo render (clave del conteo a
-                # ciegas: la caja recién aquí se entera de si cuadró o cuánto faltó/sobró).
-                st.session_state["_cierre_resultado"] = {
-                    "diferencia": int(diferencia),
-                    "efectivo_real": int(efectivo_real),
-                    "total_esperado": int(total_esperado),
-                }
-                flash(f"Turno cerrado · caja {estado}", "💰")
-                st.rerun()
+                _dialog_confirmar_cierre(int(cierre["id"]), efvo_esp, transf_esp,
+                                         efectivo_real, transferencia_real, diferencia,
+                                         total_esperado)
 
     # ── Historial de turnos cerrados ────────────────────────────────────────────
     recientes = cierres_recientes()
