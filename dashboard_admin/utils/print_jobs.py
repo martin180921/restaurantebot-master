@@ -243,6 +243,47 @@ def enqueue_comanda(pedido_id: int) -> None:
         _log_fallo_impresion("comanda", exc, {"pedido_id": int(pedido_id)})
 
 
+def enqueue_hoja_ruta(base_id: int, repartidor: str, base_monto: int, ids) -> None:
+    """Encola la HOJA DE RUTA del repartidor al entregar una base (E3): una parada por pedido
+    con cliente, teléfono, dirección y cuánto cobrar, + su nombre y la base. Le da en papel lo
+    que antes solo estaba en pantalla (y pone su nombre en un ticket). Tolera fallos: la base
+    ya está commiteada, así que un fallo de impresión no debe romper el flujo (se audita)."""
+    ids = [int(i) for i in (ids or [])]
+    if not ids:
+        return
+    try:
+        sql = text(
+            "SELECT id, num_dia, cliente_nombre, numero_cliente, cliente_telefono, direccion, "
+            "       tipo_entrega, total, COALESCE(total_pagado, 0) AS total_pagado, "
+            "       COALESCE(paga_con, 0) AS paga_con "
+            "FROM pedidos WHERE id = ANY(:ids) ORDER BY id"
+        )
+        with engine.connect() as conn:
+            filas = conn.execute(sql, {"ids": ids}).mappings().all()
+        paradas = []
+        for r in filas:
+            saldo = max(0, int(r["total"] or 0) - int(r["total_pagado"] or 0))
+            paradas.append({
+                "pedido":    int(r["id"]),
+                "num_dia":   r["num_dia"] or int(r["id"]),
+                "cliente":   r["cliente_nombre"] or r["numero_cliente"] or f"#{r['id']}",
+                "telefono":  (str(r["cliente_telefono"]).strip() or None) if r["cliente_telefono"] else None,
+                "direccion": (str(r["direccion"]).strip() or None) if r["direccion"] else None,
+                "tipo_entrega": r["tipo_entrega"],
+                "a_cobrar":  saldo,
+                "paga_con":  int(r["paga_con"] or 0),
+            })
+        payload = {
+            "repartidor": (str(repartidor or "").strip() or "Repartidor"),
+            "base": int(base_monto or 0),
+            "esperado": sum(p["a_cobrar"] for p in paradas),
+            "paradas": paradas,
+        }
+        enqueue_job(RESTAURANTE_ID, "hoja_ruta", payload)
+    except Exception as exc:
+        _log_fallo_impresion("hoja_ruta", exc, {"base_id": int(base_id)})
+
+
 def enqueue_prerecibo(pedido_id: int) -> None:
     """Encola el PRERECIBO (pre-cuenta) de un pedido — botón "🖨 Ticket".
 

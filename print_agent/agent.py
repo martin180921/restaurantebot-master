@@ -353,6 +353,51 @@ def imprimir_prerecibo(printer, payload: dict) -> None:
     printer.set(font="a")
 
 
+def imprimir_hoja_ruta(printer, payload: dict) -> None:
+    """HOJA DE RUTA del repartidor (E3): encabezado con su nombre + base, y una parada por
+    pedido con cliente, teléfono, dirección y cuánto cobrar. Sin cajón ni precios de cocina;
+    es la guía de despacho que se lleva en mano (y deja su nombre en un ticket)."""
+    printer.set(font="a", align="center", bold=True, double_height=True, double_width=True)
+    printer.text("HOJA DE RUTA\n")
+    printer.set(align="center", bold=True, double_height=False, double_width=False)
+    printer.text(f"{payload.get('repartidor') or 'Repartidor'}\n")
+    printer.set(bold=False)
+    printer.text(datetime.now().strftime("%d/%m/%Y  %H:%M") + "\n")
+    printer.text("-" * ANCHO + "\n")
+    paradas = payload.get("paradas") or []
+    printer.set(align="left", bold=True)
+    printer.text(f"PEDIDOS: {len(paradas)}\n")
+    printer.set(bold=False)
+    for i, p in enumerate(paradas, 1):
+        printer.text("-" * ANCHO + "\n")
+        printer.set(bold=True, double_height=True)
+        printer.text(f"{i}) #{p.get('num_dia') or p.get('pedido')} {p.get('cliente') or ''}\n")
+        printer.set(bold=False, double_height=False)
+        tel = str(p.get("telefono") or "").strip()
+        if tel:
+            printer.text(f"   Tel: {tel}\n")
+        direccion = str(p.get("direccion") or "").strip()
+        if direccion:
+            printer.set(bold=True)
+            printer.text(f"   Dir: {direccion}\n")
+            printer.set(bold=False)
+        a_cobrar = int(p.get("a_cobrar") or 0)
+        printer.set(bold=True)
+        printer.text(linea_precio("   A COBRAR", a_cobrar) + "\n")
+        printer.set(bold=False)
+        paga_con = int(p.get("paga_con") or 0)
+        if paga_con > 0:
+            printer.text(f"   Paga con ${fmt_money(paga_con)} - cambio "
+                         f"${fmt_money(max(0, paga_con - a_cobrar))}\n")
+    printer.text("=" * ANCHO + "\n")
+    printer.set(align="left", bold=True)
+    printer.text(linea_precio("BASE DE CAMBIO", int(payload.get("base") or 0)) + "\n")
+    printer.text(linea_precio("TOTAL A COBRAR", int(payload.get("esperado") or 0)) + "\n")
+    printer.set(bold=False)
+    printer.text("-" * ANCHO + "\n")
+    printer.cut()
+
+
 # ── Modo prueba (sin BD) ─────────────────────────────────────────────────────────
 def _payload_demo() -> dict:
     """Payload de muestra con la MISMA forma que enqueue_recibo del panel. Efectivo
@@ -652,6 +697,8 @@ def _imprimir_trabajo(conn, trabajo, printer_cfg) -> bool:
             imprimir_comanda(printer, payload)
         elif tipo == "prerecibo":
             imprimir_prerecibo(printer, payload)
+        elif tipo == "hoja_ruta":
+            imprimir_hoja_ruta(printer, payload)
         else:
             imprimir_recibo(printer, payload)
         try:

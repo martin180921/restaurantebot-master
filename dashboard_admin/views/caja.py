@@ -18,7 +18,7 @@ import audit
 import empleados
 import mesero_keys
 from db import engine, fmt_money, flash, saldo_pedido, titulo_seccion
-from utils.print_jobs import badge_agente_html
+from utils.print_jobs import badge_agente_html, enqueue_hoja_ruta
 from views import pedidos, menu
 
 
@@ -235,6 +235,10 @@ def registrar_base_repartidor(cierre_id: int, monto: int, nombre: str, pedidos_i
     audit.registrar("base_repartidor", "caja", int(cierre_id),
                     {"monto": int(monto), "repartidor": (nombre or "").strip() or None,
                      "pedidos": ids, "base_id": int(base_id) if base_id is not None else None})
+    # E3 — hoja de ruta del repartidor (paradas + dirección + a cobrar). Tras el commit y
+    # best-effort: si falla la impresión, la base ya quedó registrada (se audita el fallo).
+    if ids and base_id is not None:
+        enqueue_hoja_ruta(int(base_id), nombre, int(monto), ids)
     return True, "ok"
 
 
@@ -341,6 +345,21 @@ def pedidos_de_base(base_id: int):
                     "saldo": saldo_pedido(d), "pagado": bool(d["pagado"]),
                     "metodo_pago": d.get("metodo_pago")})
     return out
+
+
+def efectivo_cobrado_de_base(base_id: int) -> int:
+    """Σ de los abonos en EFECTIVO (libro 'pagos') de los pedidos enlazados a esta base —
+    lo que el repartidor debió recibir en efectivo en la puerta. Con la base entregada
+    permite cuadrar el efectivo que trae de vuelta (E4). Tolerante a fallos (0)."""
+    try:
+        with engine.connect() as conn:
+            return int(conn.execute(text(
+                "SELECT COALESCE(SUM(pg.monto), 0) FROM pagos pg "
+                "JOIN pedidos p ON p.id = pg.pedido_id "
+                "WHERE p.base_id = :bid AND pg.metodo = 'efectivo'"
+            ), {"bid": int(base_id)}).scalar() or 0)
+    except Exception:
+        return 0
 
 
 def movimientos_del_turno(cierre_id: int):
@@ -532,6 +551,31 @@ def _dialog_retorno(base_id: int, base_monto: int, nombre: str = "", pendientes_
     if saldo > 0:
         st.warning(f"Aún hay ${fmt_money(saldo)} sin cobrar en sus pedidos. Cóbralos antes de "
                    "cerrar para no descuadrar la caja (el cierre se rechazará).")
+    else:
+        # E4 — liquidación de efectivo: el repartidor debe traer de vuelta la base + lo que
+        # cobró en efectivo en la puerta. Contrastarlo con lo que entrega caza un faltante en
+        # el mostrador (no solo en el cierre). Es una verificación; lo asentado es el float.
+        efectivo_cobrado = efectivo_cobrado_de_base(int(base_id))
+        esperado_vuelta = int(base_monto) + int(efectivo_cobrado)
+        st.markdown(
+            f'<div style="background:#f6f5ff; border:1px solid #e1ddf7; border-radius:10px; '
+            f'padding:10px 14px; margin:6px 0; font-size:0.85rem; color:#45443e;">'
+            f'Efectivo cobrado en la puerta: <b>${fmt_money(efectivo_cobrado)}</b><br>'
+            f'Base entregada: <b>${fmt_money(base_monto)}</b><br>'
+            f'<span style="color:#4b43b0;">Debe traer de vuelta (base + efectivo): '
+            f'<b>${fmt_money(esperado_vuelta)}</b></span></div>',
+            unsafe_allow_html=True)
+        entregado = int(st.number_input(
+            "Efectivo que entrega el repartidor ($)", min_value=0, value=int(esperado_vuelta),
+            step=1000, format="%d", key=f"liq_{base_id}",
+            help="Cuenta el efectivo que te da el repartidor y contrástalo con lo esperado.") or 0)
+        dif = entregado - esperado_vuelta
+        if dif == 0:
+            st.success("✅ Cuadra: el efectivo entregado coincide con lo esperado.")
+        elif dif > 0:
+            st.info(f"Sobra ${fmt_money(dif)} sobre lo esperado (¿cobró de más o quedó propina?).")
+        else:
+            st.error(f"⚠️ Faltan ${fmt_money(-dif)} respecto a lo esperado. Verifica antes de cerrar.")
     monto = int(st.number_input("Float que devuelve al cajón ($)", min_value=0,
                                 max_value=int(base_monto), value=int(base_monto), step=1000,
                                 format="%d", key=f"ret_monto_{base_id}",
