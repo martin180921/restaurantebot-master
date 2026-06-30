@@ -4,9 +4,19 @@ from twilio.request_validator import RequestValidator
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 import os
+import time
 import urllib.parse
 
 load_dotenv()
+
+# ── Zona horaria del negocio: Bogotá (UTC−5). El bot ESCRIBE 'fecha' y asigna el
+# número de pedido del día (CURRENT_DATE). Debe coincidir con el panel y la app del
+# cliente: si cada servicio guardara en una zona distinta, "pedidos de hoy" y el corte
+# de caja se descuadrarían. Fijamos la zona del proceso y, abajo, la de la conexión.
+os.environ.setdefault("TZ", "America/Bogota")
+if hasattr(time, "tzset"):
+    time.tzset()
+
 app = FastAPI()
 
 ACCOUNT_SID     = os.getenv("TWILIO_ACCOUNT_SID")
@@ -45,6 +55,8 @@ DATABASE_URL = _normalizar_db_url(os.getenv("DATABASE_URL"))
 # hasta 15 conexiones y una avalancha agotaría el límite del plan. 5+5=10/proceso.
 engine = create_engine(
     DATABASE_URL,
+    # Zona horaria de la sesión de la BD: NOW()/CURRENT_DATE en hora de Bogotá.
+    connect_args={"options": "-c timezone=America/Bogota"},
     pool_pre_ping=True,
     pool_recycle=1800,
     pool_size=5,

@@ -284,8 +284,16 @@ def registrar_retorno_base(base_id: int, monto: int) -> tuple:
 
 # ── Pedidos de domicilio para el flujo del repartidor ───────────────────────────
 def pedidos_domicilio_pendientes():
-    """[{id, nombre, saldo}] de pedidos de domicilio/para_llevar activos y con saldo,
-    para asignarlos a la base de un repartidor. Tolerante a fallos."""
+    """[{id, nombre, saldo}] de pedidos de domicilio/para_llevar de HOY, con saldo y que
+    AÚN no van en una base, para asignarlos a la base de un repartidor. Tolerante a fallos.
+
+    Filtros (cada uno corrige un problema real):
+      · fecha::date = CURRENT_DATE → solo los de HOY. CURRENT_DATE es hora de Bogotá (la
+        conexión fija timezone=America/Bogota en db.py); sin este filtro se arrastraban los
+        pedidos de ayer que quedaron sin cobrar/sin marcar → aparecían todos en el selector.
+      · base_id IS NULL → no re-ofrecer un pedido que ya va con otro repartidor (H1).
+    Mantiene estado<>'cancelado' y pagado=FALSE para no excluir un domicilio 'listo' o ya
+    'entregado' que todavía está por cobrar (el cobro del domicilio ocurre al volver)."""
     try:
         with engine.connect() as conn:
             rows = conn.execute(text("""
@@ -294,6 +302,8 @@ def pedidos_domicilio_pendientes():
                 FROM pedidos
                 WHERE tipo_entrega IN ('domicilio', 'para_llevar')
                   AND estado <> 'cancelado' AND pagado = FALSE
+                  AND base_id IS NULL
+                  AND fecha::date = CURRENT_DATE
                 ORDER BY id
             """)).mappings().all()
     except Exception:

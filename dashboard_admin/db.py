@@ -10,6 +10,20 @@ from utils.items import parse_items
 
 load_dotenv()
 
+# ── Zona horaria del negocio: Bogotá, Colombia (UTC−5, sin horario de verano) ────
+# Todo el negocio razona por DÍA: corte de caja, número de pedido del día, "pedidos
+# de hoy" del tablero, y la base del repartidor. Sin fijar la zona, Railway corre en
+# UTC y "hoy" cambia a las 7 p.m. hora de Bogotá → el selector de la base arrastraba
+# los pedidos del día anterior y el número de pedido del día se reiniciaba a media
+# tarde. Fijamos la zona del PROCESO (datetime.now()/date.today()) aquí y la de la
+# CONEXIÓN (NOW()/CURRENT_DATE/fecha::date) en connect_args, para que Python y la BD
+# usen siempre la MISMA fecha local. time.tzset() solo existe en Unix (Railway); en
+# Windows se omite (la máquina local ya está en hora de Bogotá).
+import time as _time
+os.environ.setdefault("TZ", "America/Bogota")
+if hasattr(_time, "tzset"):
+    _time.tzset()
+
 
 # ── Config de conexión (C7) ─────────────────────────────────────────────────────
 def _normalizar_db_url(url):
@@ -46,6 +60,9 @@ RESTAURANTE_ID = int(os.getenv("RESTAURANTE_ID", "1"))
 # falla rápido con error claro en vez de congelar la UI de Streamlit indefinidamente.
 engine = create_engine(
     DATABASE_URL,
+    # Zona horaria de la SESIÓN de la BD: que NOW()/CURRENT_DATE/fecha::date sean hora
+    # de Bogotá (no UTC). Va de la mano con la zona del proceso fijada arriba.
+    connect_args={"options": "-c timezone=America/Bogota"},
     pool_pre_ping=True,
     pool_recycle=1800,
     pool_size=5,

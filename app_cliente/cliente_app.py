@@ -32,6 +32,14 @@ import uuid
 
 load_dotenv()
 
+# ── Zona horaria del negocio: Bogotá (UTC−5). Esta app ESCRIBE 'fecha' y asigna el
+# número de pedido del día (CURRENT_DATE); debe coincidir con el bot y el panel para
+# que "pedidos de hoy" y el corte de caja cuadren. Zona del proceso aquí, zona de la
+# conexión en connect_args. time.tzset() solo en Unix (Railway).
+os.environ.setdefault("TZ", "America/Bogota")
+if hasattr(time, "tzset"):
+    time.tzset()
+
 # Anti-spam del enlace público.
 COOLDOWN_SEG          = 25   # espera mínima entre envíos por sesión
 MAX_ACTIVAS_POR_TEL   = 5    # tope de pedidos en curso por teléfono (domicilio/llevar)
@@ -80,6 +88,8 @@ DATABASE_URL = _normalizar_db_url(os.getenv("DATABASE_URL"))
 # error claro, en vez de congelar el envío del pedido los 30 s del default.
 engine = create_engine(
     DATABASE_URL,
+    # Zona horaria de la sesión de la BD: NOW()/CURRENT_DATE/fecha::date en hora de Bogotá.
+    connect_args={"options": "-c timezone=America/Bogota"},
     pool_pre_ping=True,
     pool_recycle=1800,
     pool_size=5,
