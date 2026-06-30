@@ -330,6 +330,21 @@ def _distribuir_abono(pendientes, monto):
 SUBMETODOS_TRANSF = {"nequi", "daviplata", "breb"}
 
 
+def _entregar_domicilios_pagados(conn, ids) -> None:
+    """Tras un cobro, marca 'entregado' los DOMICILIOS que quedaron totalmente pagados: en
+    domicilio el efectivo vuelve con el repartidor, así que pagado ⇒ ya entregado. NO toca
+    'para_llevar' (el cliente lo recoge; la entrega no se infiere del pago) ni baja de
+    'entregado'/cancelado. Va en el MISMO txn del cobro (recibe el conn ya abierto)."""
+    ids = [int(i) for i in ids]
+    if not ids:
+        return
+    conn.execute(text(
+        "UPDATE pedidos SET estado = 'entregado' "
+        "WHERE id IN :ids AND pagado = TRUE AND tipo_entrega = 'domicilio' "
+        "AND estado NOT IN ('entregado', 'cancelado')"
+    ).bindparams(bindparam("ids", expanding=True)), {"ids": ids})
+
+
 def registrar_pago(ids, monto, metodo="efectivo", submetodo=None, comprobante=None) -> int:
     """Registra un abono de 'monto' (en 'metodo') contra los pedidos 'ids' (uno o
     varios), repartiéndolo del más antiguo al más nuevo. Cada pedido cuyo saldo quede
@@ -373,6 +388,8 @@ def registrar_pago(ids, monto, metodo="efectivo", submetodo=None, comprobante=No
             conn.execute(ins, {"pedido_id": u["id"], "monto": u["aplicado"], "metodo": metodo,
                                "submetodo": sub, "comprobante": comp})
             aplicado += int(u["aplicado"])
+        if aplicado > 0:
+            _entregar_domicilios_pagados(conn, ids)   # domicilio pagado → entregado (mismo txn)
     # El cobro cambió saldos/ocupación → invalida el tablero para reflejarlo al instante.
     refrescar_pedidos()
     return aplicado
@@ -425,6 +442,8 @@ def registrar_pago_mixto(ids, efectivo, transferencia, submetodo=None, comproban
                     if int(p["id"]) == u["id"]:
                         p["total_pagado"] = u["total_pagado"]
                         break
+        if aplicado > 0:
+            _entregar_domicilios_pagados(conn, ids)   # domicilio pagado → entregado (mismo txn)
     refrescar_pedidos()
     return aplicado
 
@@ -529,6 +548,7 @@ def registrar_pago_items(pedido_id, seleccion, metodo="efectivo", submetodo=None
                            "submetodo": sub, "comprobante": comp})
         for idx, usar in aplicar.items():
             conn.execute(ups, {"pid": pedido_id, "idx": idx, "cant": usar})
+        _entregar_domicilios_pagados(conn, [pedido_id])   # domicilio pagado → entregado (mismo txn)
     refrescar_pedidos()
     return int(cobro)
 

@@ -1040,6 +1040,50 @@ def _txt(valor) -> str:
     return str(valor)
 
 
+def _despachados_hoy(web):
+    """Rastro visible de los pedidos web YA completados hoy (estado 'entregado'), que el
+    tablero en vivo oculta al dejar de estar activos. Confirma que el pedido se despachó y
+    contó; y si alguno quedó entregado SIN cobrar, ofrece cobrarlo aquí — de lo contrario
+    desaparecería del monitor con el saldo abierto."""
+    if web is None or getattr(web, "empty", True) or "estado" not in web.columns:
+        return
+    f = pd.to_datetime(web["fecha"], errors="coerce")
+    desp = web[(f.dt.date == pd.Timestamp.now().date()) & (web["estado"] == "entregado")].copy()
+    if desp.empty:
+        return
+    desp = desp.sort_values("fecha", ascending=False)
+    recaudado = (int(pd.to_numeric(desp["total_pagado"], errors="coerce").fillna(0).sum())
+                 if "total_pagado" in desp.columns else 0)
+    por_cobrar = sum(1 for _, r in desp.iterrows() if saldo_pedido(r) > 0)
+    titulo = f"✅ Despachados hoy · {len(desp)} · recaudado ${fmt_money(recaudado)}"
+    if por_cobrar:
+        titulo += f"  ·  ⚠️ {por_cobrar} sin cobrar"
+    with st.expander(titulo, expanded=bool(por_cobrar)):
+        for i, (_, row) in enumerate(desp.iterrows()):
+            pid     = int(row["id"])
+            num_dia = row.get("num_dia") or pid
+            tipo    = str(row.get("tipo_entrega") or "")
+            etiqueta, bg, fg = TIPO_BADGE.get(tipo, ("Web", "#ececec", "#45443e"))
+            nombre  = _txt(row.get("cliente_nombre")) or _txt(row.get("numero_cliente")) or "Cliente"
+            total   = int(row.get("total", 0) or 0)
+            saldo   = saldo_pedido(row)
+            pago = (f'<span style="color:#dc2626; font-weight:700;">por cobrar ${fmt_money(saldo)}</span>'
+                    if saldo > 0 else '<span style="color:#16a34a; font-weight:600;">✓ cobrado</span>')
+            col_a, col_b = st.columns([4, 1])
+            with col_a:
+                st.markdown(
+                    f'<div style="padding:6px 0; border-bottom:1px solid #f0f0ee; font-size:0.84rem;">'
+                    f'<span class="badge" style="background:{bg}; color:{fg}; border:1px solid {bg};">'
+                    f'{etiqueta}</span> <b>#{num_dia}</b> · {html.escape(nombre)} · '
+                    f'${fmt_money(total)} · {pago}</div>',
+                    unsafe_allow_html=True)
+            with col_b:
+                if saldo > 0 and auth.can("cobrar") and st.button(
+                        "💵 Cobrar", key=f"desp_cobrar_{pid}_{i}", use_container_width=True):
+                    _pedir_dialogo("cobrar", ids=[int(pid)], titulo=f"Pedido #{num_dia}",
+                                   saldo=int(saldo), uid=f"desp_{pid}_{i}")
+
+
 def _web_en_vivo():
     _banner_cambio("web")  # mismo recordatorio de cambio en la pestaña de pedidos web
     st.markdown(titulo_seccion('🛵 Pedidos web · Domicilio y Para Llevar'),
@@ -1078,11 +1122,13 @@ def _web_en_vivo():
     if activos.empty:
         st.markdown('<p style="color:#a3a39b; font-size:0.9rem; padding:1.5rem 0; text-align:center;">'
                     'No hay pedidos web en curso.</p>', unsafe_allow_html=True)
-        return
+    else:
+        activos = activos.sort_values("fecha")  # más antiguo primero (urgencia de despacho)
+        for idx, (_, row) in enumerate(activos.iterrows()):
+            _web_card(row, idx)
 
-    activos = activos.sort_values("fecha")  # más antiguo primero (urgencia de despacho)
-    for idx, (_, row) in enumerate(activos.iterrows()):
-        _web_card(row, idx)
+    # Rastro de los pedidos web ya completados hoy (el tablero en vivo los oculta).
+    _despachados_hoy(web)
 
 
 def _web_card(row, idx: int):

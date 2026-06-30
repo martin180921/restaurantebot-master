@@ -307,7 +307,7 @@ def pedidos_domicilio_pendientes():
                 ORDER BY id
             """)).mappings().all()
     except Exception:
-        return []
+        return None   # None = la LECTURA falló (≠ [] = no hay pendientes) → no crear base a ciegas
     out = []
     for r in rows:
         d = dict(r)
@@ -331,7 +331,7 @@ def pedidos_de_base(base_id: int):
                 "FROM pedidos WHERE base_id = :bid AND estado <> 'cancelado' ORDER BY id"
             ), {"bid": int(base_id)}).mappings().all()
     except Exception:
-        return []
+        return None   # None = la LECTURA falló (≠ [] = base sin pedidos) → no conciliar a ciegas
     out = []
     for r in rows:
         d = dict(r)
@@ -472,6 +472,13 @@ def _dialog_base(cierre_id: int):
                                 step=1000, format="%d", key="base_monto") or 0)
 
     pendientes = pedidos_domicilio_pendientes()
+    if pendientes is None:
+        st.error("⚠️ No se pudieron leer los pedidos de domicilio pendientes (problema de "
+                 "conexión). No entregues la base ahora: se crearía SIN pedidos enlazados y no "
+                 "se podrían conciliar al volver. Cierra y reintenta en unos segundos.")
+        if st.button("Volver", key="base_volver_err", use_container_width=True):
+            st.rerun()
+        return
     ids = []
     if pendientes:
         opciones = {f"#{p['id']} · {p['nombre']} · ${fmt_money(p['saldo'])}": p["id"]
@@ -507,6 +514,12 @@ def _dialog_retorno(base_id: int, base_monto: int, nombre: str = "", pendientes_
     st.markdown(f"{quien}base entregada **${fmt_money(base_monto)}**.")
     # Conciliación en vivo desde base_id (no confiamos en el saldo que venía de la tarjeta).
     ordenes = pedidos_de_base(int(base_id))
+    if ordenes is None:
+        st.error("⚠️ No se pudieron leer los pedidos de esta base (conexión). No cierres la "
+                 "base ahora para no descuadrar; reintenta en unos segundos.")
+        if st.button("Volver", key=f"ret_err_{base_id}", use_container_width=True):
+            st.rerun()
+        return
     cobrado = sum(o["cobrado"] for o in ordenes)
     saldo = sum(o["saldo"] for o in ordenes)
     if ordenes:
@@ -593,6 +606,10 @@ def _seccion_flujo_caja(cierre: dict):
         base_monto = int(b["monto"])
         # Fuente de verdad: los pedidos ENLAZADOS por base_id (H1), no el JSON pedidos_ref.
         ordenes = pedidos_de_base(bid)
+        if ordenes is None:
+            st.warning(f"⚠️ No se pudieron leer los pedidos de la base de {html.escape(nombre)} "
+                       "(conexión). El cierre queda bloqueado por seguridad; reintenta.")
+            continue
         n_ped      = len(ordenes)
         total_ped  = sum(o["total"] for o in ordenes)
         cobrado_ped = sum(o["cobrado"] for o in ordenes)
