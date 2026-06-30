@@ -874,6 +874,25 @@ def _datos_cobro_pedido(ids):
     return "", 0
 
 
+def saldo_actual(ids) -> int:
+    """Saldo REAL por cobrar de 'ids' leído EN VIVO de la BD (no del tablero cacheado).
+    Σ(total − total_pagado) de los pedidos no pagados y no cancelados; 0 si ya están todos
+    pagados. Ante error de lectura devuelve -1 (señal 'no pude leer') para que el llamador
+    conserve el valor del tablero en vez de asumir saldado. Lo usa dialog_cobrar (E5)."""
+    ids = [int(i) for i in (ids or [])]
+    if not ids:
+        return 0
+    try:
+        with engine.connect() as conn:
+            val = conn.execute(text(
+                "SELECT COALESCE(SUM(total - COALESCE(total_pagado, 0)), 0) "
+                "FROM pedidos WHERE id IN :ids AND pagado = FALSE AND estado <> 'cancelado'"
+            ).bindparams(bindparam("ids", expanding=True)), {"ids": ids}).scalar()
+        return int(val or 0)
+    except Exception:
+        return -1
+
+
 # ── Modal de cobro: efectivo/transferencia y abonos parciales (Fase: pagos) ──────
 # Pop-up centrado compartido entre el tablero y el monitor de mesas
 # (pedidos.dialog_cobrar). 'ids' = pedidos a cobrar (uno o varios); 'titulo' = mesa
@@ -887,6 +906,13 @@ def dialog_cobrar(ids, titulo, total, uid):
         return
     ids = [int(i) for i in ids]
     total = max(0, int(total))
+    # E5 — saldo en vivo (anti-stale): el 'total' viene del tablero cacheado (ventana de
+    # ~8-30 s). Si otra caja cobró en ese lapso, abrir el checkout con un total viejo confunde.
+    # Releemos el saldo real; si no se puede leer (-1) conservamos el del tablero (H2 igual
+    # evita cobrar de más: registrar_pago aplica 0 y no imprime recibo fantasma).
+    _saldo_real = saldo_actual(ids)
+    if _saldo_real >= 0:
+        total = _saldo_real
     # Para un pedido de entrega único: lo que el cliente dijo que pagaría (paga_con), para
     # precargar el tender de efectivo y que el cajero solo confirme (menos error de cambio).
     _metodo_ped, _paga_con = _datos_cobro_pedido(ids)
@@ -910,7 +936,7 @@ def dialog_cobrar(ids, titulo, total, uid):
     )
 
     if total <= 0:
-        st.info("Esta cuenta ya está saldada.")
+        st.info("Esta cuenta ya está saldada (puede haberla cobrado otra caja).")
         if st.button("Cerrar", key=f"volver_cobrar_{uid}", use_container_width=True):
             st.rerun()
         return
