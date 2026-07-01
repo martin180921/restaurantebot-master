@@ -411,30 +411,32 @@ def _seccion_plato_dia(comp, precio, n):
             stock_a = a.get("stock")
             agot = agotado_por_stock(stock_a)
             c = int(cuentas.get(aid, 0))
-            ac1, ac2, ac3, ac4 = st.columns([3, 1, 1, 1])
-            with ac1:
-                color = "#a3a39b" if agot else "#26262b"
-                st.markdown(f'<div style="padding:4px 0; font-size:0.88rem; color:{color};">'
-                            f'{html.escape(str(a["nombre"]))}{_stock_suffix(stock_a)}</div>',
-                            unsafe_allow_html=True)
-            with ac2:
-                if st.button("−", key=f"pdpos_{uid}_acm_{aid}", use_container_width=True):
-                    if c > 0:
-                        cuentas[aid] = c - 1
-                        if cuentas[aid] == 0:
-                            del cuentas[aid]
-                    st.rerun(scope="fragment")
-            with ac3:
-                st.markdown(f'<div style="text-align:center; padding:4px 0; font-weight:600;">{c}</div>',
-                            unsafe_allow_html=True)
-            with ac4:
-                # Tope: ya se eligieron n, o el componente está agotado, o ya se tomaron
-                # todas sus porciones rastreadas en este plato.
-                tope_stock = (stock_a is not None and c >= int(stock_a))
-                if st.button("+", key=f"pdpos_{uid}_acp_{aid}", use_container_width=True,
-                             disabled=(elegidos >= n or agot or tope_stock)):
-                    cuentas[aid] = c + 1
-                    st.rerun(scope="fragment")
+            with st.container(key=f"fila_item_pdacomp_{uid}_{aid}"):
+                ac1, ac2, ac3, ac4 = st.columns([3, 1, 1, 1])
+                with ac1:
+                    color = "#a3a39b" if agot else "#26262b"
+                    st.markdown(f'<div style="padding:4px 0;"><span class="item-nombre" '
+                                f'style="font-size:0.88rem; color:{color};">'
+                                f'{html.escape(str(a["nombre"]))}{_stock_suffix(stock_a)}</span></div>',
+                                unsafe_allow_html=True)
+                with ac2:
+                    if st.button("−", key=f"pdpos_{uid}_acm_{aid}", use_container_width=True):
+                        if c > 0:
+                            cuentas[aid] = c - 1
+                            if cuentas[aid] == 0:
+                                del cuentas[aid]
+                        st.rerun(scope="fragment")
+                with ac3:
+                    st.markdown(f'<div style="text-align:center; padding:4px 0; font-weight:600;">{c}</div>',
+                                unsafe_allow_html=True)
+                with ac4:
+                    # Tope: ya se eligieron n, o el componente está agotado, o ya se tomaron
+                    # todas sus porciones rastreadas en este plato.
+                    tope_stock = (stock_a is not None and c >= int(stock_a))
+                    if st.button("+", key=f"pdpos_{uid}_acp_{aid}", use_container_width=True,
+                                 disabled=(elegidos >= n or agot or tope_stock)):
+                        cuentas[aid] = c + 1
+                        st.rerun(scope="fragment")
 
         nota = st.text_input("Nota", key=f"pdpos_{uid}_nota", label_visibility="collapsed",
                              placeholder="Nota para este plato (opcional)")
