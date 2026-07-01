@@ -481,36 +481,37 @@ def _seccion_catalogo(productos, tipo, titulo, con_desc=False, mostrar=True, hea
         key = f"{tipo}:{pid}"
         qty = carrito.get(key, 0)
         if mostrar:
-            c_nom, c_qty = st.columns([3, 2])
-            with c_nom:
-                desc = (f'<div style="font-size:0.76rem; color:#a3a39b; font-style:italic;">'
-                        f'{html.escape(str(p.get("descripcion") or ""))}</div>'
-                        if con_desc and p.get("descripcion") else "")
-                st.markdown(
-                    f'<div style="padding:6px 0;"><span style="font-size:0.9rem; color:#26262b;">'
-                    f'{html.escape(str(p["nombre"]))}</span>{desc}'
-                    f'<div style="font-size:0.82rem; color:#6b6b64;">${fmt_money(p["precio"])}'
-                    f'{_stock_suffix(p.get("stock"))}</div></div>',
-                    unsafe_allow_html=True,
-                )
-            with c_qty:
-                m, q, pl = st.columns([1, 1, 1])
-                with m:
-                    if st.button("−", key=f"menos_{key}", use_container_width=True):
-                        if qty > 0:
-                            carrito[key] = qty - 1
-                            if carrito[key] == 0:
-                                del carrito[key]
-                        st.rerun(scope="fragment")
-                with q:
-                    st.markdown(f'<div style="text-align:center; padding:4px 0; font-weight:600;">{qty}</div>',
-                                unsafe_allow_html=True)
-                with pl:
-                    # No se puede pedir más de lo que queda en stock (si lleva control).
-                    tope = (p.get("stock") is not None and qty >= int(p["stock"]))
-                    if st.button("+", key=f"mas_{key}", use_container_width=True, disabled=tope):
-                        carrito[key] = qty + 1
-                        st.rerun(scope="fragment")
+            with st.container(key=f"fila_item_{tipo}_{pid}"):
+                c_nom, c_qty = st.columns([3, 2])
+                with c_nom:
+                    desc = (f'<div style="font-size:0.76rem; color:#a3a39b; font-style:italic;">'
+                            f'{html.escape(str(p.get("descripcion") or ""))}</div>'
+                            if con_desc and p.get("descripcion") else "")
+                    st.markdown(
+                        f'<div style="padding:6px 0;"><span class="item-nombre" style="font-size:0.9rem; color:#26262b;">'
+                        f'{html.escape(str(p["nombre"]))}</span>{desc}'
+                        f'<div style="font-size:0.82rem; color:#6b6b64;">${fmt_money(p["precio"])}'
+                        f'{_stock_suffix(p.get("stock"))}</div></div>',
+                        unsafe_allow_html=True,
+                    )
+                with c_qty:
+                    m, q, pl = st.columns([1, 1, 1])
+                    with m:
+                        if st.button("−", key=f"menos_{key}", use_container_width=True):
+                            if qty > 0:
+                                carrito[key] = qty - 1
+                                if carrito[key] == 0:
+                                    del carrito[key]
+                            st.rerun(scope="fragment")
+                    with q:
+                        st.markdown(f'<div style="text-align:center; padding:4px 0; font-weight:600;">{qty}</div>',
+                                    unsafe_allow_html=True)
+                    with pl:
+                        # No se puede pedir más de lo que queda en stock (si lleva control).
+                        tope = (p.get("stock") is not None and qty >= int(p["stock"]))
+                        if st.button("+", key=f"mas_{key}", use_container_width=True, disabled=tope):
+                            carrito[key] = qty + 1
+                            st.rerun(scope="fragment")
         if qty > 0:
             elegidos.append({"tipo": tipo, "id": pid, "nombre": p["nombre"],
                              "precio": int(p["precio"]), "cantidad": qty})
@@ -548,35 +549,36 @@ def _seccion_con_extras(productos, tipo, titulo, comp, con_desc=False, mostrar=T
         key = f"{tipo}:{pid}"
         qty = carrito.get(key, 0)
         if mostrar:
-            c_nom, c_qty = st.columns([3, 2])
-            with c_nom:
-                desc = (f'<div style="font-size:0.76rem; color:#a3a39b; font-style:italic;">'
-                        f'{html.escape(str(p.get("descripcion") or ""))}</div>'
-                        if con_desc and p.get("descripcion") else "")
-                st.markdown(
-                    f'<div style="padding:6px 0;"><span style="font-size:0.9rem; color:#26262b;">'
-                    f'{html.escape(str(p["nombre"]))}</span>{desc}'
-                    f'<div style="font-size:0.82rem; color:#6b6b64;">${fmt_money(p["precio"])}'
-                    f'{_stock_suffix(p.get("stock"))}</div></div>',
-                    unsafe_allow_html=True,
-                )
-            with c_qty:
-                m, q, pl = st.columns([1, 1, 1])
-                with m:
-                    if st.button("−", key=f"menos_{key}", use_container_width=True):
-                        if qty > 0:
-                            carrito[key] = qty - 1
-                            if carrito[key] == 0:
-                                del carrito[key]
-                        st.rerun(scope="fragment")
-                with q:
-                    st.markdown(f'<div style="text-align:center; padding:4px 0; font-weight:600;">{qty}</div>',
-                                unsafe_allow_html=True)
-                with pl:
-                    tope = (p.get("stock") is not None and qty >= int(p["stock"]))
-                    if st.button("+", key=f"mas_{key}", use_container_width=True, disabled=tope):
-                        carrito[key] = qty + 1
-                        st.rerun(scope="fragment")
+            with st.container(key=f"fila_item_{tipo}_{pid}"):
+                c_nom, c_qty = st.columns([3, 2])
+                with c_nom:
+                    desc = (f'<div style="font-size:0.76rem; color:#a3a39b; font-style:italic;">'
+                            f'{html.escape(str(p.get("descripcion") or ""))}</div>'
+                            if con_desc and p.get("descripcion") else "")
+                    st.markdown(
+                        f'<div style="padding:6px 0;"><span class="item-nombre" style="font-size:0.9rem; color:#26262b;">'
+                        f'{html.escape(str(p["nombre"]))}</span>{desc}'
+                        f'<div style="font-size:0.82rem; color:#6b6b64;">${fmt_money(p["precio"])}'
+                        f'{_stock_suffix(p.get("stock"))}</div></div>',
+                        unsafe_allow_html=True,
+                    )
+                with c_qty:
+                    m, q, pl = st.columns([1, 1, 1])
+                    with m:
+                        if st.button("−", key=f"menos_{key}", use_container_width=True):
+                            if qty > 0:
+                                carrito[key] = qty - 1
+                                if carrito[key] == 0:
+                                    del carrito[key]
+                            st.rerun(scope="fragment")
+                    with q:
+                        st.markdown(f'<div style="text-align:center; padding:4px 0; font-weight:600;">{qty}</div>',
+                                    unsafe_allow_html=True)
+                    with pl:
+                        tope = (p.get("stock") is not None and qty >= int(p["stock"]))
+                        if st.button("+", key=f"mas_{key}", use_container_width=True, disabled=tope):
+                            carrito[key] = qty + 1
+                            st.rerun(scope="fragment")
 
         if qty <= 0:
             continue
@@ -626,6 +628,35 @@ def _conteo_seccion(productos, tipo) -> int:
     """Nº de unidades ya elegidas en una sección (para el resumen del acordeón)."""
     carrito = st.session_state.get("carrito_manual", {})
     return sum(carrito.get(f"{tipo}:{int(p['id'])}", 0) for p in productos)
+
+
+def _inject_mobile_item_css():
+    """Compacta las filas de producto (nombre + stepper −/cant/+) SOLO en pantallas
+    angostas (celular): por debajo de 640px Streamlit fuerza min-width:100% en cada
+    columna y las apila (nombre en una línea, cada botón ocupando la pantalla entera).
+    Aquí se revierte ese min-width dentro de las filas marcadas con key='fila_item_*'
+    para que nombre + stepper vuelvan a quedar en una sola línea compacta, y se
+    aprovecha el espacio ganado para agrandar el nombre. No toca nada por encima de
+    640px, así que el escritorio queda intacto."""
+    st.markdown("""
+    <style>
+    @media (max-width: 640px) {
+        [class*="st-key-fila_item_"] div[data-testid="stColumn"] {
+            min-width: 0 !important;
+        }
+        [class*="st-key-fila_item_"] span.item-nombre {
+            font-size: 1.05rem !important;
+        }
+        [class*="st-key-fila_item_"] div[data-testid="stHorizontalBlock"] {
+            gap: 0.5rem !important;
+        }
+        [class*="st-key-fila_item_"] .stButton button {
+            padding: 0.25rem !important;
+            min-height: 0 !important;
+        }
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
 
 def _inject_pos_accordion_css():
@@ -681,6 +712,7 @@ def render():
 @st.fragment
 def _form_fragment():
     drain_toasts()
+    _inject_mobile_item_css()
 
     st.session_state.setdefault("carrito_manual", {})
     st.session_state.setdefault("pd_instancias", [])
