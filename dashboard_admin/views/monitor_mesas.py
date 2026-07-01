@@ -984,10 +984,9 @@ def _detalle_pedido(row, idx: int):
             pedidos.flash(f"Prerecibo enviado · Pedido #{pid}", "🖨")
             st.rerun()
     with b3:
-        if auth.can("cobrar") and st.button(
+        if auth.can("cobrar") and saldo > 0 and st.button(
                 "💵 Cobrar", key=f"cobrar_{uid}", use_container_width=True,
-                help="Cobrar este pedido (efectivo/transferencia, abono parcial)",
-                disabled=saldo <= 0):
+                help="Cobrar este pedido (efectivo/transferencia, abono parcial)"):
             _pedir_dialogo("cobrar", ids=[int(pid)], titulo=f"Pedido #{num_dia}",
                            saldo=int(saldo), uid=uid)
     with b4:
@@ -1224,9 +1223,8 @@ def _web_card(row, idx: int):
             pedidos.flash(f"Prerecibo enviado · Pedido #{pid}", "🖨")
             st.rerun()
     with b3:
-        if auth.can("cobrar") and st.button(
-                "💵 Cobrar", key=f"cobrar_{uid}", use_container_width=True,
-                disabled=saldo <= 0):
+        if auth.can("cobrar") and saldo > 0 and st.button(
+                "💵 Cobrar", key=f"cobrar_{uid}", use_container_width=True):
             _pedir_dialogo("cobrar", ids=[int(pid)], titulo=f"Pedido #{num_dia}",
                            saldo=int(saldo), uid=uid)
     with b4:
