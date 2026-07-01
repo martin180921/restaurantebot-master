@@ -14,12 +14,14 @@ su propio módulo dentro de views/ para poder trabajarlas de forma independiente
       Administración (🔐, solo admin, al fondo del menú lateral; ver _render_admin)
 """
 import streamlit as st
+import streamlit.components.v1
 from dotenv import load_dotenv
 
 import auth
 import audit
 import empleados
 import mesero_keys
+import remember
 from views import (pedidos, monitor_mesas, nuevo_pedido, menu, mesas, resumen,
                    caja, cancelaciones, meseros, reporte_personal)
 from db import fecha_larga, ahora_bogota
@@ -40,27 +42,88 @@ st.set_page_config(
 # logout la cierra. Vive en panel.py (no en auth.py, que se mantiene sin dependencias de
 # BD): aquí sí tenemos empleados/audit. Tolerante a fallos: un marcaje que falle NO impide
 # entrar ni salir.
-def _abrir_turno(nombre: str, rol: str, empleado_id=None) -> None:
+def _set_remember_cookie(token: str, horas: int) -> None:
+    """Deja el token 'recuérdame' en una cookie del navegador. Streamlit no tiene API de
+    servidor para Set-Cookie, así que se inyecta un script invisible que la escribe (mismo
+    mecanismo que ya usa pedidos.py para imprimir). 'Secure' solo si se sirve por HTTPS
+    (así funciona igual en local por HTTP que en producción).
+
+    LIMITACIÓN: esta cookie NO puede ser HttpOnly. HttpOnly es una marca que SOLO puede
+    poner el servidor en la cabecera Set-Cookie, y Streamlit no expone esa API; al
+    escribirla desde JS (document.cookie) queda legible por cualquier script de la página.
+    Es inherente a Streamlit, no un descuido: mitigamos con SameSite=Lax, Secure en HTTPS,
+    expiración corta (REMEMBER_HORAS) y revocación en servidor (borrar el hash en BD)."""
+    segundos = int(horas * 3600)
+    st.components.v1.html(f"""
+    <script>
+      var secure = (window.location.protocol === 'https:') ? '; Secure' : '';
+      document.cookie = "{remember.COOKIE_NAME}={token}; max-age={segundos}; path=/; SameSite=Lax" + secure;
+    </script>
+    """, height=0)
+
+
+def _clear_remember_cookie() -> None:
+    st.components.v1.html(f"""
+    <script>
+      document.cookie = "{remember.COOKIE_NAME}=; max-age=0; path=/; SameSite=Lax";
+    </script>
+    """, height=0)
+
+
+def _flush_remember_cookie() -> None:
+    """Escribe la cookie 'recuérdame' si _abrir_turno la dejó pendiente. Se llama en un
+    punto del run que YA NO encadena un st.rerun() propio, para que el iframe tenga tiempo
+    de cargar y ejecutar su script antes de que algo lo desmonte."""
+    if st.session_state.pop("_cookie_pendiente", False):
+        tok = st.session_state.get("remember_token")
+        if tok:
+            _set_remember_cookie(tok, remember.HORAS_DEFAULT)
+
+
+def _abrir_turno(nombre: str, rol: str, empleado_id=None, persistir: bool = True) -> None:
     sid = empleados.abrir_sesion(nombre, rol, empleado_id)
     st.session_state["sesion_id"] = sid
     audit.registrar("clock_in", "sesion", sid, {"nombre": nombre, "rol": rol})
-    # Persistencia móvil SOLO para el mesero (perfil de empleado): deja su token en la URL
-    # para restaurar la sesión al reconectar (bloqueo de pantalla / refresco) sin re-pedir
-    # el PIN. admin/caja NO persisten (siguen siendo por-sesión, más seguros).
+    # persistir=False cuando el clock-in viene de RESTAURAR una sesión ya persistida (el
+    # mesero por ?mt o admin/caja por cookie): en ese caso el token ya existe y sigue vigente,
+    # así que solo se marca el turno; volver a emitir uno rotaría el token y dejaría el
+    # anterior huérfano (válido en BD hasta expirar, pero sin cookie que lo use ni logout que
+    # lo revoque). Emitir token nuevo solo en el LOGIN fresco (persistir=True, por defecto).
+    if not persistir:
+        return
+    # Persistencia móvil del MESERO (perfil de empleado): deja su token en la URL para
+    # restaurar la sesión al reconectar (bloqueo de pantalla / refresco) sin re-pedir el PIN.
     if rol == auth.MESERO and empleado_id is not None:
         tok = empleados.obtener_token(empleado_id)
         if tok:
             st.query_params["mt"] = tok
+    # Persistencia de admin/caja vía COOKIE (no URL, ver remember.py): "recuérdame" por
+    # remember.HORAS_DEFAULT horas. Cubre tanto el login con contraseña maestra (empleado_id
+    # None) como el de perfil de empleado con rol admin/caja. NO se escribe la cookie aquí:
+    # el login fresco encadena un st.rerun() justo después y el iframe de
+    # components.v1.html no llega a cargar (se desmonta) antes de ejecutar su script. Se
+    # deja marcada como PENDIENTE y _flush_remember_cookie() la escribe en el siguiente run
+    # (ese sí renderiza sin un rerun inmediato detrás).
+    elif rol in (auth.ADMIN, auth.CAJA):
+        tok = remember.crear(rol, empleado_id, nombre)
+        if tok:
+            st.session_state["remember_token"] = tok
+            st.session_state["_cookie_pendiente"] = True
 
 
 def _logout() -> None:
-    """Cierra el turno (clock-out + auditoría) y luego limpia la sesión de auth."""
+    """Cierra el turno (clock-out + auditoría), revoca el 'recuérdame' si lo hubiera y
+    limpia la sesión de auth."""
     sid = st.session_state.get("sesion_id")
     if sid:
         info = empleados.cerrar_sesion(sid)
         if info:
             audit.registrar("clock_out", "sesion", sid,
                             {"nombre": info.get("nombre"), "rol": info.get("rol")})
+    tok = st.session_state.get("remember_token") or (st.context.cookies or {}).get(remember.COOKIE_NAME)
+    if tok:
+        remember.revocar(tok)
+        _clear_remember_cookie()
     auth.logout()
 
 
@@ -75,9 +138,11 @@ def _latido_sesion() -> None:
 
 
 # ── Login y resolución de rol (RBAC) ─────────────────────────────────────────────
-# Sesión POR CONEXIÓN: la autenticación vive SOLO en st.session_state (ver auth.py). Ya
-# no se lee la URL — un enlace compartido o una pestaña nueva arrancan sin sesión y deben
-# autenticarse. Si una URL antigua aún trae ?r=&auth=, los limpiamos (ya se ignoran).
+# La autenticación vive en st.session_state (ver auth.py); ya no se lee la URL como
+# credencial — un enlace compartido o una pestaña nueva arrancan sin sesión y deben
+# autenticarse. Si una URL antigua aún trae ?r=&auth=, los limpiamos (ya se ignoran). El
+# mesero restaura vía ?mt (token en la URL, revocable) y admin/caja vía cookie 'recuérdame'
+# (remember.py, más abajo): ninguna de las dos convierte el enlace en credencial compartible.
 for _k in ("r", "auth"):
     if _k in st.query_params:
         try:
@@ -103,12 +168,40 @@ if not st.session_state["autenticado"]:
             if _sid:
                 st.session_state["sesion_id"] = _sid   # reanuda la sesión viva
             else:
-                _abrir_turno(_emp["nombre"], _emp["rol"], _emp["id"])  # estaba fuera → clock-in
+                # estaba fuera → clock-in, pero SIN re-emitir token (el ?mt ya está en la URL)
+                _abrir_turno(_emp["nombre"], _emp["rol"], _emp["id"], persistir=False)
         else:
             try:
                 del st.query_params["mt"]
             except KeyError:
                 pass
+
+# Restauración de ADMIN/CAJA por COOKIE (ver remember.py): si la pestaña se reconecta (F5
+# o reapertura del navegador) sin sesión en memoria pero el navegador trae la cookie
+# 'recuérdame' vigente, restauramos el rol sin volver a pedir contraseña. A diferencia del
+# ?mt del mesero, la cookie no viaja al copiar/compartir el enlace y caduca sola.
+if not st.session_state["autenticado"]:
+    _rt = (st.context.cookies or {}).get(remember.COOKIE_NAME)
+    if _rt:
+        _rec = remember.validar(_rt)
+        if _rec:
+            st.session_state["remember_token"] = _rt
+            if _rec["empleado_id"] is not None:
+                auth.login_empleado({"id": _rec["empleado_id"], "nombre": _rec["nombre"],
+                                      "rol": _rec["rol"]})
+            else:
+                auth.login(_rec["rol"], _rec["nombre"])
+            _sid = (empleados.sesion_activa_de(_rec["empleado_id"])
+                    if _rec["empleado_id"] is not None else None)
+            if _sid:
+                st.session_state["sesion_id"] = _sid   # reanuda la sesión viva
+            else:
+                # estaba fuera → clock-in, pero REUSANDO el token de la cookie (persistir=
+                # False): no se emite uno nuevo, así el de la cookie sigue siendo el único y
+                # el logout lo revoca limpiamente.
+                _abrir_turno(_rec["nombre"], _rec["rol"], _rec["empleado_id"], persistir=False)
+        else:
+            _clear_remember_cookie()
 
 if not st.session_state["autenticado"]:
     st.markdown("""
@@ -197,6 +290,10 @@ if role == auth.MESERO:
        (_sid and not empleados.sesion_activa(_sid)):
         _logout()
         st.rerun()
+
+# Aquí ya no hay ningún st.rerun() pendiente en este run: es el momento seguro para
+# escribir la cookie 'recuérdame' de admin/caja si _abrir_turno la dejó pendiente.
+_flush_remember_cookie()
 
 # ── Auto-refresh (30s) — C1 + P2 + P4 ──────────────────────────────────────────
 # El refresco en vivo vive ahora dentro de cada vista como un st.fragment

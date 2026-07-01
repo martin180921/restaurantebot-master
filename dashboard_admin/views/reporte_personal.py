@@ -19,6 +19,7 @@ from datetime import timedelta
 import auth
 import audit
 import empleados
+import remember
 from db import fmt_money, titulo_seccion, hoy_bogota
 
 
@@ -54,6 +55,9 @@ def render():
     # Finaliza sesiones sin latido (pestañas cerradas sin "Salir") antes de calcular horas,
     # fijando su salida en el último momento visto → horas exactas y "en turno" fiel.
     empleados.cerrar_sesiones_inactivas()
+    # Housekeeping del "recuérdame" de admin/caja: borra tokens ya vencidos (no afecta
+    # a los vigentes; validar() ya los ignora aunque no se hayan borrado todavía).
+    remember.limpiar_expiradas()
 
     # ── 1. En turno ahora (clock-in en vivo) ────────────────────────────────────
     activos = empleados.sesiones_activas()

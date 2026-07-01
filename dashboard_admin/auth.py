@@ -7,15 +7,26 @@ Tres roles:
               Acceso SOLO con un PIN de turno efímero generado en caja (ver mesero_keys.py);
               ya NO usa contraseña fija de entorno.
 
-Sesión POR CONEXIÓN: la autenticación vive solo en st.session_state (memoria de ESTA
-pestaña/dispositivo). Antes se persistía en la URL (?r=&auth=token), pero eso convertía
-el enlace en una credencial: compartir el link o abrir otra pestaña heredaba la sesión
-sin contraseña. Ahora cada conexión (dispositivo, pestaña o link compartido) debe
-autenticarse de forma independiente; un refresco completo (F5) también pide login de nuevo.
+Sesión POR CONEXIÓN: la autenticación vive en st.session_state (memoria de ESTA
+pestaña/dispositivo); un refresco completo (F5) vacía ese estado y de por sí pediría login
+de nuevo. Antes se compensaba persistiendo un token en la URL (?r=&auth=token), pero eso
+convertía el enlace en una credencial: compartir el link o abrir otra pestaña heredaba la
+sesión sin contraseña. Esa vía quedó cerrada para siempre como credencial de acceso.
+
+Lo que SÍ sobrevive a un refresco, sin repetir aquel error, son dos mecanismos fuera de
+session_state, ambos con expiración y revocación (ninguno vive en la URL como credencial
+compartible):
+    - mesero:      token en empleados.token, expuesto en la URL como ?mt (de solo LECTURA
+                   de identidad de turno, revocable al instante desde caja).
+    - admin/caja:  cookie 'recuérdame' (ver remember.py) con un token aleatorio de vida
+                   corta (remember.HORAS_DEFAULT) que panel.py valida al reconectar.
+Ambos los restaura panel.py al arrancar; auth.py solo conoce session_state.
 El auto-refresco normal usa st.fragment(run_every=…) y st.rerun(), que CONSERVAN
 session_state, así que no desloguea en operación normal — solo una recarga del navegador.
 
-Este módulo no importa db ni views (evita ciclos): solo streamlit, os y hashlib.
+Este módulo no importa db ni views (evita ciclos): solo streamlit, os y hashlib. La
+persistencia de mesero/admin/caja vive en empleados.py/remember.py + panel.py, que sí
+tocan BD.
 """
 import streamlit as st
 import os

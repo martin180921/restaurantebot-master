@@ -451,6 +451,29 @@ def _ensure_schema():
             "CREATE INDEX IF NOT EXISTS idx_sesiones_emp_login ON sesiones_empleado (login_at DESC)"
         ))
 
+        # sesiones_recordadas: "recuérdame" de admin/caja vía COOKIE (ver remember.py). Solo
+        # se guarda el HASH del token (igual que empleados.pin_hash); el valor en claro vive
+        # nada más en la cookie del navegador. empleado_id queda NULL cuando el login fue con
+        # la contraseña maestra de entorno (no hay perfil de empleado que referenciar).
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS sesiones_recordadas (
+                id          SERIAL       PRIMARY KEY,
+                token_hash  VARCHAR(64)  NOT NULL,
+                rol         VARCHAR(20)  NOT NULL,
+                empleado_id INTEGER      REFERENCES empleados(id),
+                nombre      VARCHAR(120),
+                creado      TIMESTAMP    NOT NULL DEFAULT NOW(),
+                expira      TIMESTAMP    NOT NULL
+            )
+        """))
+        conn.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_sesiones_recordadas_token "
+            "ON sesiones_recordadas (token_hash)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_sesiones_recordadas_expira ON sesiones_recordadas (expira)"
+        ))
+
         # auditoria: LIBRO MAYOR central de eventos críticos. Una fila por evento con
         # actor (nombre+rol), acción, entidad afectada y un JSONB 'detalle' con el diff /
         # metadatos. Lo escriben las acciones de dominio (cobrar, cancelar, descuento,

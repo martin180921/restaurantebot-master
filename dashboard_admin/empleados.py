@@ -113,12 +113,15 @@ def desactivar_empleado(emp_id: int) -> bool:
 
 def eliminar_empleado(emp_id: int) -> bool:
     """Borrado PERMANENTE de un empleado (hard-delete). Borra primero sus sesiones de turno
-    (FK sesiones_empleado.empleado_id → empleados.id) y luego el perfil. La auditoría
-    conserva su nombre (es un snapshot de texto, sin FK), así que el historial no se pierde.
-    Irreversible. Devuelve True si se borró el perfil."""
+    y sus tokens 'recuérdame' (FK sesiones_empleado.empleado_id / sesiones_recordadas.empleado_id
+    → empleados.id) y luego el perfil. La auditoría conserva su nombre (es un snapshot de
+    texto, sin FK), así que el historial no se pierde. Irreversible. Devuelve True si se
+    borró el perfil."""
     try:
         with engine.begin() as conn:
             conn.execute(text("DELETE FROM sesiones_empleado WHERE empleado_id = :id"),
+                         {"id": int(emp_id)})
+            conn.execute(text("DELETE FROM sesiones_recordadas WHERE empleado_id = :id"),
                          {"id": int(emp_id)})
             res = conn.execute(text("DELETE FROM empleados WHERE id = :id"),
                                {"id": int(emp_id)})

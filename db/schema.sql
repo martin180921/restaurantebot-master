@@ -10,7 +10,7 @@
 --
 -- Es idempotente: seguro de correr en una base nueva o ya existente (todo es
 -- CREATE/ALTER ... IF NOT EXISTS y los seeds están guardados). Crea exactamente
--- las mismas 15 tablas, columnas e índices que el código, y siembra los 12
+-- las mismas 16 tablas, columnas e índices que el código, y siembra los 12
 -- componentes del Plato del Día y los 4 ajustes de precios/recargo.
 --
 -- NOTA: a diferencia del bot, NO inserta los 3 platos de ejemplo del menú; arranca
@@ -241,6 +241,20 @@ CREATE TABLE IF NOT EXISTS sesiones_empleado (
 );
 CREATE INDEX IF NOT EXISTS idx_sesiones_emp_activa ON sesiones_empleado (activa);
 CREATE INDEX IF NOT EXISTS idx_sesiones_emp_login  ON sesiones_empleado (login_at DESC);
+
+-- "Recuérdame" de admin/caja vía cookie (ver dashboard_admin/remember.py). Solo se guarda
+-- el hash del token; empleado_id es NULL si el login fue con la contraseña maestra.
+CREATE TABLE IF NOT EXISTS sesiones_recordadas (
+    id          SERIAL       PRIMARY KEY,
+    token_hash  VARCHAR(64)  NOT NULL,
+    rol         VARCHAR(20)  NOT NULL,
+    empleado_id INTEGER      REFERENCES empleados(id),
+    nombre      VARCHAR(120),
+    creado      TIMESTAMP    NOT NULL DEFAULT NOW(),
+    expira      TIMESTAMP    NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sesiones_recordadas_token  ON sesiones_recordadas (token_hash);
+CREATE INDEX IF NOT EXISTS idx_sesiones_recordadas_expira ON sesiones_recordadas (expira);
 
 -- Libro mayor central de eventos críticos (append-only): quién, qué, cuándo, sobre qué.
 CREATE TABLE IF NOT EXISTS auditoria (
