@@ -51,6 +51,16 @@ CAT_LABEL = {
 # que usa el panel para el conteo; se duplica aquí porque el agente es un proceso aislado.
 DISH_TIPOS = ("plato_dia", "especial", "item", "bebida")
 
+# Etiquetas en formato normal (no ALL-CAPS) de DISH_TIPOS, para el resumen por categoría
+# de la cabecera de la comanda (distinto de CAT_LABEL, que es para las cabeceras de
+# sección en mayúsculas dentro del cuerpo del ticket).
+CAT_LABEL_RESUMEN = {
+    "plato_dia": "Plato del día",
+    "especial":  "Especiales",
+    "item":      "A la carta",
+    "bebida":    "Bebidas",
+}
+
 
 def _contar_platos(items) -> int:
     """Nº de unidades de platos + bebidas (sin adicionales) de un ticket, para el resumen
@@ -63,6 +73,24 @@ def _contar_platos(items) -> int:
             except (TypeError, ValueError):
                 total += 1
     return total
+
+
+def _resumen_por_categoria(items):
+    """[(etiqueta, cantidad), ...] de un ticket agrupado por categoría (mismo criterio que
+    _contar_platos: DISH_TIPOS, sin 'adicional'), en ORDEN_CAT y solo las presentes. Para
+    la cabecera de la comanda: en vez de un total único, cuántos hay que preparar de CADA
+    categoría (p. ej. 'Plato del día x2', 'Especiales x1') — cocina ve la mezcla del
+    pedido de un vistazo sin tener que contar el detalle de abajo."""
+    cuenta = dict.fromkeys(DISH_TIPOS, 0)
+    for it in (items or []):
+        tipo = str(it.get("tipo") or "item").lower()
+        if tipo not in cuenta:
+            continue
+        try:
+            cuenta[tipo] += int(it.get("cantidad", 1) or 1)
+        except (TypeError, ValueError):
+            cuenta[tipo] += 1
+    return [(CAT_LABEL_RESUMEN[t], cuenta[t]) for t in DISH_TIPOS if cuenta[t] > 0]
 
 
 def _texto_atendio(printer, payload: dict) -> None:
@@ -167,12 +195,54 @@ def linea_precio(etiqueta: str, monto, ancho: int = ANCHO) -> str:
     return f"{etiqueta}{' ' * espacio}{derecha}"
 
 
-def _imprimir_items(printer, items, grande: bool = False) -> None:
+def _resumen_plato_dia(items):
+    """(cantidad_total, subtotal_total) sumando TODOS los 'plato_dia' de un ticket.
+    La usa _imprimir_items en modo resumido (detalle=False): recibo/prerecibo ya no
+    listan cada Plato del Día con su desglose, solo esta línea agregada con el precio."""
+    cant = subtotal = 0
+    for it in (items or []):
+        if str(it.get("tipo") or "").lower() != "plato_dia":
+            continue
+        try:
+            c = int(it.get("cantidad", 1) or 1)
+        except (TypeError, ValueError):
+            c = 1
+        try:
+            precio = int(it.get("precio", 0) or 0)
+        except (TypeError, ValueError):
+            precio = 0
+        cant += c
+        subtotal += precio * c
+    return cant, subtotal
+
+
+def _imprimir_items(printer, items, grande: bool = False, detalle: bool = True) -> None:
     """Imprime los ítems AGRUPADOS por categoría ([PLATO DEL DIA], [BEBIDAS], …) con
     sus componentes indentados debajo (Entrada / Principio / Proteína / Acompañamientos
     / Nota). Retro-compatible: un item sin 'tipo' se imprime como 'N x nombre' sin
-    cabecera ni desglose. 'grande' usa doble alto en el nombre (comanda de cocina)."""
+    cabecera ni desglose. 'grande' usa doble alto en el nombre (comanda de cocina).
+
+    'detalle' distingue el ticket de cocina del ticket de cobro:
+      · True  (comanda): cada Plato del Día sale individual con su desglose completo, y
+        a partir del 2º se imprime una línea punteada ANTES de él para separarlo del
+        anterior — cocina no debe mezclar los componentes de un plato con el de al lado.
+      · False (recibo/prerecibo): TODOS los Plato del Día del ticket se colapsan en una
+        sola línea con la cantidad y el precio total ('N x Plato del Día ... $subtotal'),
+        sin Entrada/Principio/Acompañamientos — ese desglose ya lo vio cocina en la
+        comanda; repetirlo en el ticket de cobro solo gasta papel. Las demás categorías
+        se imprimen igual en ambos modos.
+    """
+    ancho = ANCHO if grande else ANCHO_B
+    if not detalle:
+        pd_cant, pd_subtotal = _resumen_plato_dia(items)
+        if pd_cant:
+            printer.set(align="left", bold=True, double_height=False, double_width=False)
+            printer.text(f"[{CAT_LABEL['plato_dia']}]\n")
+            printer.text(linea_precio(f"{pd_cant} x Plato del Día", pd_subtotal, ancho) + "\n")
+        items = [it for it in items if str(it.get("tipo") or "").lower() != "plato_dia"]
+
     tipo_actual = None
+    platos_vistos = 0   # cuenta plato_dia individuales ya impresos (solo aplica si detalle)
     for it in items:
         nombre = str(it.get("nombre", "?"))
         cant = int(it.get("cantidad", 1) or 1)
@@ -183,6 +253,14 @@ def _imprimir_items(printer, items, grande: bool = False) -> None:
             printer.set(align="left", bold=True, double_height=False, double_width=False)
             printer.text(f"[{CAT_LABEL.get(str(tipo).lower(), str(tipo).upper())}]\n")
             tipo_actual = tipo
+            platos_vistos = 0
+        # Separador entre Platos del Día individuales (2º en adelante): marca dónde
+        # termina uno y empieza el siguiente para que cocina no mezcle sus componentes.
+        if detalle and str(tipo).lower() == "plato_dia":
+            platos_vistos += 1
+            if platos_vistos > 1:
+                printer.set(bold=False, double_height=False)
+                printer.text("." * ancho + "\n")
         printer.set(align="left", bold=True, double_height=grande, double_width=False)
         printer.text(f"{cant} x {nombre}\n")
         printer.set(bold=False, double_height=False)
@@ -223,7 +301,7 @@ def imprimir_recibo(printer, payload: dict) -> None:
     printer.set(align="left", bold=True)
     printer.text(f"PLATOS Y BEBIDAS: {_contar_platos(payload.get('items', []))}\n")
     printer.set(bold=False)
-    _imprimir_items(printer, payload.get("items", []), grande=False)
+    _imprimir_items(printer, payload.get("items", []), grande=False, detalle=False)
     printer.text("-" * ANCHO_B + "\n")
 
     # 4) Totales y desglose de pago.
@@ -303,12 +381,19 @@ def imprimir_comanda(printer, payload: dict) -> None:
     _imprimir_contacto(printer, payload)   # tipo + tel + dirección si es entrega
     printer.set(bold=False)
     printer.text("-" * ANCHO + "\n")
-    # Resumen de cantidad ANTES del detalle: cuántos platos+bebidas hay que preparar.
+    # Resumen de cantidad ANTES del detalle: cuántos hay que preparar de CADA categoría
+    # (p. ej. 'Plato del día x2', 'Especiales x1'), no un total único — cocina ve la
+    # mezcla del pedido de un vistazo sin sumar el detalle de abajo.
     printer.set(align="left", bold=True)
-    printer.text(f"PLATOS Y BEBIDAS: {_contar_platos(payload.get('items', []))}\n")
+    resumen = _resumen_por_categoria(payload.get("items", []))
+    if resumen:
+        for etiqueta, cant in resumen:
+            printer.text(f"{etiqueta} x{cant}\n")
+    else:
+        printer.text("PLATOS Y BEBIDAS: 0\n")
     printer.set(bold=False)
     # Ítems grandes (doble alto) para leerse de lejos; componentes en tamaño normal.
-    _imprimir_items(printer, payload.get("items", []), grande=True)
+    _imprimir_items(printer, payload.get("items", []), grande=True, detalle=True)
     # Nota general del pedido (cambio de último momento, alergia…): destacada y en grande
     # para que la cocina no la pase por alto. Vacía/ausente → no se imprime.
     nota = str(payload.get("nota") or "").strip()
@@ -342,7 +427,7 @@ def imprimir_prerecibo(printer, payload: dict) -> None:
 
     # 3) Cuerpo en FUENTE B (igual que el recibo): ítems + total.
     printer.set(font="b")
-    _imprimir_items(printer, payload.get("items", []), grande=False)
+    _imprimir_items(printer, payload.get("items", []), grande=False, detalle=False)
     printer.text("-" * ANCHO_B + "\n")
     printer.text(linea_precio("Total", payload.get("total", 0), ANCHO_B) + "\n")
 
@@ -410,7 +495,9 @@ def imprimir_hoja_ruta(printer, payload: dict) -> None:
 # ── Modo prueba (sin BD) ─────────────────────────────────────────────────────────
 def _payload_demo() -> dict:
     """Payload de muestra con la MISMA forma que enqueue_recibo del panel. Efectivo
-    con cambio y abrir_cajon=True, para validar de un tiro impresora + cajón."""
+    con cambio y abrir_cajon=True, para validar de un tiro impresora + cajón. Trae
+    'precio' en los items (igual que produce items_para_ticket) para previsualizar el
+    Plato del Día colapsado ('1 x Plato del Día ... $precio', sin Entrada/Principio…)."""
     return {
         "mesa": "Ana (PRUEBA)",
         "mesero": "Carlos",
@@ -418,12 +505,12 @@ def _payload_demo() -> dict:
         "telefono": "300 123 4567",
         "direccion": "Calle 10 # 5-23, Barrio Centro, apto 302",
         "items": [
-            {"tipo": "plato_dia", "nombre": "Plato del Día", "cantidad": 1,
+            {"tipo": "plato_dia", "nombre": "Plato del Día", "cantidad": 1, "precio": 18000,
              "componentes": [["Entrada", "Sopa de Lentejas"], ["Principio", "Frijol"],
                              ["Proteína", "Res"], ["Acompañamientos", "2x Arroz, 1x Maduro"],
                              ["Nota", "Sin ensalada"]]},
-            {"tipo": "especial", "nombre": "Bisteck a caballo", "cantidad": 1, "componentes": []},
-            {"tipo": "bebida", "nombre": "Coca-Cola 350ml", "cantidad": 3, "componentes": []},
+            {"tipo": "especial", "nombre": "Bisteck a caballo", "cantidad": 1, "precio": 25000, "componentes": []},
+            {"tipo": "bebida", "nombre": "Coca-Cola 350ml", "cantidad": 3, "precio": 4000, "componentes": []},
         ],
         "total": 78000,
         "pagado": 78000,
@@ -438,13 +525,15 @@ def _payload_demo() -> dict:
 
 def _payload_demo_transfer() -> dict:
     """Recibo de muestra pagado por TRANSFERENCIA (Nequi) con comprobante, para
-    previsualizar la billetera y el n.º de transacción en el ticket. Sin cajón."""
+    previsualizar la billetera y el n.º de transacción en el ticket. Sin cajón ni
+    Plato del Día (a propósito: valida que el resumen colapsado no aparezca si el
+    pedido no trae ninguno)."""
     return {
         "mesa": "Mesa 4",
         "mesero": "Lucía",
         "items": [
-            {"tipo": "especial", "nombre": "Bandeja Paisa", "cantidad": 2, "componentes": []},
-            {"tipo": "bebida", "nombre": "Jugo de Mora", "cantidad": 2, "componentes": []},
+            {"tipo": "especial", "nombre": "Bandeja Paisa", "cantidad": 2, "precio": 28000, "componentes": []},
+            {"tipo": "bebida", "nombre": "Jugo de Mora", "cantidad": 2, "precio": 4000, "componentes": []},
         ],
         "total": 64000,
         "pagado": 64000,
@@ -509,7 +598,9 @@ def modo_test(cfg: dict) -> int:
 
 
 def _payload_demo_comanda() -> dict:
-    """Comanda de muestra (misma forma que enqueue_comanda): sin precios ni cajón."""
+    """Comanda de muestra (misma forma que enqueue_comanda): sin precios ni cajón. Trae
+    DOS Platos del Día con configs distintas para previsualizar el separador entre ellos
+    y el resumen de cabecera por categoría (Plato del día x2, Especiales x1, Bebidas x3)."""
     return {
         "pedido_id": 0,
         "mesa": "Ana (PRUEBA)",
@@ -522,6 +613,9 @@ def _payload_demo_comanda() -> dict:
              "componentes": [["Entrada", "Sopa de Lentejas"], ["Principio", "Frijol"],
                              ["Proteína", "Res"], ["Acompañamientos", "2x Arroz, 1x Maduro"],
                              ["Nota", "Sin ensalada"]]},
+            {"tipo": "plato_dia", "nombre": "Plato del Día", "cantidad": 1,
+             "componentes": [["Entrada", "Ajiaco"], ["Principio", "Lenteja"],
+                             ["Proteína", "Pollo"], ["Acompañamientos", "2x Papa, 1x Ensalada"]]},
             {"tipo": "especial", "nombre": "Bisteck a caballo", "cantidad": 1, "componentes": []},
             {"tipo": "bebida", "nombre": "Coca-Cola 350ml", "cantidad": 3, "componentes": []},
         ],
@@ -531,17 +625,24 @@ def _payload_demo_comanda() -> dict:
 
 
 def _payload_demo_prerecibo() -> dict:
-    """Prerecibo de muestra (misma forma que enqueue_prerecibo): mesa + ítems + total,
-    parcialmente abonado para previsualizar el saldo. Sin método de pago ni cajón."""
+    """Prerecibo de muestra (misma forma que enqueue_prerecibo): DOS Platos del Día (para
+    previsualizar que se agregan en una sola línea con cantidad + precio, sin Entrada/
+    Principio/Acompañamientos) + especial y bebida, parcialmente abonado para ver el saldo."""
     return {
         "pedido_id": 0,
         "mesa": "Mesa 4",
         "items": [
-            {"tipo": "especial", "nombre": "Bandeja Paisa", "cantidad": 2, "componentes": []},
-            {"tipo": "bebida", "nombre": "Jugo de Mora", "cantidad": 2, "componentes": []},
+            {"tipo": "plato_dia", "nombre": "Plato del Día", "cantidad": 1, "precio": 18000,
+             "componentes": [["Entrada", "Sopa de Lentejas"], ["Principio", "Frijol"],
+                             ["Proteína", "Res"]]},
+            {"tipo": "plato_dia", "nombre": "Plato del Día", "cantidad": 1, "precio": 18000,
+             "componentes": [["Entrada", "Ajiaco"], ["Principio", "Lenteja"],
+                             ["Proteína", "Pollo"]]},
+            {"tipo": "especial", "nombre": "Bandeja Paisa", "cantidad": 1, "precio": 32000, "componentes": []},
+            {"tipo": "bebida", "nombre": "Jugo de Mora", "cantidad": 2, "precio": 6000, "componentes": []},
         ],
-        "total": 64000,
-        "pagado": 20000,
+        "total": 80000,
+        "pagado": 30000,
         "abrir_cajon": False,
     }
 

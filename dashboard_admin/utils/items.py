@@ -118,10 +118,11 @@ def formatear_items_html(raw) -> str:
 
 
 def _agrupar(raw):
-    """[(tipo, [{nombre, cantidad, componentes}, ...]), ...] en ORDEN_CAT. Van
+    """[(tipo, [{nombre, cantidad, componentes, precio}, ...]), ...] en ORDEN_CAT. Van
     individuales (con su desglose) los plato_dia y los especiales que traen entrada/bebida
     incluidas; el resto (incl. especiales sin extras) se agrega por nombre dentro de su
-    categoría."""
+    categoría. 'precio' es el precio UNITARIO (no multiplicado por cantidad): lo necesita
+    el ticket impreso para el resumen colapsado del Plato del Día (ver print_agent)."""
     items = parse_items(raw)
     buckets = {c: [] for c in ORDEN_CAT}
     indices = {}
@@ -129,16 +130,17 @@ def _agrupar(raw):
         tipo = item_tipo(it)
         qty = int(it.get("cantidad", 1) or 1)
         nombre = str(it.get("nombre") or "?")
+        precio = int(it.get("precio") or 0)
         comp = componentes_lineas(it)
         if tipo == "plato_dia" or comp:
             buckets[tipo].append({"nombre": nombre, "cantidad": qty,
-                                  "componentes": comp})
+                                  "componentes": comp, "precio": precio})
         else:
             key = (tipo, nombre)
             if key in indices:
                 indices[key]["cantidad"] += qty
             else:
-                d = {"nombre": nombre, "cantidad": qty, "componentes": []}
+                d = {"nombre": nombre, "cantidad": qty, "componentes": [], "precio": precio}
                 indices[key] = d
                 buckets[tipo].append(d)
     return [(c, buckets[c]) for c in ORDEN_CAT if buckets[c]]
@@ -151,12 +153,14 @@ def lineas_por_categoria(raw):
 
 
 def items_para_ticket(raw):
-    """Lista plana en orden de categoría, cada item con su 'tipo' y 'componentes'
-    [[et,val],...], lista para el payload de print_jobs. Conserva 'nombre'/'cantidad'
-    para que un agente antiguo (sin soporte de categorías) la siga imprimiendo."""
+    """Lista plana en orden de categoría, cada item con su 'tipo', 'componentes'
+    [[et,val],...] y 'precio' (unitario), lista para el payload de print_jobs. Conserva
+    'nombre'/'cantidad' para que un agente antiguo (sin soporte de categorías) la siga
+    imprimiendo; 'precio' es aditivo — un agente que no lo conozca simplemente lo ignora."""
     flat = []
     for tipo, items in _agrupar(raw):
         for it in items:
             flat.append({"tipo": tipo, "nombre": it["nombre"],
-                         "cantidad": it["cantidad"], "componentes": it["componentes"]})
+                         "cantidad": it["cantidad"], "componentes": it["componentes"],
+                         "precio": it.get("precio", 0)})
     return flat
