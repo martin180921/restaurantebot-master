@@ -83,6 +83,10 @@ este modo exige cambiar el driver a WinUSB con Zadig (la impresora deja de ser u
   del Monitor). Mismo layout que el `recibo` (ítems + total en **Fuente B**) pero con
   encabezado **PRERECIBO** ("NO ES FACTURA VÁLIDA") y la **Mesa** bien visible.
   **Sin desglose de pago ni cajón.**
+- **`cajon`** — se encola al **cobrar** cuando el toggle "🖨️ Imprimir recibo" del
+  modal de Cobrar está **apagado** (el cliente no pidió recibo) y el pago fue en
+  **efectivo**: abre el cajón SAT sin imprimir ni cortar papel. Si no hubo efectivo
+  (transferencia) no se encola nada.
 
 > El **cuerpo** del `recibo` y del `prerecibo` se imprime en **Fuente B** (más pequeña,
 > ~64 col) para gastar menos papel; tras el corte se vuelve a **Fuente A** (~48 col),
@@ -100,7 +104,19 @@ El cajón se abre **solo en pagos en efectivo**: el panel pone `abrir_cajon:true
 payload y el agente envía el pulso `\x1b\x70\x00\x19\x96` al inicio del buffer. En
 transferencia no se abre.
 
-# Re start para actualizaciones 
+## Actualizar el agente en el local (tras un cambio en `agent.py`)
+
+Doble clic en **`actualizar_agente.bat`** (dentro de esta carpeta, en el PC del
+restaurante): hace `git pull` y reinicia la tarea programada `PrintAgent` en un solo
+paso. Si falla el pull (sin internet, conflicto) el agente sigue corriendo con la
+versión anterior — no se detiene a medias.
+
+Si preferís hacerlo a mano (o el `.bat` no está disponible), es lo mismo que hace el
+script, paso a paso en PowerShell:
+```powershell
+cd C:\ruta\a\restaurantebot-master\print_agent
+git pull
 Stop-ScheduledTask  -TaskName PrintAgent
 Start-ScheduledTask -TaskName PrintAgent
-Get-ScheduledTask   -TaskName PrintAgent
+Get-ScheduledTask   -TaskName PrintAgent   # confirma Ready/Running
+```
