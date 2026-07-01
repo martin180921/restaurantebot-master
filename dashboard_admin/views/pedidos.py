@@ -6,14 +6,13 @@ import pandas as pd
 import json
 import html
 import time
-from datetime import datetime
 
 import auth
 import audit
 import empleados
 from db import (engine, titulo_seccion, fmt_money, fecha_corta, flash, drain_toasts,
                 saldo_pedido, cobrado_pedido, _es_pagado, _a_entero,
-                aplicar_inventario, SinStock)
+                aplicar_inventario, SinStock, ahora_bogota, hoy_bogota)
 from utils.print_jobs import enqueue_recibo, enqueue_comanda, enqueue_prerecibo
 from utils.items import (formatear_items_html, lineas_por_categoria,
                          parse_items, etiqueta_item)
@@ -620,7 +619,7 @@ def minutos_espera(fecha):
         return None
     try:
         dt = pd.to_datetime(fecha).to_pydatetime()
-        return max(0, int((datetime.now() - dt).total_seconds() // 60))
+        return max(0, int((ahora_bogota() - dt).total_seconds() // 60))
     except Exception:
         return None
 
@@ -675,7 +674,7 @@ def generar_ticket_html(pid, cliente, items_raw, total_p, fecha, estado, num_dia
     # C2: cliente y estado se escapan antes de inyectarse en el ticket.
     num_dia_display = int(num_dia) if num_dia else pid
     cliente    = html.escape(str(cliente))
-    fecha_str  = html.escape(str(fecha)) if fecha else fecha_corta(datetime.now())
+    fecha_str  = html.escape(str(fecha)) if fecha else fecha_corta(ahora_bogota())
     estado_str = html.escape(str(estado).upper())
     total_fmt  = fmt_money(total_p)                                 # C6
 
@@ -1504,7 +1503,7 @@ def _tablero_en_vivo():
     # parcial total_pagado) → incluye las cuentas parciales abiertas. Defensivo ante
     # columnas faltantes pre-migración (cobrado_pedido las trata como 0/FALSE).
     hoy_df = df[
-        (pd.to_datetime(df["fecha"]).dt.date == datetime.now().date()) &
+        (pd.to_datetime(df["fecha"]).dt.date == hoy_bogota()) &
         (df["estado"] != "cancelado")
     ]
     ventas_hoy = int(hoy_df.apply(cobrado_pedido, axis=1).sum()) if not hoy_df.empty else 0

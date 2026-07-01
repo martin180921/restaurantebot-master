@@ -1,7 +1,8 @@
 """Conexión compartida a la base de datos y lecturas comunes entre vistas."""
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 import streamlit as st
 import pandas as pd
 import os
@@ -15,14 +16,39 @@ load_dotenv()
 # de hoy" del tablero, y la base del repartidor. Sin fijar la zona, Railway corre en
 # UTC y "hoy" cambia a las 7 p.m. hora de Bogotá → el selector de la base arrastraba
 # los pedidos del día anterior y el número de pedido del día se reiniciaba a media
-# tarde. Fijamos la zona del PROCESO (datetime.now()/date.today()) aquí y la de la
-# CONEXIÓN (NOW()/CURRENT_DATE/fecha::date) en connect_args, para que Python y la BD
-# usen siempre la MISMA fecha local. time.tzset() solo existe en Unix (Railway); en
-# Windows se omite (la máquina local ya está en hora de Bogotá).
+# tarde. La CONEXIÓN (NOW()/CURRENT_DATE/fecha::date) queda fija vía connect_args más
+# abajo (Postgres trae su propio catálogo de zonas, así que eso SIEMPRE funciona).
+#
+# El PROCESO (datetime.now()/date.today()) es otro cantar: TZ + time.tzset() de abajo
+# es best-effort y NO basta por sí solo — Railway corre sobre Nixpacks, cuya imagen no
+# siempre trae el tzdata del sistema (/usr/share/zoneinfo), así que tzset() cae en UTC
+# en silencio (glibc: zona no encontrada → UTC) aunque TZ esté fijada. El síntoma es
+# exactamente 5h (300 min) de más en cualquier "hace N minutos" calculado en Python
+# (Monitor, etc.), porque el proceso queda en UTC mientras 'fecha' en la BD ya está en
+# hora de Bogotá. Por eso TODO el código de negocio debe usar ahora_bogota()/
+# hoy_bogota() de aquí abajo en vez de datetime.now()/date.today() directo: usan
+# zoneinfo + el paquete 'tzdata' (dato IANA embebido en Python), que no depende del
+# tzdata del SO ni de time.tzset() y por tanto funciona igual en Railway, Windows o
+# donde sea.
 import time as _time
 os.environ.setdefault("TZ", "America/Bogota")
 if hasattr(_time, "tzset"):
     _time.tzset()
+
+_BOGOTA = ZoneInfo("America/Bogota")
+
+
+def ahora_bogota() -> datetime:
+    """'Ahora' naive en hora de Bogotá. Úsalo en vez de datetime.now() (ver nota de
+    arriba) en cualquier cálculo que se compare contra 'fecha'/timestamps de la BD.
+    Naive a propósito: esas columnas se guardan sin tz (wall-clock de Bogotá vía la
+    zona de sesión del engine), así restan/comparan directo sin conversiones."""
+    return datetime.now(_BOGOTA).replace(tzinfo=None)
+
+
+def hoy_bogota() -> date:
+    """'Hoy' en Bogotá. Úsalo en vez de date.today() (ver ahora_bogota)."""
+    return ahora_bogota().date()
 
 
 # ── Config de conexión (C7) ─────────────────────────────────────────────────────
@@ -691,7 +717,7 @@ def disponibles(df):
     carta del cliente (centraliza el filtro que vivía suelto en nuevo_pedido)."""
     if df is None or df.empty:
         return df
-    hoy = pd.Timestamp(date.today())
+    hoy = pd.Timestamp(hoy_bogota())
     ag = pd.to_datetime(df["agotado_hasta"], errors="coerce")
     return df[(df["activo"] == True) & (ag.isna() | (ag < hoy))]
 

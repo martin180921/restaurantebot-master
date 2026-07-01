@@ -14,12 +14,12 @@ Tres bloques:
 """
 import streamlit as st
 import pandas as pd
-from datetime import date, timedelta
+from datetime import timedelta
 
 import auth
 import audit
 import empleados
-from db import fmt_money, titulo_seccion
+from db import fmt_money, titulo_seccion, hoy_bogota
 
 
 # Etiquetas legibles de las acciones del libro mayor.
@@ -76,10 +76,10 @@ def render():
     # ── 2. Informe por empleado en un rango ─────────────────────────────────────
     c1, c2 = st.columns(2)
     with c1:
-        desde = st.date_input("Desde", value=date.today() - timedelta(days=7),
+        desde = st.date_input("Desde", value=hoy_bogota() - timedelta(days=7),
                               format="DD/MM/YYYY", key="rp_desde")
     with c2:
-        hasta = st.date_input("Hasta", value=date.today(),
+        hasta = st.date_input("Hasta", value=hoy_bogota(),
                               format="DD/MM/YYYY", key="rp_hasta")
     if desde > hasta:
         st.warning("El rango es inválido: 'Desde' es posterior a 'Hasta'.")

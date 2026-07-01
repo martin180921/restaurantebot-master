@@ -113,6 +113,15 @@ def cargar_config(requeridas=("DATABASE_URL", "RESTAURANTE_ID", "PRINTER_CONNECT
     return cfg
 
 
+def _conectar(dsn: str):
+    """Conexión a Postgres con la sesión fija en hora de Bogotá — misma convención
+    que los otros 3 servicios (dashboard/bot/cliente fijan connect_args igual, ver
+    db.py). Sin esto, el NOW() de este agente queda en la tz por defecto del server
+    (UTC en Railway) mientras el panel lee/resta en Bogotá, y el latido que escribe
+    heartbeat() en agentes_estado.visto_at sale desfasado ~5h frente al panel."""
+    return psycopg2.connect(dsn, options="-c timezone=America/Bogota")
+
+
 # ── Impresora ────────────────────────────────────────────────────────────────────
 def abrir_impresora(conn_cfg: dict):
     """Crea el objeto python-escpos según el tipo de conexión (windows | usb | network).
@@ -553,10 +562,9 @@ def modo_dry_run() -> int:
 
 def modo_status(cfg: dict) -> int:
     """Muestra el conteo de la cola por estado y los últimos errores. Solo lee la BD."""
-    import psycopg2
     rid = int(cfg["RESTAURANTE_ID"])
     try:
-        conn = psycopg2.connect(cfg["DATABASE_URL"])
+        conn = _conectar(cfg["DATABASE_URL"])
     except Exception as exc:
         print(f"[status] no se pudo conectar a la BD: {exc}")
         return 1
@@ -585,7 +593,7 @@ def modo_status(cfg: dict) -> int:
 
 def modo_once(cfg: dict) -> int:
     """Procesa UN trabajo pendiente y sale (debug on-site). Usa BD + impresora."""
-    conn = psycopg2.connect(cfg["DATABASE_URL"])
+    conn = _conectar(cfg["DATABASE_URL"])
     try:
         trabajo = reclamar_trabajo(conn, int(cfg["RESTAURANTE_ID"]))
         if not trabajo:
@@ -836,7 +844,7 @@ def main() -> None:
     while _corriendo:
         try:
             if conn is None or conn.closed:
-                conn = psycopg2.connect(cfg["DATABASE_URL"])
+                conn = _conectar(cfg["DATABASE_URL"])
                 _ensure_agent_schema(conn)
             # Cada ciclo: limpia atascos / reintenta errores transitorios y emite el latido
             # (barato e indexado) ANTES de reclamar el siguiente trabajo.

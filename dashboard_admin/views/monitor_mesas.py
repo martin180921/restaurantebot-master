@@ -18,7 +18,7 @@ import html
 import time
 
 import auth
-from db import fmt_money, cargar_mesas_activas, saldo_pedido, titulo_seccion
+from db import fmt_money, cargar_mesas_activas, saldo_pedido, titulo_seccion, hoy_bogota
 from utils.print_jobs import badge_agente_html
 from views import pedidos
 from views import nuevo_pedido as npos
@@ -847,7 +847,7 @@ def _detalle_mesa(mid: int, nombre: str, sub: pd.DataFrame, color: str,
     # (Sin columna de fecha de pago, usamos 'fecha' del pedido, como el resto del
     # panel — misma convención que ventas_hoy en el tablero.)
     try:
-        hoy = pd.Timestamp.now().normalize()
+        hoy = pd.Timestamp(hoy_bogota())
         pagado = df_full["pagado"].fillna(False).astype(bool)
         cerr = df_full[
             pagado
@@ -1054,7 +1054,7 @@ def _despachados_hoy(web):
     if web is None or getattr(web, "empty", True) or "estado" not in web.columns:
         return
     f = pd.to_datetime(web["fecha"], errors="coerce")
-    desp = web[(f.dt.date == pd.Timestamp.now().date()) & (web["estado"] == "entregado")].copy()
+    desp = web[(f.dt.date == hoy_bogota()) & (web["estado"] == "entregado")].copy()
     if desp.empty:
         return
     desp = desp.sort_values("fecha", ascending=False)

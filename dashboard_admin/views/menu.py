@@ -22,14 +22,13 @@ import csv
 import numbers
 import unicodedata
 import pandas as pd
-from datetime import date
 
 import auth
 from db import (engine, titulo_seccion, cargar_menu, cargar_componentes, cargar_catalogo,
                 cargar_ajustes, fmt_money, flash, disponibles,
                 componentes_activos_por_grupo, precio_plato_dia, num_acompanamientos,
                 GRUPOS_COMPONENTE, GRUPO_LABEL,
-                guardar_inventario, stock_int, STOCK_BAJO, agotado_por_stock)
+                guardar_inventario, stock_int, STOCK_BAJO, agotado_por_stock, hoy_bogota)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────────
@@ -50,7 +49,7 @@ def _agotado_hoy(valor) -> bool:
     if valor is None or (isinstance(valor, float) and pd.isna(valor)):
         return False
     try:
-        return pd.Timestamp(valor).date() >= date.today()
+        return pd.Timestamp(valor).date() >= hoy_bogota()
     except (ValueError, TypeError):
         return False
 

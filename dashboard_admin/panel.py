@@ -15,7 +15,6 @@ su propio módulo dentro de views/ para poder trabajarlas de forma independiente
 """
 import streamlit as st
 from dotenv import load_dotenv
-from datetime import datetime
 
 import auth
 import audit
@@ -23,7 +22,7 @@ import empleados
 import mesero_keys
 from views import (pedidos, monitor_mesas, nuevo_pedido, menu, mesas, resumen,
                    caja, cancelaciones, meseros, reporte_personal)
-from db import fecha_larga
+from db import fecha_larga, ahora_bogota
 
 load_dotenv()
 
@@ -785,7 +784,7 @@ def _render_desktop_shell():
             st.markdown(
                 '<span class="nav-box"></span>'
                 '<div class="nav-brand">Restaurante</div>'
-                f'<div class="nav-brand-sub">{fecha_larga(datetime.now())}</div>',
+                f'<div class="nav-brand-sub">{fecha_larga(ahora_bogota())}</div>',
                 unsafe_allow_html=True,
             )
             st.divider()

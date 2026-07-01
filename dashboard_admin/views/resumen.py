@@ -6,7 +6,7 @@ import json
 from datetime import date
 
 import auth
-from db import engine, fmt_money, saldo_pedido, cobrado_pedido, titulo_seccion
+from db import engine, fmt_money, saldo_pedido, cobrado_pedido, titulo_seccion, hoy_bogota
 from utils.items import formatear_items_texto
 
 
@@ -129,7 +129,7 @@ def render():
         st.stop()
     st.markdown(titulo_seccion('📊 Resumen del día'), unsafe_allow_html=True)
 
-    dia = st.date_input("Día", value=date.today(), format="DD/MM/YYYY", key="resumen_dia")
+    dia = st.date_input("Día", value=hoy_bogota(), format="DD/MM/YYYY", key="resumen_dia")
 
     pedidos = cargar_pedidos_dia(dia)
     if not pedidos:

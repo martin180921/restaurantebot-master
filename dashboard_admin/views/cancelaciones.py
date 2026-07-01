@@ -12,7 +12,7 @@ import pandas as pd
 import html
 
 import auth
-from db import engine, fmt_money, fecha_larga, titulo_seccion
+from db import engine, fmt_money, fecha_larga, titulo_seccion, hoy_bogota
 from views import pedidos
 
 
@@ -65,7 +65,7 @@ def render():
     # Métricas de cabecera: cuántas y por cuánto dinero (lo que NO se vendió).
     total_n = len(df)
     total_monto = int(pd.to_numeric(df["total"], errors="coerce").fillna(0).sum())
-    hoy = pd.Timestamp.now().date()
+    hoy = hoy_bogota()
     hoy_n = int((df["__dia"] == hoy).sum())
     m1, m2, m3 = st.columns(3)
     with m1:
