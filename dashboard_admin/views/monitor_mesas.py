@@ -695,21 +695,24 @@ def _monitor_en_vivo():
         sel = None
 
     # ── Métricas del salón ──────────────────────────────────────────────────────
-    libres    = sum(1 for mid in por_mesa if color_por_mesa[mid] == VERDE)
-    ocupadas  = sum(1 for mid in por_mesa if color_por_mesa[mid] == AMBAR)
-    por_cobrar = sum(1 for mid in por_mesa if color_por_mesa[mid] == AZUL)
-    atencion  = sum(1 for mid in por_mesa if color_por_mesa[mid] == ROJO)
-    m1, m2, m3, m4, m5 = st.columns(5)
-    with m1:
-        st.markdown(f'<div class="metric-card"><div class="metric-value">{len(mesas)}</div><div class="metric-label">Mesas</div></div>', unsafe_allow_html=True)
-    with m2:
-        st.markdown(f'<div class="metric-card"><div class="metric-value metric-green">{libres}</div><div class="metric-label">Libres</div></div>', unsafe_allow_html=True)
-    with m3:
-        st.markdown(f'<div class="metric-card"><div class="metric-value metric-accent">{ocupadas}</div><div class="metric-label">Ocupadas</div></div>', unsafe_allow_html=True)
-    with m4:
-        st.markdown(f'<div class="metric-card"><div class="metric-value metric-blue">{por_cobrar}</div><div class="metric-label">Por cobrar</div></div>', unsafe_allow_html=True)
-    with m5:
-        st.markdown(f'<div class="metric-card"><div class="metric-value" style="color:{ROJO}">{atencion}</div><div class="metric-label">Atención</div></div>', unsafe_allow_html=True)
+    # Mesero: se omiten (menos scroll antes de llegar a las mesas/pedidos); admin/caja
+    # las conservan igual que antes.
+    if auth.current_role() != auth.MESERO:
+        libres    = sum(1 for mid in por_mesa if color_por_mesa[mid] == VERDE)
+        ocupadas  = sum(1 for mid in por_mesa if color_por_mesa[mid] == AMBAR)
+        por_cobrar = sum(1 for mid in por_mesa if color_por_mesa[mid] == AZUL)
+        atencion  = sum(1 for mid in por_mesa if color_por_mesa[mid] == ROJO)
+        m1, m2, m3, m4, m5 = st.columns(5)
+        with m1:
+            st.markdown(f'<div class="metric-card"><div class="metric-value">{len(mesas)}</div><div class="metric-label">Mesas</div></div>', unsafe_allow_html=True)
+        with m2:
+            st.markdown(f'<div class="metric-card"><div class="metric-value metric-green">{libres}</div><div class="metric-label">Libres</div></div>', unsafe_allow_html=True)
+        with m3:
+            st.markdown(f'<div class="metric-card"><div class="metric-value metric-accent">{ocupadas}</div><div class="metric-label">Ocupadas</div></div>', unsafe_allow_html=True)
+        with m4:
+            st.markdown(f'<div class="metric-card"><div class="metric-value metric-blue">{por_cobrar}</div><div class="metric-label">Por cobrar</div></div>', unsafe_allow_html=True)
+        with m5:
+            st.markdown(f'<div class="metric-card"><div class="metric-value" style="color:{ROJO}">{atencion}</div><div class="metric-label">Atención</div></div>', unsafe_allow_html=True)
 
     # ── CSS: botones-tarjeta de la fila superior (objetivo 3: horizontal) ───────
     st.markdown("""

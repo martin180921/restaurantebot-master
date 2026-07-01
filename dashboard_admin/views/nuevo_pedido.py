@@ -274,6 +274,22 @@ def _selector_grupo(uid, grupo, opciones, label, *, default_ninguno=False, defau
     return None if sel == NINGUNO else sel
 
 
+def _peek_selector_grupo(uid, grupo, opciones, *, default_ninguno=False, default_nombre=None):
+    """Lee el valor de un _selector_grupo SIN dibujar sus botones (para un ítem cuya
+    sección de acordeón está plegada). Mismo default que _selector_grupo por si la key
+    no existiera todavía, pero en la práctica solo se llama con qty>0, cuyo selector
+    ya quedó inicializado la primera vez que la sección estuvo abierta (los +/- que
+    suben la cantidad solo se dibujan con la sección desplegada)."""
+    key = f"pdpos_{uid}_{grupo}"
+    if key not in st.session_state:
+        if default_nombre is not None:
+            st.session_state[key] = default_nombre
+        else:
+            st.session_state[key] = NINGUNO if default_ninguno else _default_grupo_sel(opciones)
+    sel = st.session_state.get(key)
+    return None if sel == NINGUNO else sel
+
+
 def _selector_principio(uid, opciones, label="Principio"):
     """Selector del Principio con opción 'mitad y mitad' (mixto): un check despliega dos
     sub-selectores para combinar DOS principios. Devuelve (texto, comps):
@@ -444,12 +460,19 @@ def _seccion_plato_dia(comp, precio, n):
     return plates, ok
 
 
-def _seccion_catalogo(productos, tipo, titulo, con_desc=False):
-    """Sección de catálogo con stepper por producto; devuelve los items elegidos."""
-    st.markdown(titulo_seccion(titulo), unsafe_allow_html=True)
+def _seccion_catalogo(productos, tipo, titulo, con_desc=False, mostrar=True, header=True):
+    """Sección de catálogo con stepper por producto; devuelve los items elegidos.
+
+    mostrar=False pliega la sección (acordeón del mesero, ver render()): se omiten los
+    steppers pero NO lo ya elegido — sigue leyendo el carrito y devolviéndolo en
+    'elegidos', así el resumen/total no cambian al plegar. header=False omite el
+    título porque ya lo pintó la cabecera plegable de quien llama."""
+    if header:
+        st.markdown(titulo_seccion(titulo), unsafe_allow_html=True)
     if not productos:
-        st.markdown('<p style="color:#a3a39b; font-size:0.85rem;">Sin opciones disponibles.</p>',
-                    unsafe_allow_html=True)
+        if mostrar:
+            st.markdown('<p style="color:#a3a39b; font-size:0.85rem;">Sin opciones disponibles.</p>',
+                        unsafe_allow_html=True)
         return []
     carrito = st.session_state["carrito_manual"]
     elegidos = []
@@ -457,43 +480,44 @@ def _seccion_catalogo(productos, tipo, titulo, con_desc=False):
         pid = int(p["id"])
         key = f"{tipo}:{pid}"
         qty = carrito.get(key, 0)
-        c_nom, c_qty = st.columns([3, 2])
-        with c_nom:
-            desc = (f'<div style="font-size:0.76rem; color:#a3a39b; font-style:italic;">'
-                    f'{html.escape(str(p.get("descripcion") or ""))}</div>'
-                    if con_desc and p.get("descripcion") else "")
-            st.markdown(
-                f'<div style="padding:6px 0;"><span style="font-size:0.9rem; color:#26262b;">'
-                f'{html.escape(str(p["nombre"]))}</span>{desc}'
-                f'<div style="font-size:0.82rem; color:#6b6b64;">${fmt_money(p["precio"])}'
-                f'{_stock_suffix(p.get("stock"))}</div></div>',
-                unsafe_allow_html=True,
-            )
-        with c_qty:
-            m, q, pl = st.columns([1, 1, 1])
-            with m:
-                if st.button("−", key=f"menos_{key}", use_container_width=True):
-                    if qty > 0:
-                        carrito[key] = qty - 1
-                        if carrito[key] == 0:
-                            del carrito[key]
-                    st.rerun(scope="fragment")
-            with q:
-                st.markdown(f'<div style="text-align:center; padding:4px 0; font-weight:600;">{qty}</div>',
-                            unsafe_allow_html=True)
-            with pl:
-                # No se puede pedir más de lo que queda en stock (si lleva control).
-                tope = (p.get("stock") is not None and qty >= int(p["stock"]))
-                if st.button("+", key=f"mas_{key}", use_container_width=True, disabled=tope):
-                    carrito[key] = qty + 1
-                    st.rerun(scope="fragment")
+        if mostrar:
+            c_nom, c_qty = st.columns([3, 2])
+            with c_nom:
+                desc = (f'<div style="font-size:0.76rem; color:#a3a39b; font-style:italic;">'
+                        f'{html.escape(str(p.get("descripcion") or ""))}</div>'
+                        if con_desc and p.get("descripcion") else "")
+                st.markdown(
+                    f'<div style="padding:6px 0;"><span style="font-size:0.9rem; color:#26262b;">'
+                    f'{html.escape(str(p["nombre"]))}</span>{desc}'
+                    f'<div style="font-size:0.82rem; color:#6b6b64;">${fmt_money(p["precio"])}'
+                    f'{_stock_suffix(p.get("stock"))}</div></div>',
+                    unsafe_allow_html=True,
+                )
+            with c_qty:
+                m, q, pl = st.columns([1, 1, 1])
+                with m:
+                    if st.button("−", key=f"menos_{key}", use_container_width=True):
+                        if qty > 0:
+                            carrito[key] = qty - 1
+                            if carrito[key] == 0:
+                                del carrito[key]
+                        st.rerun(scope="fragment")
+                with q:
+                    st.markdown(f'<div style="text-align:center; padding:4px 0; font-weight:600;">{qty}</div>',
+                                unsafe_allow_html=True)
+                with pl:
+                    # No se puede pedir más de lo que queda en stock (si lleva control).
+                    tope = (p.get("stock") is not None and qty >= int(p["stock"]))
+                    if st.button("+", key=f"mas_{key}", use_container_width=True, disabled=tope):
+                        carrito[key] = qty + 1
+                        st.rerun(scope="fragment")
         if qty > 0:
             elegidos.append({"tipo": tipo, "id": pid, "nombre": p["nombre"],
                              "precio": int(p["precio"]), "cantidad": qty})
     return elegidos
 
 
-def _seccion_con_extras(productos, tipo, titulo, comp, con_desc=False):
+def _seccion_con_extras(productos, tipo, titulo, comp, con_desc=False, mostrar=True, header=True):
     """Sección (Especiales / A la carta) con stepper por producto y, cuando el restaurante
     tiene entradas/bebidas del Plato del Día configuradas, selectores OPCIONALES (Entrada /
     Bebida) que van INCLUIDOS sin costo.
@@ -502,11 +526,18 @@ def _seccion_con_extras(productos, tipo, titulo, comp, con_desc=False):
     unidad ("Unidad #1", "Unidad #2"…) → se emite un ítem (cantidad 1) por unidad, cada uno
     con su propia config. Con una sola unidad va un único bloque sin cabecera. Si el
     restaurante no tiene esos componentes, el producto se comporta como un catálogo simple
-    (un ítem con cantidad N). 'Ninguno' por defecto en cada selector."""
-    st.markdown(titulo_seccion(titulo), unsafe_allow_html=True)
+    (un ítem con cantidad N). 'Ninguno' por defecto en cada selector.
+
+    mostrar=False pliega la sección (acordeón del mesero, ver render()): se omiten los
+    steppers y los selectores de entrada/bebida, pero la config ya elegida se conserva
+    leyéndola de session_state (_peek_selector_grupo) en vez de perderse. header=False
+    omite el título porque ya lo pintó la cabecera plegable de quien llama."""
+    if header:
+        st.markdown(titulo_seccion(titulo), unsafe_allow_html=True)
     if not productos:
-        st.markdown('<p style="color:#a3a39b; font-size:0.85rem;">Sin opciones disponibles.</p>',
-                    unsafe_allow_html=True)
+        if mostrar:
+            st.markdown('<p style="color:#a3a39b; font-size:0.85rem;">Sin opciones disponibles.</p>',
+                        unsafe_allow_html=True)
         return []
     ofrece_entrada = bool(comp.get("entrada"))
     ofrece_bebida  = bool(comp.get("bebida"))
@@ -516,35 +547,36 @@ def _seccion_con_extras(productos, tipo, titulo, comp, con_desc=False):
         pid = int(p["id"])
         key = f"{tipo}:{pid}"
         qty = carrito.get(key, 0)
-        c_nom, c_qty = st.columns([3, 2])
-        with c_nom:
-            desc = (f'<div style="font-size:0.76rem; color:#a3a39b; font-style:italic;">'
-                    f'{html.escape(str(p.get("descripcion") or ""))}</div>'
-                    if con_desc and p.get("descripcion") else "")
-            st.markdown(
-                f'<div style="padding:6px 0;"><span style="font-size:0.9rem; color:#26262b;">'
-                f'{html.escape(str(p["nombre"]))}</span>{desc}'
-                f'<div style="font-size:0.82rem; color:#6b6b64;">${fmt_money(p["precio"])}'
-                f'{_stock_suffix(p.get("stock"))}</div></div>',
-                unsafe_allow_html=True,
-            )
-        with c_qty:
-            m, q, pl = st.columns([1, 1, 1])
-            with m:
-                if st.button("−", key=f"menos_{key}", use_container_width=True):
-                    if qty > 0:
-                        carrito[key] = qty - 1
-                        if carrito[key] == 0:
-                            del carrito[key]
-                    st.rerun(scope="fragment")
-            with q:
-                st.markdown(f'<div style="text-align:center; padding:4px 0; font-weight:600;">{qty}</div>',
-                            unsafe_allow_html=True)
-            with pl:
-                tope = (p.get("stock") is not None and qty >= int(p["stock"]))
-                if st.button("+", key=f"mas_{key}", use_container_width=True, disabled=tope):
-                    carrito[key] = qty + 1
-                    st.rerun(scope="fragment")
+        if mostrar:
+            c_nom, c_qty = st.columns([3, 2])
+            with c_nom:
+                desc = (f'<div style="font-size:0.76rem; color:#a3a39b; font-style:italic;">'
+                        f'{html.escape(str(p.get("descripcion") or ""))}</div>'
+                        if con_desc and p.get("descripcion") else "")
+                st.markdown(
+                    f'<div style="padding:6px 0;"><span style="font-size:0.9rem; color:#26262b;">'
+                    f'{html.escape(str(p["nombre"]))}</span>{desc}'
+                    f'<div style="font-size:0.82rem; color:#6b6b64;">${fmt_money(p["precio"])}'
+                    f'{_stock_suffix(p.get("stock"))}</div></div>',
+                    unsafe_allow_html=True,
+                )
+            with c_qty:
+                m, q, pl = st.columns([1, 1, 1])
+                with m:
+                    if st.button("−", key=f"menos_{key}", use_container_width=True):
+                        if qty > 0:
+                            carrito[key] = qty - 1
+                            if carrito[key] == 0:
+                                del carrito[key]
+                        st.rerun(scope="fragment")
+                with q:
+                    st.markdown(f'<div style="text-align:center; padding:4px 0; font-weight:600;">{qty}</div>',
+                                unsafe_allow_html=True)
+                with pl:
+                    tope = (p.get("stock") is not None and qty >= int(p["stock"]))
+                    if st.button("+", key=f"mas_{key}", use_container_width=True, disabled=tope):
+                        carrito[key] = qty + 1
+                        st.rerun(scope="fragment")
 
         if qty <= 0:
             continue
@@ -558,26 +590,84 @@ def _seccion_con_extras(productos, tipo, titulo, comp, con_desc=False):
         # Con extras: una config por unidad. Cabecera "Unidad #i" solo si hay 2 o más.
         for u in range(qty):
             uid = f"{tipo}_{pid}_{u}"
-            if qty > 1:
-                st.markdown(_grupo_label(f'{html.escape(str(p["nombre"]))} · Unidad #{u+1}'),
-                            unsafe_allow_html=True)
             cfg = {}
-            if ofrece_entrada:
-                ent = _selector_grupo(uid, "entrada", comp["entrada"], "Entrada (incluida)",
-                                      default_ninguno=True)
-                if ent:
-                    cfg["entrada"] = ent
-            if ofrece_bebida:
-                beb = _selector_grupo(uid, "bebida", comp["bebida"], "Bebida (incluida)",
-                                      default_ninguno=True)
-                if beb:
-                    cfg["bebida"] = beb
+            if mostrar:
+                if qty > 1:
+                    st.markdown(_grupo_label(f'{html.escape(str(p["nombre"]))} · Unidad #{u+1}'),
+                                unsafe_allow_html=True)
+                if ofrece_entrada:
+                    ent = _selector_grupo(uid, "entrada", comp["entrada"], "Entrada (incluida)",
+                                          default_ninguno=True)
+                    if ent:
+                        cfg["entrada"] = ent
+                if ofrece_bebida:
+                    beb = _selector_grupo(uid, "bebida", comp["bebida"], "Bebida (incluida)",
+                                          default_ninguno=True)
+                    if beb:
+                        cfg["bebida"] = beb
+            else:
+                if ofrece_entrada:
+                    ent = _peek_selector_grupo(uid, "entrada", comp["entrada"], default_ninguno=True)
+                    if ent:
+                        cfg["entrada"] = ent
+                if ofrece_bebida:
+                    beb = _peek_selector_grupo(uid, "bebida", comp["bebida"], default_ninguno=True)
+                    if beb:
+                        cfg["bebida"] = beb
             item = {"tipo": tipo, "id": pid, "nombre": p["nombre"],
                     "precio": int(p["precio"]), "cantidad": 1}
             if cfg:
                 item["config"] = cfg
             elegidos.append(item)
     return elegidos
+
+
+def _conteo_seccion(productos, tipo) -> int:
+    """Nº de unidades ya elegidas en una sección (para el resumen del acordeón)."""
+    carrito = st.session_state.get("carrito_manual", {})
+    return sum(carrito.get(f"{tipo}:{int(p['id'])}", 0) for p in productos)
+
+
+def _inject_pos_accordion_css():
+    """Estilo de las cabeceras plegables del POS de mesero (botones 'posacc_'): mismo
+    aspecto de cabecera clicable que los acordeones del Menú (ver menu.py._acc_header),
+    pero con key propia para no mezclar su estado abierto/cerrado con el de otra vista."""
+    st.markdown("""
+    <style>
+    [class*="st-key-posacc_"] button,
+    div[data-testid="stColumn"] [class*="st-key-posacc_"] .stButton > button {
+        text-align: left !important; justify-content: flex-start !important;
+        background: #fbfbf9 !important; border: 1px solid #ececec !important;
+        border-radius: 12px !important; padding: 12px 16px !important;
+        font-size: 1rem !important; font-weight: 700 !important;
+        color: #26262b !important; margin: 10px 0 6px 0 !important; min-height: 0 !important;
+    }
+    [class*="st-key-posacc_"] button:hover,
+    div[data-testid="stColumn"] [class*="st-key-posacc_"] .stButton > button:hover {
+        background: #f2f1ed !important; border-color: #d8d6cf !important; color: #26262b !important;
+    }
+    [class*="st-key-posacc_"] button p,
+    div[data-testid="stColumn"] [class*="st-key-posacc_"] .stButton > button p {
+        text-align: left !important; margin: 0 !important; width: 100% !important; font-weight: 700 !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+
+def _acc_header_pos(key: str, label: str, resumen: str = "", *, default_open: bool = False) -> bool:
+    """Cabecera plegable de una sección del POS de mesero. El estado abierto/cerrado vive
+    en session_state para SOBREVIVIR a los st.rerun(scope='fragment') que disparan los
+    +/- de cada producto — st.expander se reiniciaría a cerrado en cada uno de esos
+    reruns, colapsando la sección que el mesero está usando. Devuelve True si queda
+    desplegada."""
+    open_key = f"posacc_open_{key}"
+    abierto = bool(st.session_state.get(open_key, default_open))
+    chevron = "▾" if abierto else "▸"
+    extra = f"   ·   {resumen}" if resumen else ""
+    if st.button(f"{chevron}  {label}{extra}", key=f"posacc_{key}", use_container_width=True):
+        st.session_state[open_key] = not abierto
+        st.rerun(scope="fragment")
+    return bool(st.session_state.get(open_key, default_open))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -639,14 +729,40 @@ def _form_fragment():
                                         placeholder="Dirección + referencias") or "").strip()
 
         plates, ok_pd = _seccion_plato_dia(comp, precio_pd, n_ac)
-        items_esp = _seccion_con_extras(_catalogo_seccion(df_cat, "especial"), "especial",
-                                        "⭐ Especiales", comp, con_desc=True)
-        items_alc = _seccion_con_extras(_catalogo_seccion(df_cat, "a_la_carta"), "item",
-                                        "🍽️ A la carta", comp)
-        items_adi = _seccion_catalogo(_catalogo_seccion(df_cat, "adicional"), "adicional",
-                                      "🍟 Adicionales", con_desc=True)
-        items_beb = _seccion_catalogo(_catalogo_seccion(df_cat, "bebida"), "bebida",
-                                      "🥤 Bebidas")
+
+        # Mesero: cada categoría de catálogo (Plato del Día queda fuera) es un acordeón
+        # plegado por defecto para no obligar a bajar por toda la carta en el celular;
+        # admin/caja conservan las secciones siempre abiertas (comportamiento previo).
+        es_mesero = auth.current_role() == auth.MESERO
+        if es_mesero:
+            _inject_pos_accordion_css()
+
+        def _estado_seccion(tipo, titulo, productos):
+            if not es_mesero or not productos:
+                return True, True  # (mostrar, header): siempre abierta, título normal
+            n_sel = _conteo_seccion(productos, tipo)
+            resumen = f"{n_sel} en el pedido" if n_sel else ""
+            return _acc_header_pos(tipo, titulo, resumen), False
+
+        cat_esp = _catalogo_seccion(df_cat, "especial")
+        mostrar, header = _estado_seccion("especial", "⭐ Especiales", cat_esp)
+        items_esp = _seccion_con_extras(cat_esp, "especial", "⭐ Especiales", comp,
+                                        con_desc=True, mostrar=mostrar, header=header)
+
+        cat_alc = _catalogo_seccion(df_cat, "a_la_carta")
+        mostrar, header = _estado_seccion("item", "🍽️ A la carta", cat_alc)
+        items_alc = _seccion_con_extras(cat_alc, "item", "🍽️ A la carta", comp,
+                                        mostrar=mostrar, header=header)
+
+        cat_adi = _catalogo_seccion(df_cat, "adicional")
+        mostrar, header = _estado_seccion("adicional", "🍟 Adicionales", cat_adi)
+        items_adi = _seccion_catalogo(cat_adi, "adicional", "🍟 Adicionales", con_desc=True,
+                                      mostrar=mostrar, header=header)
+
+        cat_beb = _catalogo_seccion(df_cat, "bebida")
+        mostrar, header = _estado_seccion("bebida", "🥤 Bebidas", cat_beb)
+        items_beb = _seccion_catalogo(cat_beb, "bebida", "🥤 Bebidas", mostrar=mostrar, header=header)
+
         items = plates + items_esp + items_alc + items_adi + items_beb
 
     with col_resumen:
