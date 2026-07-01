@@ -1175,6 +1175,13 @@ def dialog_cobrar(ids, titulo, total, uid):
             unsafe_allow_html=True,
         )
 
+    # Recibo bajo demanda: por defecto NO se imprime (la mayoría de clientes no lo pide y
+    # gasta papel). Se activa SOLO si el cliente lo pide. En efectivo el cajón se abre igual
+    # aunque no se imprima recibo, para poder dar el cambio (ver enqueue_recibo · imprimir).
+    imprimir_recibo = st.toggle(
+        "🖨️ Imprimir recibo", key=f"imprimir_recibo_{uid}", value=False,
+        help="El recibo solo se imprime si el cliente lo pide. En efectivo el cajón se abre igual.")
+
     st.markdown("<br>", unsafe_allow_html=True)
 
     c1, c2 = st.columns(2)
@@ -1226,12 +1233,13 @@ def dialog_cobrar(ids, titulo, total, uid):
                     ef_tramo,
                     {"metodo": "transferencia", "monto": tr_monto,
                      "submetodo": submetodo_val, "comprobante": comprobante_val},
-                ])
+                ], imprimir=imprimir_recibo)
             else:
                 # 'recibe' solo existe en la rama de efectivo. abrir_cajon lo decide el helper.
                 enqueue_recibo(ids, titulo, total, aplicado, metodo_pago,
                                recibido=recibe if es_efectivo else None,
-                               submetodo=submetodo_val, comprobante=comprobante_val)
+                               submetodo=submetodo_val, comprobante=comprobante_val,
+                               imprimir=imprimir_recibo)
             # Libro mayor: el cobro queda atribuido al cajero (base del informe de personal).
             # Tender y cambio en efectivo (puro o el tramo de efectivo de un mixto). Se anotan
             # en el libro mayor (auditable: permite detectar un cambio mal dado) y alimentan el

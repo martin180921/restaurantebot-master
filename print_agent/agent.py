@@ -367,6 +367,16 @@ def imprimir_recibo(printer, payload: dict) -> None:
     printer.set(font="a")
 
 
+def imprimir_solo_cajon(printer, payload: dict) -> None:
+    """Abre SOLO el cajón SAT, sin imprimir recibo ni cortar papel. Es el trabajo que
+    encola el panel cuando el cliente NO pidió recibo pero el cobro fue en efectivo: el
+    cajero necesita abrir el cajón para dar el cambio, pero no se gasta un ticket que
+    nadie pidió. Igual que en el recibo, el pulso solo va si abrir_cajon sigue en True
+    (el guard anti-doble-cajón de _imprimir_trabajo lo apaga en reintentos)."""
+    if payload.get("abrir_cajon"):
+        printer._raw(PULSO_CAJON)
+
+
 def imprimir_comanda(printer, payload: dict) -> None:
     """Ticket de COCINA: mesa, hora e ítems en grande. Sin precios ni cajón — la
     cocina solo necesita qué preparar y para quién."""
@@ -647,12 +657,19 @@ def _payload_demo_prerecibo() -> dict:
     }
 
 
+def _payload_demo_cajon() -> dict:
+    """Trabajo 'cajon' de muestra (misma forma que encola enqueue_recibo con imprimir=False
+    y efectivo): abre el cajón SIN imprimir recibo. Solo lleva el flag abrir_cajon."""
+    return {"mesa": "Mesa 4", "abrir_cajon": True, "pedido_ids": [0]}
+
+
 def modo_dry_run() -> int:
-    """Renderiza recibo, prerecibo y comanda de muestra como TEXTO (sin impresora ni BD)."""
+    """Renderiza recibo, prerecibo, comanda y cajón de muestra como TEXTO (sin impresora ni BD)."""
     for payload, render_fn in ((_payload_demo(), imprimir_recibo),
                                (_payload_demo_transfer(), imprimir_recibo),
                                (_payload_demo_prerecibo(), imprimir_prerecibo),
-                               (_payload_demo_comanda(), imprimir_comanda)):
+                               (_payload_demo_comanda(), imprimir_comanda),
+                               (_payload_demo_cajon(), imprimir_solo_cajon)):
         dummy = _DummyPrinter()
         render_fn(dummy, payload)
         print("┌" + "─" * ANCHO + "┐")
@@ -808,6 +825,8 @@ def _imprimir_trabajo(conn, trabajo, printer_cfg) -> bool:
             imprimir_prerecibo(printer, payload)
         elif tipo == "hoja_ruta":
             imprimir_hoja_ruta(printer, payload)
+        elif tipo == "cajon":
+            imprimir_solo_cajon(printer, payload)
         else:
             imprimir_recibo(printer, payload)
         try:

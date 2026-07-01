@@ -102,7 +102,8 @@ def _entrega_de(ids):
 
 def enqueue_recibo(ids, titulo: str, total: int, abono: int, metodo: str,
                    recibido: int | None = None, submetodo: str | None = None,
-                   comprobante: str | None = None, desglose: list | None = None) -> None:
+                   comprobante: str | None = None, desglose: list | None = None,
+                   imprimir: bool = True) -> None:
     """Encola el ticket de un cobro recién commiteado.
 
     Regla del cajón SAT: solo se abre cuando hubo efectivo (abrir_cajon).
@@ -115,6 +116,12 @@ def enqueue_recibo(ids, titulo: str, total: int, abono: int, metodo: str,
     ambos tramos en vez de dos recibos. Con desglose, 'metodo' global es 'mixto' y el
     cajón se abre si algún tramo fue en efectivo.
 
+    'imprimir' (default True): el recibo se imprime SOLO si el cliente lo pide. Cuando es
+    False encolamos un trabajo 'cajon' que abre el cajón SAT SIN imprimir papel (solo si
+    hubo efectivo, para poder dar el cambio); si el cobro no tuvo efectivo no se encola
+    nada. Así el cajero confirma el cobro y abre el cajón sin gastar un recibo que nadie
+    pidió.
+
     Tolera cualquier fallo: la impresión no debe tumbar el cobro ya registrado.
     """
     try:
@@ -122,6 +129,16 @@ def enqueue_recibo(ids, titulo: str, total: int, abono: int, metodo: str,
         desg = [d for d in (desglose or []) if int(d.get("monto") or 0) > 0]
         tiene_efectivo = (metodo == "efectivo") or any(
             str(d.get("metodo")) == "efectivo" for d in desg)
+        # Cliente no pidió recibo: no imprimimos papel. Solo abrimos el cajón (si hubo
+        # efectivo) con un trabajo mínimo; sin efectivo no hay nada que encolar.
+        if not imprimir:
+            if tiene_efectivo:
+                enqueue_job(RESTAURANTE_ID, "cajon", {
+                    "mesa": titulo,
+                    "abrir_cajon": True,
+                    "pedido_ids": [int(i) for i in ids],
+                })
+            return
         _tipo_ent, _tel, _dir = _entrega_de(ids)   # H4: contacto de entrega (pedido único)
         payload = {
             "mesa": titulo,
