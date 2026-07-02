@@ -222,15 +222,20 @@ def _imprimir_items(printer, items, grande: bool = False, detalle: bool = True) 
     / Nota). Retro-compatible: un item sin 'tipo' se imprime como 'N x nombre' sin
     cabecera ni desglose. 'grande' usa doble alto en el nombre (comanda de cocina).
 
+    Un separador punteado marca dónde termina un item y empieza el siguiente DENTRO de
+    la misma categoría (a partir del 2º) — evita que se mezclen los componentes de un
+    plato con los del de al lado (aplica a cualquier categoría, no solo Plato del Día).
+
     'detalle' distingue el ticket de cocina del ticket de cobro:
-      · True  (comanda): cada Plato del Día sale individual con su desglose completo, y
-        a partir del 2º se imprime una línea punteada ANTES de él para separarlo del
-        anterior — cocina no debe mezclar los componentes de un plato con el de al lado.
+      · True  (comanda): cada Plato del Día sale individual con su desglose completo.
+        Sin precios — la cocina solo necesita qué preparar.
       · False (recibo/prerecibo): TODOS los Plato del Día del ticket se colapsan en una
         sola línea con la cantidad y el precio total ('N x Plato del Día ... $subtotal'),
         sin Entrada/Principio/Acompañamientos — ese desglose ya lo vio cocina en la
         comanda; repetirlo en el ticket de cobro solo gasta papel. Las demás categorías
-        se imprimen igual en ambos modos.
+        (Especiales, A la carta, Adicionales, Bebidas) SÍ llevan su precio por línea
+        ('N x nombre ... $subtotal'), para que el cliente pueda revisar la cuenta antes
+        de pagar.
     """
     ancho = ANCHO if grande else ANCHO_B
     if not detalle:
@@ -242,7 +247,7 @@ def _imprimir_items(printer, items, grande: bool = False, detalle: bool = True) 
         items = [it for it in items if str(it.get("tipo") or "").lower() != "plato_dia"]
 
     tipo_actual = None
-    platos_vistos = 0   # cuenta plato_dia individuales ya impresos (solo aplica si detalle)
+    items_en_categoria = 0   # cuenta items individuales ya impresos EN la categoría actual
     for it in items:
         nombre = str(it.get("nombre", "?"))
         cant = int(it.get("cantidad", 1) or 1)
@@ -253,16 +258,21 @@ def _imprimir_items(printer, items, grande: bool = False, detalle: bool = True) 
             printer.set(align="left", bold=True, double_height=False, double_width=False)
             printer.text(f"[{CAT_LABEL.get(str(tipo).lower(), str(tipo).upper())}]\n")
             tipo_actual = tipo
-            platos_vistos = 0
-        # Separador entre Platos del Día individuales (2º en adelante): marca dónde
-        # termina uno y empieza el siguiente para que cocina no mezcle sus componentes.
-        if detalle and str(tipo).lower() == "plato_dia":
-            platos_vistos += 1
-            if platos_vistos > 1:
-                printer.set(bold=False, double_height=False)
-                printer.text("." * ancho + "\n")
+            items_en_categoria = 0
+        # Separador entre items individuales de la MISMA categoría (2º en adelante).
+        items_en_categoria += 1
+        if items_en_categoria > 1:
+            printer.set(bold=False, double_height=False)
+            printer.text("." * ancho + "\n")
         printer.set(align="left", bold=True, double_height=grande, double_width=False)
-        printer.text(f"{cant} x {nombre}\n")
+        if detalle:
+            printer.text(f"{cant} x {nombre}\n")
+        else:
+            try:
+                precio = int(it.get("precio", 0) or 0)
+            except (TypeError, ValueError):
+                precio = 0
+            printer.text(linea_precio(f"{cant} x {nombre}", precio * cant, ancho) + "\n")
         printer.set(bold=False, double_height=False)
         for par in comps:
             try:
@@ -609,8 +619,9 @@ def modo_test(cfg: dict) -> int:
 
 def _payload_demo_comanda() -> dict:
     """Comanda de muestra (misma forma que enqueue_comanda): sin precios ni cajón. Trae
-    DOS Platos del Día con configs distintas para previsualizar el separador entre ellos
-    y el resumen de cabecera por categoría (Plato del día x2, Especiales x1, Bebidas x3)."""
+    DOS Platos del Día con configs distintas y DOS especiales/DOS bebidas distintas para
+    previsualizar el separador entre items individuales EN CUALQUIER categoría, y el
+    resumen de cabecera por categoría (Plato del día x2, Especiales x2, Bebidas x4)."""
     return {
         "pedido_id": 0,
         "mesa": "Ana (PRUEBA)",
@@ -627,7 +638,9 @@ def _payload_demo_comanda() -> dict:
              "componentes": [["Entrada", "Ajiaco"], ["Principio", "Lenteja"],
                              ["Proteína", "Pollo"], ["Acompañamientos", "2x Papa, 1x Ensalada"]]},
             {"tipo": "especial", "nombre": "Bisteck a caballo", "cantidad": 1, "componentes": []},
+            {"tipo": "especial", "nombre": "Bandeja Paisa", "cantidad": 1, "componentes": []},
             {"tipo": "bebida", "nombre": "Coca-Cola 350ml", "cantidad": 3, "componentes": []},
+            {"tipo": "bebida", "nombre": "Jugo de Mora", "cantidad": 1, "componentes": []},
         ],
         "nota": "Cambio: ahora es PARA LLEVAR",
         "abrir_cajon": False,
@@ -637,7 +650,9 @@ def _payload_demo_comanda() -> dict:
 def _payload_demo_prerecibo() -> dict:
     """Prerecibo de muestra (misma forma que enqueue_prerecibo): DOS Platos del Día (para
     previsualizar que se agregan en una sola línea con cantidad + precio, sin Entrada/
-    Principio/Acompañamientos) + especial y bebida, parcialmente abonado para ver el saldo."""
+    Principio/Acompañamientos) + DOS especiales y DOS bebidas distintas — para
+    previsualizar el precio por línea en TODAS las categorías y el separador entre
+    items individuales — parcialmente abonado para ver el saldo."""
     return {
         "pedido_id": 0,
         "mesa": "Mesa 4",
@@ -649,9 +664,11 @@ def _payload_demo_prerecibo() -> dict:
              "componentes": [["Entrada", "Ajiaco"], ["Principio", "Lenteja"],
                              ["Proteína", "Pollo"]]},
             {"tipo": "especial", "nombre": "Bandeja Paisa", "cantidad": 1, "precio": 32000, "componentes": []},
+            {"tipo": "especial", "nombre": "Bisteck a caballo", "cantidad": 1, "precio": 28000, "componentes": []},
             {"tipo": "bebida", "nombre": "Jugo de Mora", "cantidad": 2, "precio": 6000, "componentes": []},
+            {"tipo": "bebida", "nombre": "Coca-Cola 350ml", "cantidad": 1, "precio": 4000, "componentes": []},
         ],
-        "total": 80000,
+        "total": 112000,
         "pagado": 30000,
         "abrir_cajon": False,
     }
