@@ -115,6 +115,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_pedidos_idem ON pedidos (idem_key);
 CREATE INDEX IF NOT EXISTS idx_pedidos_estado    ON pedidos (estado);
 CREATE INDEX IF NOT EXISTS idx_pedidos_fecha     ON pedidos (fecha DESC);
 CREATE INDEX IF NOT EXISTS idx_pedidos_no_pagado ON pedidos (pagado) WHERE pagado = FALSE;
+-- Los filtros "de HOY" (fecha::date = CURRENT_DATE, en caja/pedidos/numeración del día) no
+-- pueden usar idx_pedidos_fecha (el cast tapa el b-tree del timestamp); este índice de
+-- expresión sí les sirve. Válido porque fecha es TIMESTAMP sin zona → el cast es inmutable.
+CREATE INDEX IF NOT EXISTS idx_pedidos_fecha_dia ON pedidos ((fecha::date));
 
 -- Libro de abonos (método + hora real de pago).
 CREATE TABLE IF NOT EXISTS pagos (
