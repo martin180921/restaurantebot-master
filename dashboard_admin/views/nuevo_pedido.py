@@ -24,7 +24,7 @@ from db import (engine, titulo_seccion, cargar_mesas_activas, componentes_activo
                 fee_entrega, upsert_cliente, aplicar_inventario, SinStock,
                 siguiente_num_dia, resumen_disponibilidad_componentes, agotado_por_stock,
                 stock_int, STOCK_BAJO, GRUPO_LABEL)
-from utils.print_jobs import enqueue_comanda, badge_agente_html, estado_agente
+from utils.print_jobs import enqueue_comanda, badge_agente_html, badge_fallos_html, estado_agente
 
 
 # El recargo de entrega se cobra una vez por CADA plato del pedido: Plato del Día,
@@ -897,6 +897,11 @@ def _form_fragment():
         if not _ag or not _ag.get("online"):
             st.markdown(f'<div style="margin:6px 0;">{badge_agente_html(_ag)}</div>',
                         unsafe_allow_html=True)
+        # Encolados fallidos de HOY ('' si no hubo): aunque el agente esté en línea, esos
+        # pedidos se quedaron sin comanda/recibo en la cola → avisar que van a mano.
+        _bf = badge_fallos_html()
+        if _bf:
+            st.markdown(f'<div style="margin:6px 0;">{_bf}</div>', unsafe_allow_html=True)
 
         # H3: clave de idempotencia estable para ESTE carrito (se regenera al limpiarlo).
         # Un doble clic / reintento reusa la misma clave → no se duplica el pedido.

@@ -222,6 +222,38 @@ def badge_agente_html(estado: dict | None = "__auto__") -> str:
             f'🔴 Agente sin conexión (~{mins} min){cola_txt}</span>')
 
 
+def fallos_encolado_hoy(restaurante_id=None) -> int:
+    """Nº de encolados de impresión FALLIDOS hoy (eventos 'print_enqueue_fail' del libro
+    mayor, ver _log_fallo_impresion). Best-effort: 0 si la lectura falla — la alerta
+    nunca debe romper la vista que la pinta. La cuenta es barata aunque ts::date no use
+    índice: idx_auditoria_accion acota primero y estas filas son excepcionales."""
+    rid = int(restaurante_id if restaurante_id is not None else RESTAURANTE_ID)
+    try:
+        with engine.connect() as conn:
+            n = conn.execute(text(
+                "SELECT COUNT(*) FROM auditoria "
+                "WHERE accion = 'print_enqueue_fail' AND restaurante_id = :r "
+                "  AND ts::date = CURRENT_DATE"
+            ), {"r": rid}).scalar()
+        return int(n or 0)
+    except Exception:
+        return 0
+
+
+def badge_fallos_html() -> str:
+    """Badge HTML con los tickets que HOY no llegaron a la cola, o '' si no hubo fallos
+    (cero ruido en operación normal). Complementa a badge_agente_html: el agente puede
+    estar en línea y aun así haber pedidos sin comanda/recibo (el INSERT a print_jobs
+    falló) → el personal debe hacer ese ticket a mano."""
+    n = fallos_encolado_hoy()
+    if not n:
+        return ""
+    base = ("display:inline-block; padding:4px 12px; border-radius:999px; "
+            "font-size:0.75rem; font-weight:600; border:1px solid;")
+    return (f'<span style="{base} background:#fee2e2; color:#b91c1c; border-color:#fecaca;">'
+            f'🔴 {n} ticket(s) sin encolar hoy · hacerlos a mano</span>')
+
+
 def enqueue_comanda(pedido_id: int) -> None:
     """Encola la comanda de cocina de un pedido (al pasar a 'en preparacion').
 

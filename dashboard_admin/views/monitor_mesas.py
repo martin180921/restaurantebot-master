@@ -19,7 +19,7 @@ import time
 
 import auth
 from db import fmt_money, cargar_mesas_activas, saldo_pedido, titulo_seccion, hoy_bogota
-from utils.print_jobs import badge_agente_html
+from utils.print_jobs import badge_agente_html, badge_fallos_html
 from views import pedidos
 from views import nuevo_pedido as npos
 
@@ -642,7 +642,8 @@ def _monitor_en_vivo():
     _banner_cambio("salon")  # recordatorio de cambio del último cobro en efectivo
     st.markdown(titulo_seccion('🖥️ Monitor de mesas'), unsafe_allow_html=True)
     # E7: salud del agente de impresión a la vista (reimprimir comanda / cobrar dependen de él).
-    st.markdown(f'<div style="margin:-4px 0 10px 0;">{badge_agente_html()}</div>',
+    # + badge de encolados fallidos de HOY ('' si no hubo): tickets que hay que hacer a mano.
+    st.markdown(f'<div style="margin:-4px 0 10px 0;">{badge_agente_html()} {badge_fallos_html()}</div>',
                 unsafe_allow_html=True)
 
     mesas = cargar_mesas_activas()
@@ -1095,7 +1096,8 @@ def _web_en_vivo():
     st.markdown(titulo_seccion('🛵 Pedidos web · Domicilio y Para Llevar'),
                 unsafe_allow_html=True)
     # E7: salud del agente — la comanda, el recibo y la hoja de ruta dependen de él.
-    st.markdown(f'<div style="margin:-4px 0 10px 0;">{badge_agente_html()}</div>',
+    # + badge de encolados fallidos de HOY ('' si no hubo): tickets que hay que hacer a mano.
+    st.markdown(f'<div style="margin:-4px 0 10px 0;">{badge_agente_html()} {badge_fallos_html()}</div>',
                 unsafe_allow_html=True)
 
     df = pedidos.cargar_pedidos()
