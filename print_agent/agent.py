@@ -443,6 +443,10 @@ def imprimir_prerecibo(printer, payload: dict) -> None:
     printer.text(f"Mesa: {payload.get('mesa') or '—'}\n")
     printer.set(bold=False)
     printer.text(datetime.now().strftime("%d/%m/%Y  %H:%M") + "\n")
+    # Datos de entrega (domicilio/para llevar): el cliente revisa la dirección en ESTA
+    # cuenta previa, no solo al pagar — mismo bloque que ya usa el recibo final.
+    printer.set(align="left")
+    _imprimir_contacto(printer, payload)   # tipo + tel + dirección si es entrega
     printer.text("-" * ANCHO + "\n")
 
     # 3) Cuerpo en FUENTE B (igual que el recibo): ítems + total.
@@ -651,11 +655,15 @@ def _payload_demo_prerecibo() -> dict:
     """Prerecibo de muestra (misma forma que enqueue_prerecibo): DOS Platos del Día (para
     previsualizar que se agregan en una sola línea con cantidad + precio, sin Entrada/
     Principio/Acompañamientos) + DOS especiales y DOS bebidas distintas — para
-    previsualizar el precio por línea en TODAS las categorías y el separador entre
-    items individuales — parcialmente abonado para ver el saldo."""
+    previsualizar el precio por línea en TODAS las categorías, el separador entre items
+    individuales y el bloque de entrega (domicilio) — parcialmente abonado para ver el
+    saldo."""
     return {
         "pedido_id": 0,
-        "mesa": "Mesa 4",
+        "mesa": "Pedido #4",
+        "tipo_entrega": "domicilio",
+        "telefono": "300 123 4567",
+        "direccion": "Calle 10 # 5-23, Barrio Centro, apto 302",
         "items": [
             {"tipo": "plato_dia", "nombre": "Plato del Día", "cantidad": 1, "precio": 18000,
              "componentes": [["Entrada", "Sopa de Lentejas"], ["Principio", "Frijol"],

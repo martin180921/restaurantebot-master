@@ -339,7 +339,10 @@ def enqueue_prerecibo(pedido_id: int) -> None:
     Es la cuenta que se entrega al cliente ANTES de pagar: mismos ítems que el recibo
     + total, encabezado PRERECIBO y la MESA de la que proviene. Sin pago ni cajón. El
     'pagado' lleva lo ya abonado (total_pagado) para mostrar el saldo si la cuenta es
-    parcial. Tolera fallos: imprimir la pre-cuenta no debe romper el panel.
+    parcial. H4: si es domicilio/para_llevar, incluye tipo + teléfono + dirección (ver
+    _entrega_de) — igual que ya hace el recibo final, para que el cliente/repartidor
+    puedan revisar la dirección en la cuenta previa, no solo al cobrar.
+    Tolera fallos: imprimir la pre-cuenta no debe romper el panel.
     """
     try:
         sql = text("""
@@ -352,10 +355,14 @@ def enqueue_prerecibo(pedido_id: int) -> None:
             row = conn.execute(sql, {"id": int(pedido_id)}).mappings().first()
         if not row:
             return
+        tipo_ent, tel, direccion = _entrega_de([pedido_id])
         payload = {
             "pedido_id": int(pedido_id),
             "mesa": row["mesa_nombre"] or row["numero_cliente"] or f"Pedido #{pedido_id}",
             "items": items_para_ticket(parse_items(row["items"])),
+            "tipo_entrega": tipo_ent,
+            "telefono": tel,
+            "direccion": direccion,
             "total": int(row["total"] or 0),
             "pagado": int(row["total_pagado"] or 0),
             "abrir_cajon": False,
