@@ -1418,11 +1418,13 @@ def _con_saldo_mask(df: pd.DataFrame) -> pd.Series:
 def render_por_mesa(df: pd.DataFrame, mesa_nombres: dict):
     """Agrupa y renderiza los pedidos ACTIVOS por mesa.
 
-    'Activo' aquí = en cocina (pendiente/en preparación/listo) y CON saldo pendiente,
-    igual que en el Monitor: cobrar libera la mesa, así que un pedido ya saldado no
-    debe seguir apareciendo aunque su estado de cocina no se haya avanzado a
-    'entregado'. Ver _con_saldo_mask (excluye pagado=TRUE o saldo <= 0)."""
-    activos = df[df["estado"].isin(ESTADOS_ACTIVOS) & _con_saldo_mask(df)].copy()
+    'Activo' aquí = en cocina (pendiente/en preparación/listo) O entregado, y CON saldo
+    pendiente — igual que en el Monitor (ver monitor_mesas._web_en_vivo): cobrar libera
+    la mesa/pedido, así que uno ya saldado no debe seguir apareciendo, pero uno YA
+    entregado y AÚN sin cobrar tampoco debe desaparecer de este tablero. Ver
+    _con_saldo_mask (excluye pagado=TRUE o saldo <= 0)."""
+    activos = df[(df["estado"].isin(ESTADOS_ACTIVOS) | (df["estado"] == "entregado"))
+                 & _con_saldo_mask(df)].copy()
     if activos.empty:
         st.markdown('<p style="color:#a3a39b; font-size:0.85rem; padding:1rem 0;">No hay pedidos activos en este momento.</p>', unsafe_allow_html=True)
         return
