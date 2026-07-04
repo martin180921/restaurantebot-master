@@ -908,6 +908,9 @@ def recuperar_huerfanos(conn, restaurante_id: int, max_intentos: int = 5) -> Non
     2) Jobs en 'error' con intentos < max → vuelven a 'pendiente' (reintento de fallos
        transitorios: sin papel, tapa abierta, USB suelto). Pasado el tope quedan 'error'
        terminal para no reimprimir en bucle un payload imposible.
+       Con BACKOFF: solo si el último intento (reclamado_at) fue hace > 1 min. Sin esto,
+       el ciclo de 2s re-encola/reclama/falla en bucle y quema los 5 intentos en ~10s —
+       antes de que alguien alcance a poner papel o cerrar la tapa.
     """
     with conn.cursor() as cur:
         cur.execute("""
@@ -920,6 +923,7 @@ def recuperar_huerfanos(conn, restaurante_id: int, max_intentos: int = 5) -> Non
         cur.execute("""
             UPDATE print_jobs SET estado = 'pendiente'
             WHERE restaurante_id = %s AND estado = 'error' AND intentos < %s
+              AND (reclamado_at IS NULL OR reclamado_at < NOW() - INTERVAL '1 minute')
         """, (restaurante_id, max_intentos))
         reintentos = cur.rowcount or 0
     conn.commit()

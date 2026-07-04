@@ -107,9 +107,11 @@ transferencia no se abre.
 ## Actualizar el agente en el local (tras un cambio en `agent.py`)
 
 Doble clic en **`actualizar_agente.bat`** (dentro de esta carpeta, en el PC del
-restaurante): hace `git pull` y reinicia la tarea programada `PrintAgent` en un solo
-paso. Si falla el pull (sin internet, conflicto) el agente sigue corriendo con la
-versión anterior — no se detiene a medias.
+restaurante): hace `git pull`, instala dependencias nuevas (`pip install -r
+requirements.txt` en la `.venv`, si existe) y reinicia la tarea programada
+`PrintAgent` en un solo paso, verificando que quedó **Running**. Si falla el pull o
+el pip (sin internet, conflicto) el agente sigue corriendo con la versión anterior —
+no se detiene a medias.
 
 Si preferís hacerlo a mano (o el `.bat` no está disponible), es lo mismo que hace el
 script, paso a paso en PowerShell:
