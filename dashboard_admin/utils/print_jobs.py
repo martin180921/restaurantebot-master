@@ -100,6 +100,16 @@ def _entrega_de(ids):
     return str(row["tipo_entrega"]), tel, direccion
 
 
+def _recargo_entrega(items: list, tipo_entrega, total: int) -> int:
+    """Recargo de domicilio/para llevar a mostrar en el ticket: la diferencia entre el
+    'total' guardado (que ya lo incluye, ver nuevo_pedido._n_platos_recargo) y la suma de
+    los items (que NO lo llevan como línea propia). 0 si es de mesa o no hay diferencia."""
+    if not tipo_entrega:
+        return 0
+    subtotal = sum(int(it.get("precio") or 0) * int(it.get("cantidad") or 1) for it in items)
+    return max(0, int(total) - subtotal)
+
+
 def enqueue_recibo(ids, titulo: str, total: int, abono: int, metodo: str,
                    recibido: int | None = None, submetodo: str | None = None,
                    comprobante: str | None = None, desglose: list | None = None,
@@ -140,13 +150,15 @@ def enqueue_recibo(ids, titulo: str, total: int, abono: int, metodo: str,
                 })
             return
         _tipo_ent, _tel, _dir = _entrega_de(ids)   # H4: contacto de entrega (pedido único)
+        _items = _items_payload(ids)
         payload = {
             "mesa": titulo,
-            "items": _items_payload(ids),
+            "items": _items,
             "mesero": _meseros_de(ids),   # H4: empleado(s) que tomaron el/los pedido(s)
             "tipo_entrega": _tipo_ent,
             "telefono": _tel,
             "direccion": _dir,
+            "recargo_entrega": _recargo_entrega(_items, _tipo_ent, total),
             "total": int(total),
             "pagado": int(abono),
             "saldo": saldo,
@@ -356,14 +368,17 @@ def enqueue_prerecibo(pedido_id: int) -> None:
         if not row:
             return
         tipo_ent, tel, direccion = _entrega_de([pedido_id])
+        _items = items_para_ticket(parse_items(row["items"]))
+        _total = int(row["total"] or 0)
         payload = {
             "pedido_id": int(pedido_id),
             "mesa": row["mesa_nombre"] or row["numero_cliente"] or f"Pedido #{pedido_id}",
-            "items": items_para_ticket(parse_items(row["items"])),
+            "items": _items,
             "tipo_entrega": tipo_ent,
             "telefono": tel,
             "direccion": direccion,
-            "total": int(row["total"] or 0),
+            "recargo_entrega": _recargo_entrega(_items, tipo_ent, _total),
+            "total": _total,
             "pagado": int(row["total_pagado"] or 0),
             "abrir_cajon": False,
         }

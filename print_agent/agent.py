@@ -122,6 +122,18 @@ def _imprimir_contacto(printer, payload: dict) -> None:
     if direccion:
         printer.text(f"Dir: {direccion}\n")
 
+def _imprimir_recargo_entrega(printer, payload: dict) -> None:
+    """Línea 'Recargo domicilio/Para llevar' en el cuerpo (Fuente B), justo antes del
+    Total. El panel la manda en 'recargo_entrega' (ver print_jobs._recargo_entrega); si
+    es 0 (pedido de mesa, o no hubo recargo) no imprime nada."""
+    recargo = int(payload.get("recargo_entrega") or 0)
+    if recargo <= 0:
+        return
+    etiqueta = "Recargo domicilio" if str(payload.get("tipo_entrega") or "").lower() == "domicilio" \
+        else "Recargo para llevar"
+    printer.text(linea_precio(etiqueta, recargo, ANCHO_B) + "\n")
+
+
 # Billeteras de transferencia (submetodo del payload → etiqueta legible en el ticket).
 SUBMETODO_LABEL = {
     "nequi":     "Nequi",
@@ -315,6 +327,7 @@ def imprimir_recibo(printer, payload: dict) -> None:
     printer.text("-" * ANCHO_B + "\n")
 
     # 4) Totales y desglose de pago.
+    _imprimir_recargo_entrega(printer, payload)
     printer.text(linea_precio("Total", payload.get("total", 0), ANCHO_B) + "\n")
     # Pago MIXTO (payload['desglose']): una sola persona pagó esta cuenta repartiendo
     # el monto entre efectivo y transferencia → imprimimos el total pagado y debajo cada
@@ -453,6 +466,7 @@ def imprimir_prerecibo(printer, payload: dict) -> None:
     printer.set(font="b")
     _imprimir_items(printer, payload.get("items", []), grande=False, detalle=False)
     printer.text("-" * ANCHO_B + "\n")
+    _imprimir_recargo_entrega(printer, payload)
     printer.text(linea_precio("Total", payload.get("total", 0), ANCHO_B) + "\n")
 
     # 4) Abonos previos (cuenta parcialmente pagada) → saldo pendiente.
