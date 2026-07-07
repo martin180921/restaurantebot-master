@@ -10,7 +10,7 @@
 --
 -- Es idempotente: seguro de correr en una base nueva o ya existente (todo es
 -- CREATE/ALTER ... IF NOT EXISTS y los seeds están guardados). Crea exactamente
--- las mismas 17 tablas, columnas e índices que el código, y siembra los 12
+-- las mismas 21 tablas, columnas e índices que el código, y siembra los 12
 -- componentes del Plato del Día, los ajustes de precios/recargo/branding y los
 -- 5 grupos clásicos del Plato del Día (plato_dia_grupos).
 --
@@ -135,6 +135,16 @@ CREATE INDEX IF NOT EXISTS idx_pedidos_no_pagado ON pedidos (pagado) WHERE pagad
 -- pueden usar idx_pedidos_fecha (el cast tapa el b-tree del timestamp); este índice de
 -- expresión sí les sirve. Válido porque fecha es TIMESTAMP sin zona → el cast es inmutable.
 CREATE INDEX IF NOT EXISTS idx_pedidos_fecha_dia ON pedidos ((fecha::date));
+
+-- Contador diario del nº de pedido visible (1, 2, 3… se reinicia cada día). Una fila por
+-- fecha con el último num_dia entregado; el upsert ON CONFLICT toma el lock de la fila del
+-- día y serializa la numeración sin carreras (ver siguiente_num_dia() en db.py/cliente_app.py,
+-- que ya la crean de forma defensiva — aquí solo para que un restore/provision en frío la
+-- tenga desde el arranque).
+CREATE TABLE IF NOT EXISTS contador_dia (
+    fecha DATE    PRIMARY KEY,
+    n     INTEGER NOT NULL DEFAULT 0
+);
 
 -- Libro de abonos (método + hora real de pago).
 CREATE TABLE IF NOT EXISTS pagos (
@@ -345,6 +355,9 @@ END $$;
 -- H3: idempotencia anti-duplicado en la creación de pedidos.
 ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS idem_key VARCHAR(40);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_pedidos_idem ON pedidos (idem_key);
+-- num_dia: contador diario del pedido (1, 2, 3… se reinicia cada día), asignado de forma
+-- atómica vía contador_dia. NULL en pedidos previos a esta columna → se muestra el id global.
+ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS num_dia INTEGER;
 -- H6: invariantes de dinero (NOT VALID: no chocan con datos legados, sí con escrituras nuevas).
 DO $$
 BEGIN

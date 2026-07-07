@@ -10,9 +10,11 @@
 Cómo funciona:
   1. (Por defecto) aplica db/schema.sql para garantizar las tablas — así también restaura
      sobre una base VACÍA. Es idempotente; sáltalo con --no-schema.
-  2. Reproduce el respaldo: cada 'TRUNCATE' y 'COPY ... FROM stdin' se ejecuta en una sola
-     sesión con session_replication_role=replica (ignora FKs → sin problemas de orden), y
-     los 'SELECT setval(...)' dejan las secuencias donde iban.
+  2. Reproduce el respaldo: el 'TRUNCATE' (una sola sentencia para todas las tablas — así lo
+     exige Postgres cuando hay FKs entre ellas) y cada 'COPY ... FROM stdin' se ejecutan en
+     una sola sesión con session_replication_role=replica (ignora FKs → sin problemas de
+     orden), y los 'SELECT setval(...)' dejan las secuencias donde iban.
+  3. Al final corre ANALYZE para refrescar las estadísticas del planificador.
 
 ⚠️ DESTRUCTIVO: vacía y recarga cada tabla del respaldo. Exige --yes para correr de verdad
 (sin --yes solo hace el ensayo). Verifica DOS VECES la --database-url: nunca la de producción
@@ -38,6 +40,7 @@ except (AttributeError, ValueError):
 RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCHEMA_SQL = os.path.join(RAIZ, "db", "schema.sql")
 COPY_INI_RE = re.compile(r'^COPY\s+(?P<obj>.+?)\s+FROM stdin;\s*$', re.IGNORECASE)
+TRUNCATE_RE = re.compile(r'^TRUNCATE\s+(?P<objs>.+);\s*$', re.IGNORECASE)
 
 
 def _conectar(url: str):
@@ -51,8 +54,9 @@ def _abrir(path: str):
 
 
 def analizar(path: str) -> tuple:
-    """Recorre el respaldo sin tocar ninguna base. Devuelve (tablas, filas, sentencias)."""
-    tablas, filas, sentencias = [], 0, 0
+    """Recorre el respaldo sin tocar ninguna base.
+    Devuelve (tablas_copy, filas, sentencias, tablas_truncadas)."""
+    tablas, filas, sentencias, tablas_truncadas = [], 0, 0, 0
     with _abrir(path) as fh:
         en_copy = False
         for linea in fh:
@@ -66,9 +70,14 @@ def analizar(path: str) -> tuple:
             if m:
                 en_copy = True
                 tablas.append(m.group("obj").split("(")[0].strip())
+                continue
+            mt = TRUNCATE_RE.match(linea)
+            if mt:
+                tablas_truncadas += len(mt.group("objs").split(","))
+                sentencias += 1
             elif linea.strip() and not linea.startswith("--"):
                 sentencias += 1
-    return tablas, filas, sentencias
+    return tablas, filas, sentencias, tablas_truncadas
 
 
 def restaurar(path: str, url: str, aplicar_schema: bool) -> tuple:
@@ -77,6 +86,7 @@ def restaurar(path: str, url: str, aplicar_schema: bool) -> tuple:
     tablas_cargadas, filas = [], 0
     try:
         with conn.cursor() as cur:
+            cur.execute("SET client_encoding = 'UTF8'")
             if aplicar_schema:
                 if not os.path.exists(SCHEMA_SQL):
                     sys.exit(f"[FATAL] No se encontró {SCHEMA_SQL} (usa --no-schema si es a propósito)")
@@ -104,6 +114,12 @@ def restaurar(path: str, url: str, aplicar_schema: bool) -> tuple:
                     elif linea.strip() and not linea.startswith("--"):
                         cur.execute(linea)
         conn.commit()
+        # Fuera de la transacción de datos: refresca las estadísticas del planificador
+        # tras la recarga masiva (si no, los primeros queries post-restore pueden salir
+        # con planes basados en estadísticas viejas o inexistentes).
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute("ANALYZE")
     except Exception:
         conn.rollback()
         raise
@@ -128,10 +144,10 @@ def main() -> None:
     if not os.path.exists(args.file):
         sys.exit(f"[FATAL] No existe el archivo {args.file}")
 
-    tablas, filas, sentencias = analizar(args.file)
+    tablas, filas, sentencias, tablas_truncadas = analizar(args.file)
     print(f"Respaldo: {args.file}")
-    print(f"  {len(tablas)} bloque(s) COPY · {filas} fila(s) de datos · "
-          f"{sentencias} sentencia(s) SQL (TRUNCATE/setval)")
+    print(f"  {len(tablas)} bloque(s) COPY ({tablas_truncadas} tabla(s) truncadas) · "
+          f"{filas} fila(s) de datos · {sentencias} sentencia(s) SQL (TRUNCATE/setval)")
 
     if args.dry_run or not args.yes:
         if not args.dry_run:

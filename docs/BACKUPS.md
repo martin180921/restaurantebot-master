@@ -11,13 +11,19 @@ Postgres 18 de Railway desde cualquier PC con Windows.
 ## Respaldar (seguro, solo lectura)
 
 ```bash
-python scripts/backup_db.py --database-url "postgresql://...restaurante..." --out-dir backups
+python scripts/backup_db.py --database-url "postgresql://...restaurante..." \
+    --nombre "Doña Marta" --out-dir backups
 ```
 
-Crea `backups/backup_<bd>_<fecha_hora>.sql.gz` con los datos de todas las tablas, y **poda**
-los respaldos con más de 14 días (conservando siempre los 7 más nuevos). Ajustable con
-`--retention-days` y `--keep`. Es solo lectura sobre la base: seguro de correr en producción
-en cualquier momento.
+Crea `backups/backup_<nombre>_<bd>_<fecha_hora>.sql.gz` con los datos de todas las tablas, y
+**poda** los respaldos con más de 14 días (conservando siempre los 7 más nuevos **por
+restaurante**: la poda agrupa por `--nombre`). Ajustable con `--retention-days` y `--keep`. Es
+solo lectura sobre la base (transacción `REPEATABLE READ`: todas las tablas quedan
+congeladas en el mismo instante): seguro de correr en producción en cualquier momento.
+
+Usa siempre `--nombre` si vas a guardar backups de varios restaurantes en el mismo lugar:
+todos comparten el mismo nombre de base en Railway ("railway"), así que sin `--nombre` los
+archivos de 5 restaurantes serían indistinguibles.
 
 ## Restaurar (destructivo — reemplaza los datos)
 
@@ -45,8 +51,11 @@ Programador de tareas de Windows (una sola vez):
 1. Abre **Programador de tareas** → *Crear tarea básica*.
 2. Desencadenador: **Diariamente**, p. ej. 3:00 a.m. (fuera del horario de servicio).
 3. Acción: **Iniciar un programa**.
-   - Programa: `python`
-   - Argumentos: `C:\ruta\a\scripts\backup_db.py --database-url "postgresql://..." --out-dir C:\olo\backups`
+   - Programa: la **ruta completa** al ejecutable, no solo `python` — la tarea corre sin el
+     `PATH` de tu sesión de usuario y "python" a secas no se encuentra. Averíguala con
+     `where python` en una terminal normal (algo como
+     `C:\Users\<tú>\AppData\Local\Programs\Python\Python313\python.exe`).
+   - Argumentos: `C:\ruta\a\scripts\backup_db.py --database-url "postgresql://..." --nombre "Doña Marta" --out-dir C:\olo\backups`
 4. Marca *Ejecutar aunque el usuario no haya iniciado sesión* para que corra sin nadie logueado.
 
 > Verifica al día siguiente que apareció el primer `.sql.gz` en la carpeta.

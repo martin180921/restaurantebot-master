@@ -36,19 +36,23 @@ python scripts/monitor_salud.py --config scripts/restaurantes_monitor.json
 1. En Telegram habla con **@BotFather** → `/newbot` → te da un **token**.
 2. Escríbele algo a tu bot, luego abre
    `https://api.telegram.org/bot<TOKEN>/getUpdates` y copia tu **chat id**.
-3. Define las variables de entorno antes de correr el monitor:
-   ```bash
+3. Crea `scripts/monitor_salud.bat` (junto al script; no se sube a git) con esto — el
+   Programador de tareas de Windows no tiene forma directa de fijar variables de entorno solo
+   para una acción, así que un `.bat` envoltorio es la manera práctica de dejarlas puestas:
+   ```bat
+   @echo off
    set TELEGRAM_BOT_TOKEN=123456:ABC...
    set TELEGRAM_CHAT_ID=987654321
-   python scripts/monitor_salud.py --config scripts/restaurantes_monitor.json
+   "C:\ruta\completa\a\python.exe" "%~dp0monitor_salud.py" --config "%~dp0restaurantes_monitor.json"
    ```
-   Si hay algún problema, te llega el resumen por Telegram. Sin esas variables, solo imprime
-   en consola (útil para probar).
+   Pruébalo a mano primero (doble clic) sin problemas configurados: debe imprimir en consola
+   sin avisar por Telegram. Si hay algún problema, te llega el resumen por Telegram; sin esas
+   variables, solo imprime en consola.
 
 ## Dejarlo corriendo cada pocos minutos
 
 Programador de tareas de Windows → *Crear tarea básica* → desencadenador **Repetir cada 5
-minutos**, acción `python C:\ruta\scripts\monitor_salud.py --config C:\ruta\scripts\restaurantes_monitor.json`,
-con las dos variables `TELEGRAM_*` definidas en el entorno de la tarea. Complementa esto con un
-**UptimeRobot** gratuito sobre las URLs de los paneles para cubrir el caso de que el propio PC
-del monitor se apague.
+minutos** → acción **Iniciar un programa** apuntando directo al
+`scripts/monitor_salud.bat` de arriba (así las variables de Telegram viajan con él, sin
+depender del entorno de la tarea). Complementa esto con un **UptimeRobot** gratuito sobre las
+URLs de los paneles para cubrir el caso de que el propio PC del monitor se apague.

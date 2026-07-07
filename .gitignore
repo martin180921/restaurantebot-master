@@ -36,3 +36,4 @@ backups/
 
 # Config del monitor (URLs con credenciales de todos los restaurantes)
 scripts/restaurantes_monitor.json
+scripts/monitor_salud.bat

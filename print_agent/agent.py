@@ -220,7 +220,12 @@ def abrir_impresora(conn_cfg: dict):
             # Sin hardware: captura el ESC/POS en memoria en vez de mandarlo a un puerto.
             # Sirve para probar el ciclo REAL del agente (reclamar de print_jobs, renderizar,
             # marcar impreso) en un piloto que todavía no tiene impresora física conectada —
-            # a diferencia de --dry-run, esto sí toca la BD.
+            # a diferencia de --dry-run, esto sí toca la BD. Aviso fuerte: si a alguien se le
+            # olvida cambiar esto a 'windows' en un restaurante real, las comandas quedan
+            # marcadas 'impreso' sin haber salido nunca por la impresora.
+            print("[agent] ¡¡ADVERTENCIA!! PRINTER_CONNECTION.type='dummy' — "
+                  "NO se está imprimiendo nada de verdad (solo se simula en memoria).",
+                  file=sys.stderr)
             from escpos.printer import Dummy
             return Dummy()
     except ImportError as exc:
@@ -971,9 +976,14 @@ def recuperar_huerfanos(conn, restaurante_id: int, max_intentos: int = 5) -> Non
               f"{reintentos} reintento(s) de error")
 
 
-def heartbeat(conn, restaurante_id: int) -> None:
+def heartbeat(conn, restaurante_id: int, dummy: bool = False) -> None:
     """Upsert del latido en agentes_estado: visto_at=NOW() + profundidad de cola pendiente.
-    El panel lo lee para pintar el badge '🟢 en línea / 🔴 sin conexión · N en cola'."""
+    El panel lo lee para pintar el badge '🟢 en línea / 🔴 sin conexión · N en cola'.
+    'dummy=True' (PRINTER_CONNECTION.type == "dummy", sin hardware real) marca el hostname
+    para que quien mire el badge en el panel sepa que nada se está imprimiendo de verdad."""
+    hostname = socket.gethostname()[:120]
+    if dummy:
+        hostname = f"{hostname} (DUMMY)"[:120]
     with conn.cursor() as cur:
         cur.execute("SELECT COUNT(*) FROM print_jobs "
                     "WHERE restaurante_id = %s AND estado = 'pendiente'", (restaurante_id,))
@@ -984,7 +994,7 @@ def heartbeat(conn, restaurante_id: int) -> None:
             ON CONFLICT (restaurante_id) DO UPDATE
               SET visto_at = NOW(), cola_pendiente = EXCLUDED.cola_pendiente,
                   hostname = EXCLUDED.hostname
-        """, (restaurante_id, socket.gethostname()[:120], cola))
+        """, (restaurante_id, hostname, cola))
     conn.commit()
 
 
@@ -1037,6 +1047,7 @@ def main() -> None:
     restaurante_id = int(cfg["RESTAURANTE_ID"])
     poll = float(cfg.get("POLL_SECONDS", 2))
     printer_cfg = cfg["PRINTER_CONNECTION"]
+    es_dummy = printer_cfg.get("type", "usb").lower() == "dummy"
 
     signal.signal(signal.SIGINT, _parar)
     signal.signal(signal.SIGTERM, _parar)
@@ -1051,7 +1062,7 @@ def main() -> None:
             # Cada ciclo: limpia atascos / reintenta errores transitorios y emite el latido
             # (barato e indexado) ANTES de reclamar el siguiente trabajo.
             recuperar_huerfanos(conn, restaurante_id)
-            heartbeat(conn, restaurante_id)
+            heartbeat(conn, restaurante_id, dummy=es_dummy)
             trabajo = reclamar_trabajo(conn, restaurante_id)
         except Exception as exc:  # caída de BD → reintentar tras el sleep
             print(f"[agent] error de BD: {exc}")
