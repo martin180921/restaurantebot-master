@@ -14,6 +14,7 @@ su propio módulo dentro de views/ para poder trabajarlas de forma independiente
       Administración (🔐, solo admin, al fondo del menú lateral; ver _render_admin)
 """
 import html as _html
+import time as _time
 import streamlit as st
 import streamlit.components.v1
 from dotenv import load_dotenv
@@ -21,6 +22,7 @@ from dotenv import load_dotenv
 import auth
 import audit
 import empleados
+import login_guard
 import mesero_keys
 import remember
 from views import (pedidos, monitor_mesas, nuevo_pedido, menu, mesas, resumen,
@@ -157,6 +159,19 @@ def _logout() -> None:
     auth.logout()
 
 
+def _client_ip() -> str:
+    """IP del cliente para el freno de fuerza bruta del login (login_guard). Tras el proxy
+    de Railway la IP real viaja en X-Forwarded-For (primer salto). 'global' si no se puede
+    leer la cabecera (mejor un cubo común que ninguno)."""
+    try:
+        h = st.context.headers or {}
+        xff = h.get("x-forwarded-for") or h.get("X-Forwarded-For") or ""
+        ip = xff.split(",")[0].strip()
+        return ip[:64] or "global"
+    except Exception:
+        return "global"
+
+
 @st.fragment(run_every="60s")
 def _latido_sesion() -> None:
     """Latido de presencia: mientras esta pestaña siga abierta, refresca ultima_actividad
@@ -272,6 +287,14 @@ if not st.session_state["autenticado"]:
             label_visibility="collapsed", key="login_input"
         )
         if st.button("Entrar", key="btn_login"):
+            # Freno de fuerza bruta (login_guard): si esta IP acumuló demasiados fallos
+            # recientes, ni se evalúa la credencial hasta que pase la espera.
+            _ip = _client_ip()
+            _bloqueado, _espera = login_guard.evaluar(_ip)
+            if _bloqueado:
+                _min = (_espera + 59) // 60
+                st.error(f"🔒 Demasiados intentos fallidos. Espera ~{_min} min e inténtalo de nuevo.")
+                st.stop()
             # Orden de resolución: (1) empleado con PIN propio (perfil persistente), (2)
             # contraseña de rol de entorno (admin/caja maestro), (3) PIN de turno efímero
             # del mesero (legado). El primero que valide gana; cada login abre turno.
@@ -279,15 +302,18 @@ if not st.session_state["autenticado"]:
             rol = None if emp else auth.role_from_credentials(password_input)
             key_id = None if (emp or rol) else mesero_keys.validar_clave(password_input)
             if emp:
+                login_guard.limpiar(_ip)
                 auth.login_empleado(emp)
                 _abrir_turno(emp["nombre"], emp["rol"], emp["id"])
                 st.rerun()
             elif rol:
+                login_guard.limpiar(_ip)
                 auth.login(rol)
                 nombre, r = auth.actor()
                 _abrir_turno(nombre, r)
                 st.rerun()
             elif key_id:
+                login_guard.limpiar(_ip)
                 # Etiqueta del acceso efímero → identifica al mesero en la auditoría.
                 etiqueta = next((k.get("etiqueta") for k in mesero_keys.claves_activas()
                                  if int(k["id"]) == int(key_id)), None)
@@ -296,6 +322,10 @@ if not st.session_state["autenticado"]:
                 _abrir_turno(nombre, r)
                 st.rerun()
             else:
+                # Registra el fallo y frena: una pausa fija encarece cada tanteo aunque aún
+                # no se alcance el umbral de bloqueo.
+                login_guard.registrar_fallo(_ip)
+                _time.sleep(1.0)
                 st.error("Contraseña o PIN incorrecto")
     st.stop()
 

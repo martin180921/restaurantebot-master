@@ -255,8 +255,12 @@ CREATE TABLE IF NOT EXISTS empleados (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_empleados_pin ON empleados (pin_hash);
 CREATE INDEX IF NOT EXISTS idx_empleados_activo ON empleados (activo);
 ALTER TABLE empleados ADD COLUMN IF NOT EXISTS bloqueado BOOLEAN NOT NULL DEFAULT FALSE;
-ALTER TABLE empleados ADD COLUMN IF NOT EXISTS token VARCHAR(32);  -- persistencia móvil del mesero (?mt)
-CREATE INDEX IF NOT EXISTS idx_empleados_token ON empleados (token);
+ALTER TABLE empleados ADD COLUMN IF NOT EXISTS token VARCHAR(32);  -- LEGADO en claro, ya no se usa
+-- ?mt del mesero HASHEADO + con caducidad (una captura del móvil no deja un token en claro
+-- reutilizable). La URL lleva el token en claro; la BD solo su hash. Se rota al cerrar acceso.
+ALTER TABLE empleados ADD COLUMN IF NOT EXISTS token_hash VARCHAR(64);
+ALTER TABLE empleados ADD COLUMN IF NOT EXISTS token_expira TIMESTAMP;
+CREATE INDEX IF NOT EXISTS idx_empleados_token_hash ON empleados (token_hash);
 
 -- Marcaje entrada/salida (clock-in/out). Una sesión activa como mucho por empleado.
 CREATE TABLE IF NOT EXISTS sesiones_empleado (
@@ -285,6 +289,15 @@ CREATE TABLE IF NOT EXISTS sesiones_recordadas (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_sesiones_recordadas_token  ON sesiones_recordadas (token_hash);
 CREATE INDEX IF NOT EXISTS idx_sesiones_recordadas_expira ON sesiones_recordadas (expira);
+
+-- Freno de fuerza bruta del login (ver dashboard_admin/login_guard.py). Una fila por intento
+-- FALLIDO (ip + hora, nunca el PIN probado); ventana deslizante para bloquear el barrido.
+CREATE TABLE IF NOT EXISTS login_intentos (
+    id     SERIAL    PRIMARY KEY,
+    ip     VARCHAR(64),
+    creado TIMESTAMP NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_login_intentos_ip ON login_intentos (ip, creado);
 
 -- Libro mayor central de eventos críticos (append-only): quién, qué, cuándo, sobre qué.
 CREATE TABLE IF NOT EXISTS auditoria (

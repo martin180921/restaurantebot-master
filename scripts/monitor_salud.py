@@ -11,7 +11,8 @@ Qué revisa en cada base:
   1. Conectividad  — ¿responde la base?
   2. Agente de impresión — ¿latió hace poco? (agentes_estado.visto_at). Si lleva más de
      --umbral-min minutos sin latir, o nunca latió, es ALERTA: el local no está imprimiendo.
-  3. Comandas falladas — print_jobs en estado 'error' (ALERTA: algo no salió por impresora).
+  3. Comandas falladas — print_jobs en estado 'error' creadas en las últimas --errores-horas
+     (ALERTA: algo no salió por impresora; un error viejo ya atendido no alerta para siempre).
   4. Cola atascada — print_jobs 'pendiente' con más de --umbral-min minutos (AVISO: puede que
      el agente esté caído o la impresora sin papel).
 
@@ -47,7 +48,7 @@ def _host_de(url: str) -> str:
     return url.split("@")[-1].split("?")[0]
 
 
-def revisar(nombre: str, url: str, umbral_min: int) -> dict:
+def revisar(nombre: str, url: str, umbral_min: int, errores_horas: int = 24) -> dict:
     """Revisa UNA base. Devuelve {nombre, nivel, host, notas:[...]}."""
     if url.startswith("postgres://"):
         url = url.replace("postgres://", "postgresql://", 1)
@@ -86,12 +87,17 @@ def revisar(nombre: str, url: str, umbral_min: int) -> dict:
                     r["notas"].append(
                         f"agente sin latir hace {seg // 60} min (>{umbral_min})")
 
-            # 3) Comandas falladas.
-            cur.execute("SELECT COUNT(*) FROM print_jobs WHERE estado = 'error'")
+            # 3) Comandas falladas RECIENTES. Sin ventana temporal, un error viejo ya
+            # atendido seguiría disparando ALERTA en cada corrida (fatiga de alertas → se
+            # ignora la que importa). Solo cuentan las creadas en las últimas 'errores_horas'.
+            cur.execute(
+                "SELECT COUNT(*) FROM print_jobs WHERE estado = 'error' "
+                "AND creado_at > NOW() - make_interval(hours => %s)", (errores_horas,))
             errores = cur.fetchone()[0]
             if errores:
                 subir(ALERTA)
-                r["notas"].append(f"{errores} comanda(s) en estado 'error'")
+                r["notas"].append(
+                    f"{errores} comanda(s) en estado 'error' (últimas {errores_horas}h)")
 
             # 4) Cola pendiente atascada.
             cur.execute(
@@ -152,13 +158,15 @@ def main() -> None:
     ap.add_argument("--config", help="JSON con {\"restaurantes\":[{\"nombre\",\"database_url\"}]}")
     ap.add_argument("--umbral-min", type=int, default=10,
                     help="Minutos sin latido/cola para alertar (def: 10)")
+    ap.add_argument("--errores-horas", type=int, default=24,
+                    help="Solo alerta por comandas 'error' creadas en las últimas N horas (def: 24)")
     args = ap.parse_args()
 
     objetivos = cargar_objetivos(args)
     if not objetivos:
         sys.exit("[FATAL] Da --database-url o --config con al menos un restaurante")
 
-    resultados = [revisar(n, u, args.umbral_min) for n, u in objetivos]
+    resultados = [revisar(n, u, args.umbral_min, args.errores_horas) for n, u in objetivos]
 
     icono = {OK: "✅", AVISO: "🟡", ALERTA: "🔴"}
     lineas = []

@@ -452,11 +452,27 @@ def _ensure_schema():
         # lleva ?mt=token). Al reconectar (bloqueo de pantalla / refresco) se restaura su
         # sesión sin volver a pedir el PIN, mientras siga activo y no bloqueado. Se rota al
         # cerrar su acceso (⏹ Salida), así una URL vieja deja de servir. Solo para mesero.
+        # LEGADO (guardaba el token EN CLARO): ya no se lee ni se escribe; la columna
+        # sobrevive por compatibilidad pero la autoridad es token_hash (ver abajo).
         conn.execute(text(
             "ALTER TABLE empleados ADD COLUMN IF NOT EXISTS token VARCHAR(32)"
         ))
+        # token_hash + token_expira: el ?mt del mesero ahora se guarda HASHEADO (mismo patrón
+        # que pin_hash / sesiones_recordadas) y con caducidad, así una captura de pantalla del
+        # móvil no deja un token en claro reutilizable para siempre. La URL lleva el token en
+        # claro; la BD solo su hash. Migración: los perfiles con el token viejo (en claro) no
+        # tienen hash → su ?mt antiguo deja de validar y se pedirá el PIN una vez (aceptable).
         conn.execute(text(
-            "CREATE INDEX IF NOT EXISTS idx_empleados_token ON empleados (token)"
+            "ALTER TABLE empleados ADD COLUMN IF NOT EXISTS token_hash VARCHAR(64)"
+        ))
+        conn.execute(text(
+            "ALTER TABLE empleados ADD COLUMN IF NOT EXISTS token_expira TIMESTAMP"
+        ))
+        # Purga defensiva del token EN CLARO legado (ya no se usa): que no quede una
+        # credencial reutilizable durmiente en la columna vieja.
+        conn.execute(text("UPDATE empleados SET token = NULL WHERE token IS NOT NULL"))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_empleados_token_hash ON empleados (token_hash)"
         ))
 
         # sesiones_empleado: marcaje de entrada/salida (clock-in/out). login_at al entrar,
@@ -513,6 +529,20 @@ def _ensure_schema():
         ))
         conn.execute(text(
             "CREATE INDEX IF NOT EXISTS idx_sesiones_recordadas_expira ON sesiones_recordadas (expira)"
+        ))
+
+        # login_intentos: freno de fuerza bruta del login (ver login_guard.py). Una fila por
+        # intento FALLIDO (ip + hora, nunca el PIN probado). Se cuenta en ventana deslizante
+        # para bloquear una IP que barra PINs; se purga sola pasada 1 h.
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS login_intentos (
+                id     SERIAL    PRIMARY KEY,
+                ip     VARCHAR(64),
+                creado TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_login_intentos_ip ON login_intentos (ip, creado)"
         ))
 
         # auditoria: LIBRO MAYOR central de eventos críticos. Una fila por evento con

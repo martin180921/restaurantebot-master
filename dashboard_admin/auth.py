@@ -16,8 +16,9 @@ sesión sin contraseña. Esa vía quedó cerrada para siempre como credencial de
 Lo que SÍ sobrevive a un refresco, sin repetir aquel error, son dos mecanismos fuera de
 session_state, ambos con expiración y revocación (ninguno vive en la URL como credencial
 compartible):
-    - mesero:      token en empleados.token, expuesto en la URL como ?mt (de solo LECTURA
-                   de identidad de turno, revocable al instante desde caja).
+    - mesero:      token HASHEADO en empleados.token_hash (con caducidad), cuyo valor en
+                   claro viaja en la URL como ?mt (de solo LECTURA de identidad de turno,
+                   revocable al instante desde caja).
     - admin/caja:  cookie 'recuérdame' (ver remember.py) con un token aleatorio de vida
                    corta (remember.HORAS_DEFAULT) que panel.py valida al reconectar.
 Ambos los restaura panel.py al arrancar; auth.py solo conoce session_state.
@@ -30,6 +31,7 @@ tocan BD.
 """
 import streamlit as st
 import os
+import hmac
 
 # ── Roles ────────────────────────────────────────────────────────────────────────
 ADMIN, CAJA, MESERO = "admin", "caja", "mesero"
@@ -102,7 +104,9 @@ def role_from_credentials(password: str) -> str | None:
         return None
     for role in ROLES_PASSWORD:
         cfg = password_for(role)
-        if cfg and password == cfg:
+        # compare_digest: comparación en tiempo constante (no revela por el tiempo de
+        # respuesta cuántos caracteres del inicio acertó un atacante).
+        if cfg and hmac.compare_digest(str(password), str(cfg)):
             return role
     return None
 

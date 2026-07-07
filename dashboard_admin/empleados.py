@@ -11,6 +11,8 @@ Importa db (engine) y auth (solo para leer la contraseña de admin de entorno, s
 La auditoría de altas/bajas la dispara la vista; aquí solo la lógica de datos.
 """
 import hashlib
+import hmac
+import os
 import secrets
 
 from sqlalchemy import text
@@ -24,6 +26,18 @@ ROLES_VALIDOS = ("mesero", "caja", "admin")
 # cerró la pestaña sin pulsar "Salir"). El panel late cada ~60 s, así que 3 min tolera un
 # latido perdido. "Salir" cierra la sesión en el acto, sin esperar este umbral.
 SESION_TIMEOUT_MIN = 3
+
+
+def _mt_horas() -> int:
+    """Vida del token de persistencia del mesero (?mt). Cubre un turno largo; un cierre de
+    caja o un bloqueo ya lo revocan antes, esto es el backstop. Configurable por entorno."""
+    try:
+        return max(1, int(os.getenv("MT_TOKEN_HORAS", "18")))
+    except (TypeError, ValueError):
+        return 18
+
+
+MT_HORAS = _mt_horas()
 
 
 def _hash(pin: str) -> str:
@@ -68,12 +82,13 @@ def crear_empleado(nombre: str, rol: str, pin: str = "", creado_por: str = "") -
                     if pin:                       # PIN elegido por el usuario y ya en uso
                         return None, "Ese PIN ya está en uso. Elige otro."
                     continue                      # PIN aleatorio: reintenta con otro
+                # El token de persistencia (?mt) NO se crea aquí: se genera y hashea
+                # perezosamente en el primer login del mesero (obtener_token).
                 conn.execute(text(
-                    "INSERT INTO empleados (nombre, rol, pin_hash, creado_por, token) "
-                    "VALUES (:n, :r, :h, :cp, :tk)"
+                    "INSERT INTO empleados (nombre, rol, pin_hash, creado_por) "
+                    "VALUES (:n, :r, :h, :cp)"
                 ), {"n": nombre, "r": rol, "h": h,
-                    "cp": (creado_por or "").strip()[:120] or None,
-                    "tk": _token_aleatorio()})
+                    "cp": (creado_por or "").strip()[:120] or None})
                 return actual, None
     except Exception:
         return None, "No se pudo crear el empleado (error de base de datos)."
@@ -178,15 +193,15 @@ def validar_pin(pin: str):
 # ── Cierre de acceso de turno (bloquear / reactivar) ─────────────────────────────
 def bloquear_acceso(emp_id: int) -> bool:
     """Cierra el acceso de un empleado al terminar su turno: bloquea el PIN (no podrá
-    entrar), CIERRA su sesión abierta (el panel lo desloguea en su próximo run) y ROTA su
-    token de persistencia (una URL ?mt vieja en su móvil deja de servir → tendrá que volver
-    a teclear el PIN). Atómico. Reversible con reactivar_acceso. True si cambió algo."""
+    entrar), CIERRA su sesión abierta (el panel lo desloguea en su próximo run) y REVOCA su
+    token de persistencia (borra el hash → una URL ?mt vieja en su móvil deja de servir al
+    instante). Atómico. Reversible con reactivar_acceso. True si cambió algo."""
     try:
         with engine.begin() as conn:
             res = conn.execute(text(
-                "UPDATE empleados SET bloqueado = TRUE, token = :tk "
+                "UPDATE empleados SET bloqueado = TRUE, token_hash = NULL, token_expira = NULL "
                 "WHERE id = :id AND activo = TRUE"
-            ), {"tk": _token_aleatorio(), "id": int(emp_id)})
+            ), {"id": int(emp_id)})
             conn.execute(text(
                 "UPDATE sesiones_empleado SET activa = FALSE, logout_at = NOW() "
                 "WHERE empleado_id = :id AND activa = TRUE"
@@ -198,27 +213,28 @@ def bloquear_acceso(emp_id: int) -> bool:
 
 # ── Persistencia de sesión del mesero (móvil: ?mt=token) ─────────────────────────
 def obtener_token(emp_id: int):
-    """Token de persistencia del empleado; lo genera y guarda si aún no tiene (perfiles
-    creados antes de existir la columna). None ante fallo."""
+    """Genera un token de persistencia NUEVO para el empleado, guarda solo su HASH con
+    caducidad (MT_HORAS) y devuelve el token EN CLARO (lo único que va a la URL ?mt). Se
+    llama en el login fresco del mesero; cada login rota el token. None ante fallo."""
     try:
+        tok = _token_aleatorio()
         with engine.begin() as conn:
-            row = conn.execute(text("SELECT token FROM empleados WHERE id = :id"),
-                               {"id": int(emp_id)}).first()
-            if not row:
+            res = conn.execute(text(
+                "UPDATE empleados SET token_hash = :h, "
+                "token_expira = NOW() + make_interval(hours => :hrs) "
+                "WHERE id = :id AND activo = TRUE"
+            ), {"h": _hash(tok), "hrs": MT_HORAS, "id": int(emp_id)})
+            if not (res.rowcount or 0):
                 return None
-            tok = row[0]
-            if not tok:
-                tok = _token_aleatorio()
-                conn.execute(text("UPDATE empleados SET token = :t WHERE id = :id"),
-                             {"t": tok, "id": int(emp_id)})
-            return tok
+        return tok
     except Exception:
         return None
 
 
 def emple_por_token(token: str):
-    """{id, nombre, rol, activo, bloqueado} del empleado cuyo token coincide, o None.
-    Lo usa el panel para restaurar la sesión del mesero sin pedir el PIN."""
+    """{id, nombre, rol, activo, bloqueado} del empleado cuyo token de persistencia coincide
+    (por HASH) y sigue VIGENTE (no caducado), o None. Lo usa el panel para restaurar la
+    sesión del mesero sin pedir el PIN."""
     token = (token or "").strip()
     if not token:
         return None
@@ -226,8 +242,8 @@ def emple_por_token(token: str):
         with engine.connect() as conn:
             row = conn.execute(text(
                 "SELECT id, nombre, rol, activo, bloqueado FROM empleados "
-                "WHERE token = :t LIMIT 1"
-            ), {"t": token}).mappings().first()
+                "WHERE token_hash = :h AND token_expira > NOW() LIMIT 1"
+            ), {"h": _hash(token)}).mappings().first()
         return dict(row) if row else None
     except Exception:
         return None
@@ -262,12 +278,13 @@ def reactivar_acceso(emp_id: int) -> bool:
 
 def bloquear_meseros() -> int:
     """Bloquea el acceso de TODOS los empleados con rol 'mesero' (fin de jornada / cierre
-    de caja): ningún mesero podrá entrar hasta que se reactive. No toca admin/caja.
-    Devuelve cuántos se bloquearon."""
+    de caja): ningún mesero podrá entrar hasta que se reactive. REVOCA además su token de
+    persistencia (borra el hash), así una URL ?mt vieja no reingresa tras el cierre — misma
+    higiene que bloquear_acceso, pero en bloque. No toca admin/caja. Devuelve cuántos cambió."""
     try:
         with engine.begin() as conn:
             res = conn.execute(text(
-                "UPDATE empleados SET bloqueado = TRUE "
+                "UPDATE empleados SET bloqueado = TRUE, token_hash = NULL, token_expira = NULL "
                 "WHERE rol = 'mesero' AND activo = TRUE AND bloqueado = FALSE"
             ))
         return res.rowcount or 0
@@ -302,8 +319,9 @@ def admin_pin_valido(pin: str):
     if not pin:
         return None
     # (2) Llave maestra de entorno → autorizador genérico 'Admin (maestro)'.
+    # compare_digest: comparación en tiempo constante (no filtra el prefijo acertado).
     maestro = auth.password_for(auth.ADMIN)
-    if maestro and pin == maestro:
+    if maestro and hmac.compare_digest(str(pin), str(maestro)):
         return "Admin (maestro)"
     # (1) Empleado admin activo.
     try:
