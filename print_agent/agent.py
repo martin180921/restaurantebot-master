@@ -216,6 +216,13 @@ def abrir_impresora(conn_cfg: dict):
         if tipo == "usb":
             from escpos.printer import Usb
             return Usb(int(conn_cfg["vendor_id"], 16), int(conn_cfg["product_id"], 16))
+        if tipo == "dummy":
+            # Sin hardware: captura el ESC/POS en memoria en vez de mandarlo a un puerto.
+            # Sirve para probar el ciclo REAL del agente (reclamar de print_jobs, renderizar,
+            # marcar impreso) en un piloto que todavía no tiene impresora física conectada —
+            # a diferencia de --dry-run, esto sí toca la BD.
+            from escpos.printer import Dummy
+            return Dummy()
     except ImportError as exc:
         sys.exit(f"[FATAL] Falta una dependencia para type='{tipo}' ({exc}). "
                  "Corre: pip install -r requirements.txt")
