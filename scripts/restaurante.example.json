@@ -1,0 +1,53 @@
+{
+  "_ayuda": "Plantilla de aprovisionamiento de un restaurante nuevo. Copia este archivo (p. ej. mi_restaurante.json), edítalo y corre: python scripts/provision_restaurante.py --config mi_restaurante.json --database-url postgresql://... Las claves que empiezan por '_' son comentarios y se ignoran.",
+
+  "restaurante": {
+    "nombre": "Restaurante Doña Marta",
+    "direccion": "Cra 10 # 20-30, Barrio Centro",
+    "telefono": "301 234 5678"
+  },
+
+  "_bot_saludo": "Plantilla del mensaje de bienvenida del bot de WhatsApp. {nombre} = nombre del restaurante, {link} = enlace a la carta. Déjalo en null para usar el texto por defecto.",
+  "bot_saludo": null,
+
+  "moneda_simbolo": "$",
+
+  "precios": {
+    "plato_dia": 18000,
+    "especiales": 25000,
+    "fee_entrega": 4000
+  },
+
+  "_metodos_pago": "efectivo: true/false. transferencia: mapa clave->etiqueta de las billeteras/canales aceptados ({} si no recibe transferencias).",
+  "metodos_pago": {
+    "efectivo": true,
+    "transferencia": { "nequi": "Nequi", "daviplata": "Daviplata", "breb": "Bre-B" }
+  },
+
+  "_grupos": "Pasos del configurador del Plato del Día. min 0 = opcional; max > 1 = multi-selección; repetir = puede llevar 2x la misma opción. La clave (a-z, 0-9, _, máx 20) ancla las opciones de 'componentes'.",
+  "grupos": [
+    { "clave": "entrada",        "etiqueta": "Entrada",           "min": 1, "max": 1, "repetir": false },
+    { "clave": "principio",      "etiqueta": "Principio",         "min": 1, "max": 1, "repetir": false },
+    { "clave": "proteina",       "etiqueta": "Carnes o Proteína", "min": 1, "max": 1, "repetir": false },
+    { "clave": "acompanamiento", "etiqueta": "Acompañamientos",   "min": 3, "max": 3, "repetir": true },
+    { "clave": "bebida",         "etiqueta": "Bebida",            "min": 0, "max": 1, "repetir": false }
+  ],
+
+  "_componentes": "Opciones iniciales por grupo (clave del grupo -> lista de nombres). Vacío {} = cargarlas después desde el panel.",
+  "componentes": {
+    "entrada":        ["Fruta", "Huevo", "Sopa del día"],
+    "principio":      ["Frijol", "Lenteja"],
+    "proteina":       ["Res", "Cerdo", "Pechuga"],
+    "acompanamiento": ["Arroz", "Maduro", "Papa", "Ensalada"],
+    "bebida":         ["Limonada", "Jugo del día"]
+  },
+
+  "_mesas": "Número de mesas a crear (se nombran Mesa 1..N) o lista de nombres [\"Mesa 1\", \"Barra\"].",
+  "mesas": 8,
+
+  "_deploy": "Datos para el bloque de variables de entorno que imprime el script (no se escriben en la BD).",
+  "deploy": {
+    "restaurante_id": 1,
+    "app_cliente_url": "https://TU-APP-CLIENTE.up.railway.app"
+  }
+}
