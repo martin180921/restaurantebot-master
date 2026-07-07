@@ -32,6 +32,15 @@ try:
 except ImportError:
     sys.exit("[FATAL] Falta psycopg2. Instala: pip install psycopg2-binary")
 
+# La consola de Windows (cmd/PowerShell) suele usar cp1252, que no sabe encodear los
+# ✔/↷ que este script imprime. Sin esto, el print truena a mitad de la transacción con
+# la BD ya aprovisionada pero SIN ROLLBACK visible en pantalla (el commit del 'with conn'
+# nunca llega a correr) — forzamos UTF-8 en stdout para que corra igual en cualquier shell.
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except (AttributeError, ValueError):
+    pass
+
 RAIZ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCHEMA_SQL = os.path.join(RAIZ, "db", "schema.sql")
 
@@ -125,11 +134,20 @@ def escribir_grupos(cur, cfg: dict) -> list:
 
 
 def sembrar_componentes(cur, cfg: dict, claves: list) -> None:
+    """Siembra los componentes propios del JSON. Se guía por el marcador 'seed_componentes'
+    (no por 'la tabla está vacía'): schema.sql ya inserta los 12 componentes clásicos como
+    parte de aplicar_schema() cuando la tabla está vacía, así que en un restaurante NUEVO
+    la tabla nunca llega vacía a este punto — mirar el conteo pisaría siempre el seed
+    genérico y el JSON quedaría ignorado. El marcador solo se escribe UNA vez (aquí abajo),
+    así que en re-corridas posteriores no se resucita nada que el restaurante haya borrado."""
     comps = cfg.get("componentes") or {}
-    cur.execute("SELECT COUNT(*) FROM menu_componentes")
-    if cur.fetchone()[0] > 0:
-        print("  ↷ menu_componentes ya tiene datos: no se siembra (no se resucita nada)")
+    cur.execute("SELECT 1 FROM ajustes WHERE clave = 'seed_componentes'")
+    if cur.fetchone() is not None:
+        print("  ↷ menu_componentes ya fue sembrado antes: no se toca (no se resucita nada)")
     else:
+        # Primera vez real: descarta el seed clásico de schema.sql y siembra lo del JSON
+        # (o deja vacío si el JSON no trae nada — el restaurante lo carga desde el panel).
+        cur.execute("DELETE FROM menu_componentes")
         n = 0
         for clave, nombres in comps.items():
             clave = str(clave).strip().lower()[:20]
@@ -144,7 +162,9 @@ def sembrar_componentes(cur, cfg: dict, claves: list) -> None:
                         "VALUES (%s, %s, %s)", (clave, nombre, orden))
                     n += 1
         if n:
-            print(f"  ✔ {n} componente(s) del Plato del Día sembrados")
+            print(f"  ✔ {n} componente(s) del Plato del Día sembrados (desde el JSON)")
+        else:
+            print("  ↷ el JSON no trae componentes propios: quedan vacíos (cárgalos desde el panel)")
     # Con o sin componentes propios: el bot no debe insertar los de ejemplo.
     marcar_seed(cur, "seed_componentes")
     marcar_seed(cur, "seed_menu")   # tampoco los 3 platos de ejemplo
