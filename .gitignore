@@ -29,3 +29,7 @@ Thumbs.db
 
 # Railway / deployment
 *.log
+
+# Respaldos de BD (nunca subir datos de clientes)
+backups/
+*.sql.gz
