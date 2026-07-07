@@ -373,45 +373,52 @@ def _cb_edit_add_cat(pid, tipo, prod):
         _edit_agregar_catalogo(items, tipo, prod)
 
 
-def _cb_edit_acomp(pid, aid, delta, n):
-    counts = st.session_state.setdefault(f"_edit_acomp_{pid}", {})
-    if delta > 0 and sum(counts.values()) >= n:
+def _cb_edit_multi(pid, clave, aid, delta, n_max, rep):
+    """Stepper de un grupo de selección múltiple (dinámico) dentro del diálogo."""
+    counts = st.session_state.setdefault(f"_edit_multi_{pid}_{clave}", {})
+    c = counts.get(aid, 0)
+    if delta > 0 and (sum(counts.values()) >= n_max or (not rep and c >= 1)):
         return
-    c = counts.get(aid, 0) + delta
+    c += delta
     if c <= 0:
         counts.pop(aid, None)
     else:
         counts[aid] = c
 
 
-def _cb_edit_add_pd(pid, precio_pd, acomp_names, n):
-    """Arma un Plato del Día desde los selectores + contadores y lo agrega a la copia de
-    trabajo, luego reinicia el sub-formulario para el siguiente plato."""
+def _cb_edit_add_pd(pid, precio_pd, grupos, nombres_multi):
+    """Arma un Plato del Día desde los selectores + contadores (grupos DINÁMICOS) y lo
+    agrega a la copia de trabajo en el formato nuevo config={'sel': [...]}; luego
+    reinicia el sub-formulario para el siguiente plato. 'nombres_multi' =
+    {clave_grupo: {aid: nombre}} de los grupos con contadores."""
     items = st.session_state.get(f"_edit_items_{pid}")
     if items is None:
         return
-    counts = st.session_state.get(f"_edit_acomp_{pid}", {})
-    if sum(counts.values()) != n:
-        return
-
-    def _val(g):
-        v = st.session_state.get(f"_edit_pd_{g}_{pid}")
-        return None if (v in (None, "Ninguno", "")) else v
-
-    acomp_list = []
-    for aid, c in counts.items():
-        nombre = acomp_names.get(aid)
-        if nombre:
-            acomp_list += [nombre] * int(c)
-    cfg = {"entrada": _val("entrada"), "principio": _val("principio"),
-           "proteina": _val("proteina"), "acompanamientos": acomp_list}
-    beb = _val("bebida")
-    if beb:
-        cfg["bebida"] = beb
+    sel_cfg = []
+    for g in grupos:
+        clave = g["clave"]
+        if g["max_sel"] == 1:
+            v = st.session_state.get(f"_edit_pd_{clave}_{pid}")
+            if v not in (None, "Ninguno", ""):
+                sel_cfg.append({"k": clave, "l": g["etiqueta"], "v": [str(v)]})
+        else:
+            counts = st.session_state.get(f"_edit_multi_{pid}_{clave}", {})
+            if not (g["min_sel"] <= sum(counts.values()) <= g["max_sel"]):
+                return  # fuera de rango → no agrega (el botón ya viene deshabilitado)
+            nombres = nombres_multi.get(clave, {})
+            lista = []
+            for aid, c in counts.items():
+                nom = nombres.get(aid)
+                if nom:
+                    lista += [nom] * int(c)
+            if lista:
+                sel_cfg.append({"k": clave, "l": g["etiqueta"], "v": lista})
     nota = (st.session_state.get(f"_edit_pd_nota_{pid}") or "").strip()
     items.append({"tipo": "plato_dia", "nombre": "Plato del Día", "precio": int(precio_pd),
-                  "cantidad": 1, "config": cfg, "nota": nota})
-    st.session_state[f"_edit_acomp_{pid}"] = {}
+                  "cantidad": 1, "config": {"sel": sel_cfg}, "nota": nota})
+    for g in grupos:
+        if g["max_sel"] > 1:
+            st.session_state[f"_edit_multi_{pid}_{g['clave']}"] = {}
     st.session_state[f"_edit_pd_nota_{pid}"] = ""
 
 
@@ -461,14 +468,15 @@ def _dialog_editar(pid, uid):
         st.session_state[items_key] = [dict(it) for it in pedidos.parse_items(row.get("items"))]
         st.session_state[f"_edit_ng_{pid}"] = _txt(row.get("nota_general"))
         st.session_state[f"_edit_pc_{pid}"] = pedidos._a_entero(row.get("paga_con"))
-        st.session_state[f"_edit_acomp_{pid}"] = {}
+        for k in [k for k in st.session_state if str(k).startswith(f"_edit_multi_{pid}_")]:
+            del st.session_state[k]
         st.session_state[f"_edit_load_{pid}"] = True
     items = st.session_state[items_key]
 
     df_cat    = npos.cargar_catalogo()
     comp      = npos.componentes_activos_por_grupo()
     precio_pd = npos.precio_plato_dia()
-    n_ac      = npos.num_acompanamientos()
+    grupos_pd = npos.cargar_grupos_pd()
 
     st.markdown(f"**Pedido #{num_dia}** · {pedidos.formatear_fecha(row.get('fecha'))}")
 
@@ -542,56 +550,69 @@ def _dialog_editar(pid, uid):
                               use_container_width=True, on_click=_cb_edit_add_cat,
                               args=(pid, tipo_item, p))
 
-    # Configurador para AGREGAR un Plato del Día (selectores simples + contadores). No usa
-    # los selectores de botón del POS porque esos llaman st.rerun(scope="fragment"), inválido
-    # dentro de un diálogo. El "mitad y mitad" no está aquí: para combinar, agrega dos platos.
-    pd_faltan = [g for g in ("entrada", "principio", "proteina", "acompanamiento")
-                 if not comp.get(g)]
-    if not pd_faltan:
+    # Configurador para AGREGAR un Plato del Día (selectores simples + contadores) con
+    # GRUPOS DINÁMICOS. No usa los selectores de botón del POS porque esos llaman
+    # st.rerun(scope="fragment"), inválido dentro de un diálogo. El "mitad y mitad" no
+    # está aquí: para combinar, agrega dos platos.
+    pd_faltan = [g["etiqueta"] for g in grupos_pd
+                 if g["min_sel"] >= 1 and not comp.get(g["clave"])]
+    if grupos_pd and not pd_faltan:
         with st.expander("🍛 Agregar Plato del Día"):
-            ent_opts = ["Ninguno"] + [a["nombre"] for a in comp["entrada"]]
-            pri_opts = [a["nombre"] for a in comp["principio"]]
-            pro_opts = [a["nombre"] for a in comp["proteina"]]
-            st.selectbox("Entrada", ent_opts, key=f"_edit_pd_entrada_{pid}")
-            st.selectbox("Principio", pri_opts, key=f"_edit_pd_principio_{pid}")
-            st.selectbox("Carnes o Proteína", pro_opts, key=f"_edit_pd_proteina_{pid}")
-            if comp.get("bebida"):
-                beb_opts = ["Ninguno"] + [a["nombre"] for a in comp["bebida"]]
-                st.selectbox("Bebida", beb_opts, key=f"_edit_pd_bebida_{pid}")
-
-            counts = st.session_state.setdefault(f"_edit_acomp_{pid}", {})
-            elegidos = sum(counts.values())
-            acomp_names = {str(a["id"]): a["nombre"] for a in comp["acompanamiento"]}
-            st.markdown(npos._grupo_label(f"Acompañamientos ({elegidos}/{n_ac})"),
-                        unsafe_allow_html=True)
-            for a in comp["acompanamiento"]:
-                aid = str(a["id"])
-                stock_a = a.get("stock")
-                agot = npos.agotado_por_stock(stock_a)
-                c = int(counts.get(aid, 0))
-                ac1, ac2, ac3, ac4 = st.columns([3, 1, 1, 1])
-                with ac1:
-                    color = "#a3a39b" if agot else "#26262b"
-                    st.markdown(f'<div style="padding:4px 0; font-size:0.86rem; color:{color};">'
-                                f'{html.escape(str(a["nombre"]))}{npos._stock_suffix(stock_a)}</div>',
-                                unsafe_allow_html=True)
-                with ac2:
-                    st.button("−", key=f"_edit_acm_{pid}_{aid}", use_container_width=True,
-                              on_click=_cb_edit_acomp, args=(pid, aid, -1, n_ac))
-                with ac3:
-                    st.markdown(f'<div style="text-align:center; padding:4px 0; font-weight:600;">{c}</div>',
-                                unsafe_allow_html=True)
-                with ac4:
-                    tope = (stock_a is not None and c >= int(stock_a))
-                    st.button("+", key=f"_edit_acp_{pid}_{aid}", use_container_width=True,
-                              disabled=(elegidos >= n_ac or agot or tope),
-                              on_click=_cb_edit_acomp, args=(pid, aid, +1, n_ac))
+            nombres_multi = {}
+            multi_ok = True
+            for g in grupos_pd:
+                clave = g["clave"]
+                opciones = comp.get(clave) or []
+                if not opciones:
+                    continue
+                if g["max_sel"] == 1:
+                    # 'Ninguno' siempre disponible (el mesero nunca queda forzado);
+                    # los grupos obligatorios arrancan en su primera opción real.
+                    opts = ["Ninguno"] + [a["nombre"] for a in opciones]
+                    st.selectbox(g["etiqueta"], opts,
+                                 index=(0 if g["min_sel"] == 0 else 1 if len(opts) > 1 else 0),
+                                 key=f"_edit_pd_{clave}_{pid}")
+                    continue
+                counts = st.session_state.setdefault(f"_edit_multi_{pid}_{clave}", {})
+                elegidos = sum(counts.values())
+                nombres_multi[clave] = {str(a["id"]): a["nombre"] for a in opciones}
+                rango = (f"{elegidos}/{g['max_sel']}" if g["min_sel"] == g["max_sel"]
+                         else f"{elegidos} de {g['min_sel']}-{g['max_sel']}")
+                st.markdown(npos._grupo_label(f"{g['etiqueta']} ({rango})"),
+                            unsafe_allow_html=True)
+                for a in opciones:
+                    aid = str(a["id"])
+                    stock_a = a.get("stock")
+                    agot = npos.agotado_por_stock(stock_a)
+                    c = int(counts.get(aid, 0))
+                    ac1, ac2, ac3, ac4 = st.columns([3, 1, 1, 1])
+                    with ac1:
+                        color = "#a3a39b" if agot else "#26262b"
+                        st.markdown(f'<div style="padding:4px 0; font-size:0.86rem; color:{color};">'
+                                    f'{html.escape(str(a["nombre"]))}{npos._stock_suffix(stock_a)}</div>',
+                                    unsafe_allow_html=True)
+                    with ac2:
+                        st.button("−", key=f"_edit_mm_{pid}_{clave}_{aid}", use_container_width=True,
+                                  on_click=_cb_edit_multi,
+                                  args=(pid, clave, aid, -1, g["max_sel"], g["permite_repetir"]))
+                    with ac3:
+                        st.markdown(f'<div style="text-align:center; padding:4px 0; font-weight:600;">{c}</div>',
+                                    unsafe_allow_html=True)
+                    with ac4:
+                        tope = (stock_a is not None and c >= int(stock_a))
+                        tope_rep = (not g["permite_repetir"] and c >= 1)
+                        st.button("+", key=f"_edit_mp_{pid}_{clave}_{aid}", use_container_width=True,
+                                  disabled=(elegidos >= g["max_sel"] or agot or tope or tope_rep),
+                                  on_click=_cb_edit_multi,
+                                  args=(pid, clave, aid, +1, g["max_sel"], g["permite_repetir"]))
+                if not (g["min_sel"] <= elegidos <= g["max_sel"]):
+                    multi_ok = False
             st.text_input("Nota del plato", key=f"_edit_pd_nota_{pid}",
                           label_visibility="collapsed",
                           placeholder="Nota para este plato (opcional)")
             st.button("➕ Agregar este plato del día", key=f"_edit_pd_add_{pid}",
-                      use_container_width=True, disabled=(elegidos != n_ac),
-                      on_click=_cb_edit_add_pd, args=(pid, precio_pd, acomp_names, n_ac))
+                      use_container_width=True, disabled=(not multi_ok),
+                      on_click=_cb_edit_add_pd, args=(pid, precio_pd, grupos_pd, nombres_multi))
 
     # ── Totales, nota y pago ────────────────────────────────────────────────────
     st.markdown("---")

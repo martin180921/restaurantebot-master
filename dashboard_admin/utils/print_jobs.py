@@ -8,8 +8,34 @@ import json
 
 from sqlalchemy import text
 
-from db import engine, RESTAURANTE_ID
+from db import (engine, RESTAURANTE_ID, restaurante_nombre, restaurante_direccion,
+                restaurante_telefono, metodos_pago)
 from utils.items import items_para_ticket, parse_items
+
+
+def _branding_payload() -> dict:
+    """Encabezado del restaurante (nombre/dirección/teléfono desde 'ajustes') para los
+    tickets. ADITIVO: un agente desactualizado ignora estas claves sin romperse.
+    Best-effort: si la lectura falla, el ticket sale sin encabezado (como antes)."""
+    try:
+        return {
+            "restaurante_nombre": restaurante_nombre(),
+            "restaurante_direccion": restaurante_direccion() or None,
+            "restaurante_telefono": restaurante_telefono() or None,
+        }
+    except Exception:
+        return {}
+
+
+def _submetodo_label(sub):
+    """Etiqueta imprimible de un submétodo de transferencia según la config del
+    restaurante (None si no hay o falla → el agente usa su fallback clásico)."""
+    if not sub:
+        return None
+    try:
+        return metodos_pago().get("transferencia", {}).get(str(sub)) or None
+    except Exception:
+        return None
 
 
 def enqueue_job(restaurante_id: int, tipo: str, payload: dict) -> int:
@@ -164,18 +190,21 @@ def enqueue_recibo(ids, titulo: str, total: int, abono: int, metodo: str,
             "saldo": saldo,
             "metodo": metodo,
             "submetodo": submetodo or None,
+            "submetodo_label": _submetodo_label(submetodo),
             "comprobante": comprobante or None,
             "recibido": int(recibido) if recibido is not None else None,
             "cambio": max(0, int(recibido) - int(abono)) if recibido is not None else 0,
             "abrir_cajon": tiene_efectivo,
             "pedido_ids": [int(i) for i in ids],
         }
+        payload.update(_branding_payload())
         if desg:
             tramos = []
             for d in desg:
                 tramo = {"metodo": str(d.get("metodo")),
                          "monto": int(d.get("monto") or 0),
                          "submetodo": d.get("submetodo") or None,
+                         "submetodo_label": _submetodo_label(d.get("submetodo")),
                          "comprobante": d.get("comprobante") or None}
                 # Tender del tramo en efectivo → Recibido/Cambio en el ticket.
                 if d.get("recibido") is not None:
@@ -382,6 +411,7 @@ def enqueue_prerecibo(pedido_id: int) -> None:
             "pagado": int(row["total_pagado"] or 0),
             "abrir_cajon": False,
         }
+        payload.update(_branding_payload())
         enqueue_job(RESTAURANTE_ID, "prerecibo", payload)
     except Exception as exc:
         # H5: prerecibo (pre-cuenta) que no llegó a la cola → queda auditado, no silenciado.

@@ -135,6 +135,20 @@ def _ensure_schema():
                 ('fee_entrega','4000'),('acompanamientos_n','3')
                 ON CONFLICT (clave) DO NOTHING
             """))
+            # Grupos dinámicos del Plato del Día. El bot los siembra (seed_pd_grupos);
+            # aquí solo garantizamos la tabla. Vacía → fallback a los grupos clásicos.
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS plato_dia_grupos (
+                    id              SERIAL  PRIMARY KEY,
+                    clave           TEXT    UNIQUE NOT NULL,
+                    etiqueta        TEXT    NOT NULL,
+                    orden           INTEGER NOT NULL DEFAULT 0,
+                    activo          BOOLEAN NOT NULL DEFAULT TRUE,
+                    min_sel         INTEGER NOT NULL DEFAULT 1,
+                    max_sel         INTEGER NOT NULL DEFAULT 1,
+                    permite_repetir BOOLEAN NOT NULL DEFAULT FALSE
+                )
+            """))
             conn.execute(text("""
                 CREATE TABLE IF NOT EXISTS clientes (
                     telefono    VARCHAR(40) PRIMARY KEY,
@@ -233,18 +247,64 @@ def _stock_val(v):
     return None if v is None else int(v)
 
 
+# Grupos clásicos: fallback cuando plato_dia_grupos aún no está sembrada.
+_GRUPOS_CLASICOS = [
+    ("entrada", "Entrada", 1, 1, False), ("principio", "Principio", 1, 1, False),
+    ("proteina", "Carnes o Proteína", 1, 1, False),
+    ("acompanamiento", "Acompañamientos", None, None, True),  # None → acompanamientos_n
+    ("bebida", "Bebida", 0, 1, False),
+]
+
+
+@st.cache_data(ttl=30)
+def cargar_grupos_pd() -> list:
+    """Grupos ACTIVOS del Plato del Día (pasos del configurador), saneados. Tabla
+    vacía o inaccesible → los 5 clásicos con el 'acompanamientos_n' del ajuste."""
+    filas = []
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(text(
+                "SELECT clave, etiqueta, orden, min_sel, max_sel, permite_repetir "
+                "FROM plato_dia_grupos WHERE activo = TRUE ORDER BY orden, id"
+            )).mappings().all()
+        filas = [dict(r) for r in rows]
+    except Exception:
+        filas = []
+    if not filas:
+        n = max(1, _int(cargar_ajustes(), "acompanamientos_n", 3))
+        filas = [{"clave": c, "etiqueta": e,
+                  "min_sel": (n if mn is None else mn), "max_sel": (n if mx is None else mx),
+                  "permite_repetir": rep}
+                 for c, e, mn, mx, rep in _GRUPOS_CLASICOS]
+    for g in filas:
+        g["min_sel"] = max(0, int(g.get("min_sel") or 0))
+        g["max_sel"] = max(1, int(g.get("max_sel") or 1), g["min_sel"])
+        g["permite_repetir"] = bool(g.get("permite_repetir"))
+    return filas
+
+
+def _etiquetas_grupos() -> dict:
+    """{clave: etiqueta} para rotular desgloses; completa con los clásicos."""
+    d = {c: e for c, e, *_ in _GRUPOS_CLASICOS}
+    for g in cargar_grupos_pd():
+        d[g["clave"]] = g["etiqueta"]
+    return d
+
+
 @st.cache_data(ttl=30)
 def cargar_componentes_activos() -> dict:
     """{grupo: [{id, nombre, stock}]} de componentes ofrecibles hoy (activo + no agotado).
     Los componentes NO se ocultan por stock 0 (el Plato del Día no se esconde nunca); el
-    configurador marca los agotados. 'stock' = porciones restantes o None (ilimitado)."""
+    configurador marca los agotados. 'stock' = porciones restantes o None (ilimitado).
+    Las claves salen de los grupos dinámicos; componentes de grupos desconocidos entran
+    igual vía setdefault."""
     with engine.connect() as conn:
         rows = conn.execute(text(
             "SELECT id, grupo, nombre, stock FROM menu_componentes "
             "WHERE activo = TRUE AND (agotado_hasta IS NULL OR agotado_hasta < CURRENT_DATE) "
             "ORDER BY grupo, orden, id"
         )).mappings().all()
-    out = {"entrada": [], "principio": [], "proteina": [], "acompanamiento": [], "bebida": []}
+    out = {g["clave"]: [] for g in cargar_grupos_pd()}
     for r in rows:
         out.setdefault(r["grupo"], []).append(
             {"id": int(r["id"]), "nombre": r["nombre"], "stock": _stock_val(r["stock"])})
@@ -278,6 +338,33 @@ def cargar_ajustes() -> dict:
     with engine.connect() as conn:
         rows = conn.execute(text("SELECT clave, valor FROM ajustes")).mappings().all()
     return {r["clave"]: r["valor"] for r in rows}
+
+
+def _restaurante_nombre() -> str:
+    """Nombre del restaurante desde 'ajustes' (branding). Tolerante a fallos: la
+    carta debe abrir aunque la BD esté caída (el título cae al genérico)."""
+    try:
+        return (cargar_ajustes().get("restaurante_nombre") or "").strip() or "Carta Digital"
+    except Exception:
+        return "Carta Digital"
+
+
+def _metodos_pago() -> dict:
+    """{'efectivo': bool, 'transferencia': {clave: etiqueta}} del ajuste 'metodos_pago'
+    (JSON por restaurante). Malformado/ausente → el set clásico, para que el pago
+    nunca quede sin opciones."""
+    try:
+        raw = cargar_ajustes().get("metodos_pago")
+        d = json.loads(raw) if raw else {}
+    except Exception:
+        d = {}
+    if not isinstance(d, dict):
+        d = {}
+    tr = d.get("transferencia")
+    if not isinstance(tr, dict):
+        tr = {"nequi": "Nequi", "daviplata": "Daviplata", "breb": "Bre-B"}
+    ef = d.get("efectivo")
+    return {"efectivo": True if ef is None else bool(ef), "transferencia": tr}
 
 
 # ── Mesas (auto-servicio por QR) ────────────────────────────────────────────────
@@ -406,6 +493,27 @@ def _descontar_inventario(conn, items) -> None:
     comp_qty, menu_qty = {}, {}
 
     def _acumular_config(cfg, cant):
+        # FORMATO NUEVO (config['sel']): selecciones por grupo dinámico
+        # {'k': clave, 'l': etiqueta, 'v': [elegidos], 'inv': [reales]?}. 'inv'
+        # (opcional) son los componentes que se descuentan cuando difieren de lo
+        # mostrado (p. ej. principio mixto del POS). Con repetición.
+        sel = cfg.get("sel")
+        if isinstance(sel, list):
+            for e in sel:
+                if not isinstance(e, dict):
+                    continue
+                grupo = str(e.get("k") or "").strip()
+                nombres = e.get("inv")
+                if not isinstance(nombres, list):
+                    nombres = e.get("v")
+                if not grupo or not isinstance(nombres, list):
+                    continue
+                for nom in nombres:
+                    if nom:
+                        k = (grupo, str(nom).strip().lower())
+                        comp_qty[k] = comp_qty.get(k, 0) + cant
+            return
+        # FORMATO LEGADO (pedidos históricos / claves fijas).
         # Un especial solo trae entrada/bebida → los demás grupos faltan y se omiten solos.
         for g in ("entrada", "principio", "proteina", "bebida"):
             v = cfg.get(g)
@@ -449,7 +557,7 @@ def _descontar_inventario(conn, items) -> None:
             "SELECT 1 FROM menu_componentes "
             "WHERE grupo = :g AND LOWER(nombre) = :nom AND stock IS NOT NULL"
         ), {"g": grupo, "nom": nombre_l}).first():
-            faltan.append(f"{_GRUPO_LABEL.get(grupo, grupo)}: {nombre_l}")
+            faltan.append(f"{_etiquetas_grupos().get(grupo, grupo)}: {nombre_l}")
 
     for mid, n in sorted(menu_qty.items()):
         ok = conn.execute(text(
@@ -495,22 +603,35 @@ def _agrupa_acomp(acomp) -> str:
 
 
 def _componentes_lineas(it):
-    # Desglose desde la config: completo para el plato_dia; entrada+bebida para un especial
-    # con extras incluidos. [] si el item no trae config.
+    # Desglose desde la config. Formato NUEVO: config['sel'] (grupos dinámicos,
+    # auto-descriptivo — la etiqueta viaja en 'l'). Formato LEGADO: claves fijas
+    # (pedidos históricos). [] si el item no trae config.
     cfg = it.get("config") or {}
     if not cfg:
         return []
     out = []
-    for g in ("entrada", "principio", "proteina"):
-        v = cfg.get(g)
-        if v:
-            out.append([_GRUPO_LABEL[g], str(v)])
-    ac = _agrupa_acomp(cfg.get("acompanamientos"))
-    if ac:
-        out.append([_GRUPO_LABEL["acompanamiento"], ac])
-    beb = cfg.get("bebida")
-    if beb:
-        out.append([_GRUPO_LABEL["bebida"], str(beb)])
+    sel = cfg.get("sel")
+    if isinstance(sel, list):
+        for e in sel:
+            if not isinstance(e, dict):
+                continue
+            nombres = [str(x) for x in (e.get("v") or []) if x]
+            if not nombres:
+                continue
+            etiqueta = str(e.get("l") or e.get("k") or "?")
+            valor = nombres[0] if len(nombres) == 1 else _agrupa_acomp(nombres)
+            out.append([etiqueta, valor])
+    else:
+        for g in ("entrada", "principio", "proteina"):
+            v = cfg.get(g)
+            if v:
+                out.append([_GRUPO_LABEL[g], str(v)])
+        ac = _agrupa_acomp(cfg.get("acompanamientos"))
+        if ac:
+            out.append([_GRUPO_LABEL["acompanamiento"], ac])
+        beb = cfg.get("bebida")
+        if beb:
+            out.append([_GRUPO_LABEL["bebida"], str(beb)])
     nota = str(it.get("nota") or "").strip()
     if nota:
         out.append(["Nota", nota])
@@ -671,8 +792,9 @@ def pedidos_activos_telefono(tel: str) -> int:
 
 
 # ── Config + estilos (móvil) ───────────────────────────────────────────────────
-st.set_page_config(page_title="Carta Digital", page_icon="🍽️",
-                   layout="centered", initial_sidebar_state="collapsed")
+# El título lleva el nombre del restaurante (ajuste 'restaurante_nombre').
+st.set_page_config(page_title=f"{_restaurante_nombre()} · Carta",
+                   page_icon="🍽️", layout="centered", initial_sidebar_state="collapsed")
 
 st.markdown("""
 <style>
@@ -988,12 +1110,17 @@ def _seccion_con_extras(productos, tipo, comp, con_desc=False):
     if not productos:
         st.markdown('<div class="c-empty">No disponible por ahora.</div>', unsafe_allow_html=True)
         return []
+    # Los extras incluidos siguen anclados a los grupos con clave 'entrada'/'bebida';
+    # sin esos grupos (o sin opciones vivas) la sección se comporta como catálogo simple.
     disp_ent = [e for e in comp.get("entrada", []) if not _agotado(e)]
     disp_beb = [b for b in comp.get("bebida", []) if not _agotado(b)]
     nom_ent = [e["nombre"] for e in disp_ent]
     nom_beb = [b["nombre"] for b in disp_beb]
     stock_ent = {e["nombre"]: e.get("stock") for e in disp_ent}
     stock_beb = {b["nombre"]: b.get("stock") for b in disp_beb}
+    etiquetas = _etiquetas_grupos()
+    et_ent = etiquetas.get("entrada", "Entrada")
+    et_beb = etiquetas.get("bebida", "Bebida")
     carrito = st.session_state["cart"]
     elegidos = []
     for p in productos:
@@ -1022,64 +1149,65 @@ def _seccion_con_extras(productos, tipo, comp, con_desc=False):
                              "precio": int(p["precio"]), "cantidad": qty})
             continue
 
-        # Con extras: una config por unidad. Cabecera "Unidad #i" solo si hay 2 o más.
+        # Con extras: una config por unidad (formato nuevo 'sel'). Cabecera "Unidad #i"
+        # solo si hay 2 o más.
         for u in range(qty):
             base = f"extra_{tipo}_{pid}_{u}"
             if qty > 1:
                 st.markdown(f'<div class="conf-label" style="font-weight:700;">'
                             f'{html.escape(str(p["nombre"]))} · Unidad #{u + 1}</div>',
                             unsafe_allow_html=True)
-            cfg = {}
+            sel_cfg = []
             if nom_ent:
                 _sanea_radio(f"{base}_entrada", ["Ninguno"] + nom_ent)
-                st.markdown('<div class="conf-label">Entrada (incluida)</div>', unsafe_allow_html=True)
-                ent = st.radio("Entrada", ["Ninguno"] + nom_ent, key=f"{base}_entrada",
+                st.markdown(f'<div class="conf-label">{html.escape(et_ent)} (incluida)</div>',
+                            unsafe_allow_html=True)
+                ent = st.radio(et_ent, ["Ninguno"] + nom_ent, key=f"{base}_entrada",
                                format_func=lambda nm: nm if nm == "Ninguno"
                                else f"{nm}{_disp_suffix(stock_ent.get(nm))}",
                                label_visibility="collapsed")
                 if ent and ent != "Ninguno":
-                    cfg["entrada"] = ent
+                    sel_cfg.append({"k": "entrada", "l": et_ent, "v": [ent]})
             if nom_beb:
                 _sanea_radio(f"{base}_bebida", ["Ninguno"] + nom_beb)
-                st.markdown('<div class="conf-label">Bebida (incluida)</div>', unsafe_allow_html=True)
-                beb = st.radio("Bebida", ["Ninguno"] + nom_beb, key=f"{base}_bebida",
+                st.markdown(f'<div class="conf-label">{html.escape(et_beb)} (incluida)</div>',
+                            unsafe_allow_html=True)
+                beb = st.radio(et_beb, ["Ninguno"] + nom_beb, key=f"{base}_bebida",
                                format_func=lambda nm: nm if nm == "Ninguno"
                                else f"{nm}{_disp_suffix(stock_beb.get(nm))}",
                                label_visibility="collapsed")
                 if beb and beb != "Ninguno":
-                    cfg["bebida"] = beb
+                    sel_cfg.append({"k": "bebida", "l": et_beb, "v": [beb]})
             item = {"tipo": tipo, "id": pid, "nombre": p["nombre"],
                     "precio": int(p["precio"]), "cantidad": 1}
-            if cfg:
-                item["config"] = cfg
+            if sel_cfg:
+                item["config"] = {"sel": sel_cfg}
             elegidos.append(item)
     return elegidos
 
 
-def _seccion_plato_dia(comp, precio, n):
-    """Configurador del Plato del Día. Devuelve (items, ok) — ok=False si algún plato
-    no tiene exactamente n acompañamientos."""
+def _seccion_plato_dia(comp, precio, grupos):
+    """Configurador del Plato del Día con GRUPOS DINÁMICOS (plato_dia_grupos): radio si
+    max_sel==1, contadores si max_sel>1. Los grupos con min_sel=0 llevan la opción
+    'Ninguno' al final (por defecto queda la primera opción real, como antes). Escribe
+    la config en el formato nuevo {'sel': [...]}. Devuelve (items, ok)."""
     st.markdown('<div class="c-section">🍛 Plato del Día</div>', unsafe_allow_html=True)
-    faltan = [g for g in ("entrada", "principio", "proteina", "acompanamiento") if not comp.get(g)]
-    if faltan:
+    if not grupos or any(g["min_sel"] >= 1 and not comp.get(g["clave"]) for g in grupos):
         st.markdown('<div class="c-empty">El Plato del Día no está disponible hoy.</div>',
                     unsafe_allow_html=True)
         return [], True
 
-    # Opciones DISPONIBLES (excluye las agotadas: stock 0). Si un grupo obligatorio queda
-    # sin opciones, no hay combinación válida → Plato del Día no disponible por ahora.
-    disp_ent = [e for e in comp["entrada"] if not _agotado(e)]
-    disp_pri = [p for p in comp["principio"] if not _agotado(p)]
-    disp_pro = [p for p in comp["proteina"] if not _agotado(p)]
-    # Bebida incluida (opcional): solo si el restaurante configuró bebidas del día.
-    disp_beb = [b for b in comp.get("bebida", []) if not _agotado(b)]
-    if not (disp_ent and disp_pri and disp_pro):
+    # Opciones DISPONIBLES por grupo (excluye agotadas: stock 0). Si un grupo
+    # OBLIGATORIO queda sin opciones vivas, no hay combinación válida.
+    disp = {g["clave"]: [o for o in comp.get(g["clave"], []) if not _agotado(o)]
+            for g in grupos}
+    if any(g["min_sel"] >= 1 and not disp[g["clave"]] for g in grupos):
         st.markdown('<div class="c-empty">El Plato del Día no está disponible por ahora '
                     '(algún ingrediente se agotó).</div>', unsafe_allow_html=True)
         return [], True
 
-    st.markdown(f'<div class="c-price">${fmt_money(precio)} cada uno · elige {n} acompañamientos '
-                '(puedes repetir)</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="c-price">${fmt_money(precio)} cada uno</div>',
+                unsafe_allow_html=True)
 
     qty = int(st.session_state.get("pd_qty", 0))
     c_lbl, c_step = st.columns([3, 2])
@@ -1099,120 +1227,106 @@ def _seccion_plato_dia(comp, precio, n):
                 st.session_state["pd_qty"] = qty + 1
                 st.rerun(scope="fragment")
 
-    acomps = comp["acompanamiento"]
-    # Mapas nombre→stock para mostrar las porciones restantes junto a cada opción.
-    stock_ent = {e["nombre"]: e.get("stock") for e in disp_ent}
-    stock_pri = {p["nombre"]: p.get("stock") for p in disp_pri}
-    stock_pro = {p["nombre"]: p.get("stock") for p in disp_pro}
-    nom_ent = [e["nombre"] for e in disp_ent]
-    nom_pri = [p["nombre"] for p in disp_pri]
-    nom_pro = [p["nombre"] for p in disp_pro]
-    stock_beb = {b["nombre"]: b.get("stock") for b in disp_beb}
-    nom_beb = [b["nombre"] for b in disp_beb]
-
     plates, ok = [], True
     for i in range(qty):
         st.markdown(f'<div class="plate-card"><div class="plate-title">Plato #{i+1}</div></div>',
                     unsafe_allow_html=True)
-        # Sanea la selección guardada si su opción se agotó (evita el crash de Streamlit).
-        _sanea_radio(f"pd_{i}_entrada", nom_ent)
-        _sanea_radio(f"pd_{i}_principio", nom_pri)
-        _sanea_radio(f"pd_{i}_proteina", nom_pro)
-        if nom_beb:
-            _sanea_radio(f"pd_{i}_bebida", nom_beb)
-        st.markdown('<div class="conf-label">Entrada</div>', unsafe_allow_html=True)
-        entrada = st.radio("Entrada", nom_ent, key=f"pd_{i}_entrada",
-                           format_func=lambda nm: f"{nm}{_disp_suffix(stock_ent.get(nm))}",
-                           label_visibility="collapsed")
-        st.markdown('<div class="conf-label">Principio</div>', unsafe_allow_html=True)
-        principio = st.radio("Principio", nom_pri, key=f"pd_{i}_principio",
-                             format_func=lambda nm: f"{nm}{_disp_suffix(stock_pri.get(nm))}",
-                             label_visibility="collapsed")
-        st.markdown('<div class="conf-label">Carnes o Proteína</div>', unsafe_allow_html=True)
-        proteina = st.radio("Proteína", nom_pro, key=f"pd_{i}_proteina",
-                            format_func=lambda nm: f"{nm}{_disp_suffix(stock_pro.get(nm))}",
-                            label_visibility="collapsed")
-        bebida = None
-        if nom_beb:
-            st.markdown('<div class="conf-label">Bebida</div>', unsafe_allow_html=True)
-            bebida = st.radio("Bebida", nom_beb, key=f"pd_{i}_bebida",
-                              format_func=lambda nm: f"{nm}{_disp_suffix(stock_beb.get(nm))}",
-                              label_visibility="collapsed")
-
-        cuentas = st.session_state.setdefault(f"pd_{i}_acomp", {})
-        elegidos_n = sum(cuentas.values())
-        st.markdown(f'<div class="conf-label">Acompañamientos '
-                    f'<span class="acc-count">({elegidos_n}/{n})</span></div>', unsafe_allow_html=True)
-        for a in acomps:
-            aid = str(a["id"])
-            stock_a = a.get("stock")
-            agot = _agotado(a)
-            c = int(cuentas.get(aid, 0))
-            c_an, c_as = st.columns([3, 2])
-            with c_an:
-                color = "#aaa" if agot else "#1a1a1a"
-                st.markdown(f'<div style="padding:6px 0; color:{color};" class="c-name">'
-                            f'{html.escape(str(a["nombre"]))}{_disp_suffix(stock_a)}</div>',
+        sel_cfg = []
+        for g in grupos:
+            clave = g["clave"]
+            opciones = disp.get(clave) or []
+            if g["max_sel"] == 1:
+                if not opciones:
+                    continue  # grupo opcional sin opciones vivas → se omite el paso
+                nombres = [o["nombre"] for o in opciones]
+                stocks = {o["nombre"]: o.get("stock") for o in opciones}
+                # 'Ninguno' al FINAL en los opcionales: el default sigue siendo la
+                # primera opción real (mismo comportamiento que antes con la bebida).
+                opts = nombres + (["Ninguno"] if g["min_sel"] == 0 else [])
+                # Sanea la selección guardada si su opción se agotó (evita el crash).
+                _sanea_radio(f"pd_{i}_{clave}", opts)
+                st.markdown(f'<div class="conf-label">{html.escape(g["etiqueta"])}</div>',
                             unsafe_allow_html=True)
-            with c_as:
-                cm2, cq2, cp2 = st.columns([1, 1, 1])
-                with cm2:
-                    if st.button("−", key=f"pd_{i}_acm_{aid}"):
-                        if c > 0:
-                            cuentas[aid] = c - 1
-                            if cuentas[aid] == 0:
-                                del cuentas[aid]
-                        st.rerun(scope="fragment")
-                with cq2:
-                    st.markdown(f'<div class="c-qty">{c}</div>', unsafe_allow_html=True)
-                with cp2:
-                    tope_stock = (stock_a is not None and c >= int(stock_a))
-                    if st.button("+", key=f"pd_{i}_acp_{aid}",
-                                 disabled=(elegidos_n >= n or agot or tope_stock)):
-                        cuentas[aid] = c + 1
-                        st.rerun(scope="fragment")
+                v = st.radio(g["etiqueta"], opts, key=f"pd_{i}_{clave}",
+                             format_func=lambda nm, _s=stocks: (
+                                 nm if nm == "Ninguno" else f"{nm}{_disp_suffix(_s.get(nm))}"),
+                             label_visibility="collapsed")
+                if v and v != "Ninguno":
+                    sel_cfg.append({"k": clave, "l": g["etiqueta"], "v": [str(v)]})
+                continue
+
+            # Grupo múltiple (contadores): se listan TODAS las opciones del grupo (las
+            # agotadas deshabilitadas, sin ocultarlas) y se exige min_sel..max_sel.
+            todas = comp.get(clave) or []
+            if not todas:
+                continue
+            cuentas = st.session_state.setdefault(f"pd_{i}_multi_{clave}", {})
+            elegidos_n = sum(cuentas.values())
+            rango = (f"{elegidos_n}/{g['max_sel']}" if g["min_sel"] == g["max_sel"]
+                     else f"{elegidos_n} de {g['min_sel']}-{g['max_sel']}")
+            st.markdown(f'<div class="conf-label">{html.escape(g["etiqueta"])} '
+                        f'<span class="acc-count">({rango})</span></div>',
+                        unsafe_allow_html=True)
+            for a in todas:
+                aid = str(a["id"])
+                stock_a = a.get("stock")
+                agot = _agotado(a)
+                c = int(cuentas.get(aid, 0))
+                c_an, c_as = st.columns([3, 2])
+                with c_an:
+                    color = "#aaa" if agot else "#1a1a1a"
+                    st.markdown(f'<div style="padding:6px 0; color:{color};" class="c-name">'
+                                f'{html.escape(str(a["nombre"]))}{_disp_suffix(stock_a)}</div>',
+                                unsafe_allow_html=True)
+                with c_as:
+                    cm2, cq2, cp2 = st.columns([1, 1, 1])
+                    with cm2:
+                        if st.button("−", key=f"pd_{i}_mm_{clave}_{aid}"):
+                            if c > 0:
+                                cuentas[aid] = c - 1
+                                if cuentas[aid] == 0:
+                                    del cuentas[aid]
+                            st.rerun(scope="fragment")
+                    with cq2:
+                        st.markdown(f'<div class="c-qty">{c}</div>', unsafe_allow_html=True)
+                    with cp2:
+                        tope_stock = (stock_a is not None and c >= int(stock_a))
+                        tope_rep = (not g["permite_repetir"] and c >= 1)
+                        if st.button("+", key=f"pd_{i}_mp_{clave}_{aid}",
+                                     disabled=(elegidos_n >= g["max_sel"] or agot
+                                               or tope_stock or tope_rep)):
+                            cuentas[aid] = c + 1
+                            st.rerun(scope="fragment")
+            if not (g["min_sel"] <= elegidos_n <= g["max_sel"]):
+                ok = False
+                regla = (f"exactamente {g['max_sel']}" if g["min_sel"] == g["max_sel"]
+                         else f"entre {g['min_sel']} y {g['max_sel']}")
+                st.markdown(f'<div class="warn">Elige {regla} de '
+                            f'{html.escape(g["etiqueta"])} para el Plato #{i+1}.</div>',
+                            unsafe_allow_html=True)
+            lista = []
+            for a in todas:
+                lista += [a["nombre"]] * int(cuentas.get(str(a["id"]), 0))
+            if lista:
+                sel_cfg.append({"k": clave, "l": g["etiqueta"], "v": lista})
 
         nota = st.text_input("Nota para este plato (opcional)", key=f"pd_{i}_nota",
                              placeholder="Ej: sin cebolla")
 
-        acomp_list = []
-        for a in acomps:
-            acomp_list += [a["nombre"]] * int(cuentas.get(str(a["id"]), 0))
-        if elegidos_n != n:
-            ok = False
-            st.markdown(f'<div class="warn">Elige exactamente {n} acompañamientos para el Plato #{i+1}.</div>',
-                        unsafe_allow_html=True)
-
-        cfg = {"entrada": entrada, "principio": principio, "proteina": proteina,
-               "acompanamientos": acomp_list}
-        if bebida:
-            cfg["bebida"] = bebida
         plates.append({
             "tipo": "plato_dia", "nombre": "Plato del Día", "precio": int(precio),
-            "cantidad": 1, "config": cfg, "nota": (nota or "").strip(),
+            "cantidad": 1, "config": {"sel": sel_cfg}, "nota": (nota or "").strip(),
         })
     return plates, ok
 
 
 def _resumen_item_cfg(it) -> str:
-    """Texto pequeño con la configuración de un plato del día para el resumen."""
-    cfg = it.get("config") or {}
-    partes = [cfg.get("entrada"), cfg.get("principio"), cfg.get("proteina")]
-    ac = cfg.get("acompanamientos") or []
-    if ac:
-        # colapsa duplicados: 2x Arroz, 1x Maduro
-        orden, cnt = [], {}
-        for a in ac:
-            if a not in cnt:
-                orden.append(a)
-            cnt[a] = cnt.get(a, 0) + 1
-        partes.append(", ".join(f"{cnt[a]}x {a}" for a in orden))
-    if cfg.get("bebida"):
-        partes.append(str(cfg.get("bebida")))
-    txt = " · ".join(p for p in partes if p)
-    if it.get("nota"):
-        txt += f" · Nota: {it['nota']}"
-    return txt
+    """Texto pequeño con la configuración de un plato del día para el resumen.
+    Delegado a _componentes_lineas: entiende el formato nuevo ('sel') y el legado."""
+    partes = []
+    for et, v in _componentes_lineas(it):
+        partes.append(f"Nota: {v}" if et == "Nota" else str(v))
+    return " · ".join(partes)
 
 
 def _filas_resumen_html(items) -> str:
@@ -1324,10 +1438,9 @@ def _render_secciones(comp, cat, ajustes):
     """Renderiza las 4 secciones de la carta + notas generales (parte COMÚN a los dos
     flujos: mesa y delivery). Devuelve (items, ok_pd, notas)."""
     pd_precio = _int(ajustes, "plato_dia_precio", 0)
-    n_ac = max(1, _int(ajustes, "acompanamientos_n", 3))
 
-    # #1 Plato del Día
-    items_pd, ok_pd = _seccion_plato_dia(comp, pd_precio, n_ac)
+    # #1 Plato del Día (grupos dinámicos)
+    items_pd, ok_pd = _seccion_plato_dia(comp, pd_precio, cargar_grupos_pd())
 
     # #2 Especiales (con entrada/bebida del Plato del Día incluidas, opcionales; por unidad
     # cuando se piden 2 o más)
@@ -1464,10 +1577,19 @@ def _carta_delivery(comp, cat, ajustes):
                     'antes de enviar.</div>', unsafe_allow_html=True)
 
     # Pago AL FINAL, ya con el total a la vista (como antes): método y, si es efectivo,
-    # con cuánto paga y su cambio.
+    # con cuánto paga y su cambio. Los métodos salen del ajuste 'metodos_pago'
+    # (configurable por restaurante); con uno solo habilitado se omite el radio.
     st.markdown('<div class="c-section">💳 ¿Cómo vas a pagar?</div>', unsafe_allow_html=True)
-    metodo_lbl = st.radio("Método de pago", ["💵 Efectivo", "💳 Transferencia"],
-                          horizontal=True, label_visibility="collapsed", key="c_metodo")
+    mp = _metodos_pago()
+    opciones_pago = ((["💵 Efectivo"] if mp["efectivo"] else [])
+                     + (["💳 Transferencia"] if mp["transferencia"] else []))
+    if not opciones_pago:
+        opciones_pago = ["💵 Efectivo"]   # config rota → nunca dejar el pago sin opción
+    if len(opciones_pago) > 1:
+        metodo_lbl = st.radio("Método de pago", opciones_pago,
+                              horizontal=True, label_visibility="collapsed", key="c_metodo")
+    else:
+        metodo_lbl = opciones_pago[0]
     es_efectivo = metodo_lbl == "💵 Efectivo"
     metodo_pago = "efectivo" if es_efectivo else "transferencia"
     paga_con = 0

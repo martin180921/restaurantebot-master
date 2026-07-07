@@ -5,7 +5,9 @@ from datetime import date, datetime
 from zoneinfo import ZoneInfo
 import streamlit as st
 import pandas as pd
+import json
 import os
+import re
 
 from utils.items import parse_items
 
@@ -314,6 +316,45 @@ def _ensure_schema():
             ('fee_entrega',       '4000'),
             ('acompanamientos_n', '3')
             ON CONFLICT (clave) DO NOTHING
+        """))
+        # Branding/identidad y métodos de pago (replicabilidad): defaults = los
+        # valores que antes estaban quemados. Mismo espejo que init_db() del bot.
+        for _k, _v in {
+            "restaurante_nombre":    "RestauranteBOT",
+            "restaurante_direccion": "",
+            "restaurante_telefono":  "",
+            "bot_saludo": (
+                "¡Hola! 👋 Bienvenido a *{nombre}*.\n\n"
+                "📲 Haz tu pedido a domicilio o para llevar desde nuestra carta digital:\n"
+                "{link}\n\n"
+                "Elige cómo lo quieres, arma tu pedido y nosotros nos encargamos. "
+                "¡Gracias!"
+            ),
+            "metodos_pago": (
+                '{"efectivo": true, "transferencia": '
+                '{"nequi": "Nequi", "daviplata": "Daviplata", "breb": "Bre-B"}}'
+            ),
+            "moneda_simbolo": "$",
+        }.items():
+            conn.execute(text(
+                "INSERT INTO ajustes (clave, valor) VALUES (:k, :v) "
+                "ON CONFLICT (clave) DO NOTHING"
+            ), {"k": _k, "v": _v})
+        # Grupos del Plato del Día como datos (replicabilidad). Solo garantizamos la
+        # tabla; la SIEMBRA one-time la hace el bot (seed_pd_grupos) — mismo criterio
+        # que menu_componentes: el panel no debe resucitar grupos borrados a propósito.
+        # Si está vacía, el código cae a los grupos clásicos quemados (fallback).
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS plato_dia_grupos (
+                id              SERIAL  PRIMARY KEY,
+                clave           TEXT    UNIQUE NOT NULL,
+                etiqueta        TEXT    NOT NULL,
+                orden           INTEGER NOT NULL DEFAULT 0,
+                activo          BOOLEAN NOT NULL DEFAULT TRUE,
+                min_sel         INTEGER NOT NULL DEFAULT 1,
+                max_sel         INTEGER NOT NULL DEFAULT 1,
+                permite_repetir BOOLEAN NOT NULL DEFAULT FALSE
+            )
         """))
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS clientes (
@@ -711,7 +752,10 @@ def cargar_mesas_activas():
 # La app pública (app_cliente) tiene su propia conexión y replica lo que necesita.
 # ════════════════════════════════════════════════════════════════════════════════
 
-# Grupos de opciones del Plato del Día, en el orden de los pasos de selección.
+# Grupos CLÁSICOS del Plato del Día. Ya NO son la autoridad: los grupos viven en
+# la tabla plato_dia_grupos (ver cargar_grupos_pd). Estas constantes quedan solo
+# como FALLBACK para cuando la tabla aún no fue sembrada (arranque del panel antes
+# del redeploy del bot) y para etiquetar pedidos históricos con formato legado.
 GRUPOS_COMPONENTE = ["entrada", "principio", "proteina", "acompanamiento", "bebida"]
 GRUPO_LABEL = {
     "entrada":        "Entrada",
@@ -720,6 +764,118 @@ GRUPO_LABEL = {
     "acompanamiento": "Acompañamientos",
     "bebida":         "Bebida",
 }
+
+
+# ── Grupos del Plato del Día DINÁMICOS (tabla plato_dia_grupos) ─────────────────
+# Cada restaurante define sus pasos de selección: etiqueta, orden, obligatoriedad
+# (min_sel>=1), cuántas opciones se eligen (max_sel) y si puede repetir la misma
+# (permite_repetir). 'clave' = menu_componentes.grupo (así los componentes mapean).
+
+@st.cache_data(ttl=60)
+def _cargar_grupos_pd_raw():
+    """TODAS las filas de plato_dia_grupos en orden (activas o no). Las escrituras
+    llaman invalidar_grupos_pd() para reflejar cambios al vuelo."""
+    with engine.connect() as conn:
+        rows = conn.execute(text(
+            "SELECT id, clave, etiqueta, orden, activo, min_sel, max_sel, permite_repetir "
+            "FROM plato_dia_grupos ORDER BY orden, id"
+        )).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def cargar_grupos_pd(solo_activos: bool = True) -> list:
+    """Grupos del Plato del Día como list[dict] saneada (min_sel>=0, max_sel>=min_sel).
+    Si la tabla está VACÍA (aún sin sembrar) cae a los 5 grupos clásicos con la
+    semántica histórica, incluido el nº de acompañamientos del ajuste legado."""
+    filas = [dict(g) for g in _cargar_grupos_pd_raw()]
+    if not filas:
+        n = max(1, ajuste_int("acompanamientos_n", 3))
+        filas = [
+            {"id": 0, "clave": g, "etiqueta": GRUPO_LABEL[g], "orden": i + 1,
+             "activo": True,
+             "min_sel": 0 if g == "bebida" else (n if g == "acompanamiento" else 1),
+             "max_sel": n if g == "acompanamiento" else 1,
+             "permite_repetir": g == "acompanamiento"}
+            for i, g in enumerate(GRUPOS_COMPONENTE)
+        ]
+    if solo_activos:
+        filas = [g for g in filas if g.get("activo")]
+    for g in filas:
+        g["min_sel"] = max(0, int(g.get("min_sel") or 0))
+        g["max_sel"] = max(1, int(g.get("max_sel") or 1), g["min_sel"])
+        g["permite_repetir"] = bool(g.get("permite_repetir"))
+    return filas
+
+
+def etiquetas_grupos_pd() -> dict:
+    """{clave: etiqueta} de TODOS los grupos (incluye inactivos: sirve para rotular
+    pedidos viejos de un grupo hoy desactivado). Completa con los clásicos."""
+    d = dict(GRUPO_LABEL)
+    for g in cargar_grupos_pd(solo_activos=False):
+        d[g["clave"]] = g["etiqueta"]
+    return d
+
+
+def invalidar_grupos_pd():
+    _cargar_grupos_pd_raw.clear()
+
+
+def crear_grupo_pd(clave: str, etiqueta: str, min_sel: int = 1, max_sel: int = 1,
+                   permite_repetir: bool = False):
+    """Crea un grupo nuevo. Devuelve None si ok o un mensaje de error. La clave se
+    normaliza a [a-z0-9_] y máx. 20 chars: debe caber en menu_componentes.grupo."""
+    etiqueta = (etiqueta or "").strip()
+    clave = re.sub(r"[^a-z0-9_]", "", (clave or etiqueta).strip().lower()
+                   .replace(" ", "_").replace("ñ", "n"))[:20]
+    if not clave or not etiqueta:
+        return "El grupo necesita clave y etiqueta."
+    with engine.begin() as conn:
+        dup = conn.execute(text(
+            "SELECT 1 FROM plato_dia_grupos WHERE clave = :c"), {"c": clave}).first()
+        if dup:
+            return f"Ya existe un grupo con la clave '{clave}'."
+        sig = conn.execute(text(
+            "SELECT COALESCE(MAX(orden), 0) + 1 FROM plato_dia_grupos")).scalar()
+        conn.execute(text(
+            "INSERT INTO plato_dia_grupos "
+            "(clave, etiqueta, orden, min_sel, max_sel, permite_repetir) "
+            "VALUES (:c, :e, :o, :mn, :mx, :rep)"
+        ), {"c": clave, "e": etiqueta, "o": int(sig),
+            "mn": max(0, int(min_sel)), "mx": max(1, int(max_sel), int(min_sel)),
+            "rep": bool(permite_repetir)})
+    invalidar_grupos_pd()
+    return None
+
+
+def guardar_grupo_pd(gid: int, *, etiqueta: str, orden: int, min_sel: int,
+                     max_sel: int, permite_repetir: bool, activo: bool) -> None:
+    """Actualiza un grupo existente (la clave NO se edita: ancla los componentes)."""
+    with engine.begin() as conn:
+        conn.execute(text(
+            "UPDATE plato_dia_grupos SET etiqueta = :e, orden = :o, min_sel = :mn, "
+            "max_sel = :mx, permite_repetir = :rep, activo = :a WHERE id = :id"
+        ), {"e": (etiqueta or "").strip() or "?", "o": int(orden),
+            "mn": max(0, int(min_sel)), "mx": max(1, int(max_sel), int(min_sel)),
+            "rep": bool(permite_repetir), "a": bool(activo), "id": int(gid)})
+    invalidar_grupos_pd()
+
+
+def eliminar_grupo_pd(gid: int):
+    """Borra un grupo SOLO si no tiene componentes (activos o no) colgando de su
+    clave; si los tiene, el camino es desactivarlo. Devuelve None o mensaje de error."""
+    with engine.begin() as conn:
+        clave = conn.execute(text(
+            "SELECT clave FROM plato_dia_grupos WHERE id = :id"), {"id": int(gid)}).scalar()
+        if clave is None:
+            return None
+        n = conn.execute(text(
+            "SELECT COUNT(*) FROM menu_componentes WHERE grupo = :g"), {"g": clave}).scalar()
+        if int(n or 0) > 0:
+            return (f"El grupo '{clave}' tiene {n} opción(es) cargadas. "
+                    "Elimina o mueve esas opciones primero, o simplemente desactívalo.")
+        conn.execute(text("DELETE FROM plato_dia_grupos WHERE id = :id"), {"id": int(gid)})
+    invalidar_grupos_pd()
+    return None
 
 
 @st.cache_data(ttl=60)
@@ -792,6 +948,29 @@ def inventario_de_items(items):
     comp_qty, menu_qty = {}, {}
 
     def _acumular_config(cfg, cant):
+        # FORMATO NUEVO (config['sel']): lista de selecciones genéricas por grupo
+        # dinámico: {'k': clave_grupo, 'l': etiqueta, 'v': [nombres elegidos],
+        # 'inv': [nombres reales]?}. 'v' es lo que se MUESTRA; 'inv' (opcional) son
+        # los componentes que se DESCUENTAN cuando difieren (p. ej. principio mixto:
+        # v=['½ A · ½ B'] e inv=['A','B']). Cada nombre descuenta una porción, con
+        # repetición (la lista puede traer el mismo nombre dos veces).
+        sel = cfg.get("sel")
+        if isinstance(sel, list):
+            for e in sel:
+                if not isinstance(e, dict):
+                    continue
+                grupo = str(e.get("k") or "").strip()
+                nombres = e.get("inv")
+                if not isinstance(nombres, list):
+                    nombres = e.get("v")
+                if not grupo or not isinstance(nombres, list):
+                    continue
+                for nom in nombres:
+                    if nom:
+                        k = (grupo, str(nom).strip().lower())
+                        comp_qty[k] = comp_qty.get(k, 0) + cant
+            return
+        # FORMATO LEGADO (pedidos históricos): claves fijas por grupo clásico.
         # entrada/principio/proteína/bebida descuentan UNA porción de su componente; los
         # acompañamientos, una por cada uno elegido (con repetición). Un especial solo
         # trae entrada/bebida → los demás grupos faltan en su cfg y se omiten solos.
@@ -890,7 +1069,7 @@ def aplicar_inventario(conn, items, signo: int) -> None:
             "SELECT 1 FROM menu_componentes "
             "WHERE grupo = :g AND LOWER(nombre) = :nom AND stock IS NOT NULL"
         ), {"g": grupo, "nom": nombre_l}).first():
-            faltan.append(f"{GRUPO_LABEL.get(grupo, grupo)}: {nombre_l}")
+            faltan.append(f"{etiquetas_grupos_pd().get(grupo, grupo)}: {nombre_l}")
 
     for mid, n in sorted(menu_qty.items()):
         ok = conn.execute(text(
@@ -942,7 +1121,7 @@ def resumen_disponibilidad_componentes() -> dict:
     if df.empty:
         return {"agotados": agotados, "bajos": bajos}
     disp = disponibles(df)
-    orden = {g: i for i, g in enumerate(GRUPOS_COMPONENTE)}
+    orden = {g["clave"]: i for i, g in enumerate(cargar_grupos_pd(solo_activos=False))}
     filas = sorted(disp.to_dict("records"),
                    key=lambda r: (orden.get(r.get("grupo"), 99), r.get("orden", 0)))
     for r in filas:
@@ -977,8 +1156,10 @@ def componentes_activos_por_grupo() -> dict:
     """{grupo: [{id, nombre, stock}]} con SOLO los componentes ofrecibles hoy, en orden.
     'stock' = porciones que quedan (int) o None si la opción no lleva control. NO se
     ocultan las opciones agotadas (stock 0): el configurador las muestra deshabilitadas
-    para no esconder nunca el Plato del Día. Lo consume el configurador (POS y cliente)."""
-    out = {g: [] for g in GRUPOS_COMPONENTE}
+    para no esconder nunca el Plato del Día. Lo consume el configurador (POS y cliente).
+    Las claves salen de los grupos ACTIVOS (dinámicos); los componentes de grupos
+    desconocidos/desactivados entran igual vía setdefault (huérfanos visibles)."""
+    out = {g["clave"]: [] for g in cargar_grupos_pd()}
     df = cargar_componentes()
     if df.empty:
         return out
@@ -1034,7 +1215,55 @@ def fee_entrega() -> int:
 
 
 def num_acompanamientos() -> int:
+    """Compat: nº de acompañamientos. La autoridad ahora es max_sel del grupo
+    'acompanamiento' (plato_dia_grupos); el ajuste legado queda de fallback."""
+    for g in cargar_grupos_pd():
+        if g["clave"] == "acompanamiento":
+            return g["max_sel"]
     return max(1, ajuste_int("acompanamientos_n", 3))
+
+
+# ── Branding/identidad del restaurante y métodos de pago (desde 'ajustes') ──────
+def restaurante_nombre() -> str:
+    return (cargar_ajustes().get("restaurante_nombre") or "").strip() or "Restaurante"
+
+
+def restaurante_direccion() -> str:
+    return (cargar_ajustes().get("restaurante_direccion") or "").strip()
+
+
+def restaurante_telefono() -> str:
+    return (cargar_ajustes().get("restaurante_telefono") or "").strip()
+
+
+def moneda_simbolo() -> str:
+    return (cargar_ajustes().get("moneda_simbolo") or "").strip() or "$"
+
+
+_METODOS_PAGO_DEFAULT = {
+    "efectivo": True,
+    "transferencia": {"nequi": "Nequi", "daviplata": "Daviplata", "breb": "Bre-B"},
+}
+
+
+def metodos_pago() -> dict:
+    """{'efectivo': bool, 'transferencia': {clave: etiqueta}} desde el ajuste
+    'metodos_pago' (JSON). Malformado o ausente → el set clásico (fallback), para
+    que el cobro NUNCA quede sin métodos."""
+    raw = cargar_ajustes().get("metodos_pago")
+    try:
+        d = json.loads(raw) if raw else {}
+    except (ValueError, TypeError):
+        d = {}
+    if not isinstance(d, dict):
+        d = {}
+    tr = d.get("transferencia")
+    if not isinstance(tr, dict):
+        tr = dict(_METODOS_PAGO_DEFAULT["transferencia"])
+    tr = {str(k).strip(): (str(v).strip() or str(k).strip())
+          for k, v in tr.items() if str(k).strip()}
+    ef = d.get("efectivo")
+    return {"efectivo": True if ef is None else bool(ef), "transferencia": tr}
 
 
 # ── Base de clientes (la alimenta la app pública) ───────────────────────────────

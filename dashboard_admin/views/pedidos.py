@@ -12,7 +12,7 @@ import audit
 import empleados
 from db import (engine, titulo_seccion, fmt_money, fecha_corta, flash, drain_toasts,
                 saldo_pedido, cobrado_pedido, _es_pagado, _a_entero,
-                aplicar_inventario, SinStock, ahora_bogota, hoy_bogota)
+                aplicar_inventario, SinStock, ahora_bogota, hoy_bogota, metodos_pago)
 from utils.print_jobs import enqueue_recibo, enqueue_comanda, enqueue_prerecibo
 from utils.items import (formatear_items_html, lineas_por_categoria,
                          parse_items, etiqueta_item)
@@ -325,8 +325,14 @@ def _distribuir_abono(pendientes, monto):
     return updates
 
 
-# Submétodos válidos de transferencia (billeteras locales). NULL en efectivo.
-SUBMETODOS_TRANSF = {"nequi", "daviplata", "breb"}
+# Submétodos válidos de transferencia. NULL en efectivo. La autoridad es el ajuste
+# 'metodos_pago' (configurable por restaurante); las billeteras clásicas siguen
+# siendo válidas SIEMPRE para no rechazar pagos históricos ni configs recortadas.
+_SUBMETODOS_CLASICOS = {"nequi", "daviplata", "breb"}
+
+
+def _submetodos_validos() -> set:
+    return _SUBMETODOS_CLASICOS | set(metodos_pago().get("transferencia", {}).keys())
 
 
 def _entregar_domicilios_pagados(conn, ids) -> None:
@@ -363,7 +369,7 @@ def registrar_pago(ids, monto, metodo="efectivo", submetodo=None, comprobante=No
     metodo = metodo if metodo in ("efectivo", "transferencia") else "efectivo"
     if metodo == "transferencia":
         sub = (str(submetodo or "").strip().lower() or None)
-        sub = sub if sub in SUBMETODOS_TRANSF else None
+        sub = sub if sub in _submetodos_validos() else None
         comp = (str(comprobante or "").strip()[:60] or None)
     else:
         sub, comp = None, None   # el efectivo no lleva submétodo ni comprobante
@@ -408,7 +414,7 @@ def registrar_pago_mixto(ids, efectivo, transferencia, submetodo=None, comproban
     efectivo = max(0, int(round(float(efectivo or 0))))
     transferencia = max(0, int(round(float(transferencia or 0))))
     sub = (str(submetodo or "").strip().lower() or None)
-    sub = sub if sub in SUBMETODOS_TRANSF else None
+    sub = sub if sub in _submetodos_validos() else None
     comp = (str(comprobante or "").strip()[:60] or None)
     if not ids or (efectivo + transferencia) <= 0:
         return 0
@@ -500,7 +506,7 @@ def registrar_pago_items(pedido_id, seleccion, metodo="efectivo", submetodo=None
     metodo = metodo if metodo in ("efectivo", "transferencia") else "efectivo"
     if metodo == "transferencia":
         sub = (str(submetodo or "").strip().lower() or None)
-        sub = sub if sub in SUBMETODOS_TRANSF else None
+        sub = sub if sub in _submetodos_validos() else None
         comp = (str(comprobante or "").strip()[:60] or None)
     else:
         sub, comp = None, None
@@ -963,16 +969,19 @@ def dialog_cobrar(ids, titulo, total, uid):
     if not es_efectivo:
         st.session_state.pop(f"recibe_{uid}", None)
     # Detalle de la transferencia (también el tramo de transferencia de un cobro mixto):
-    # billetera (Nequi/Daviplata/Bre-B) + comprobante. El comprobante vive solo en este
-    # cobro de caja (no en la app pública del cliente).
+    # billetera + comprobante. Las billeteras salen del ajuste 'metodos_pago'
+    # (configurable por restaurante); sin billeteras configuradas se omite el radio.
+    # El comprobante vive solo en este cobro de caja (no en la app pública del cliente).
     if not es_efectivo:
-        _SUBMETODOS = {"Nequi": "nequi", "Daviplata": "daviplata", "Bre-B": "breb"}
-        st.caption("Billetera / canal" + (" · tramo de transferencia" if es_mixto else ""))
-        sub_label = st.radio(
-            "Billetera", list(_SUBMETODOS.keys()),
-            horizontal=True, label_visibility="collapsed", key=f"submetodo_{uid}",
-        )
-        submetodo_val = _SUBMETODOS.get(sub_label)
+        _SUBMETODOS = {etq: clave
+                       for clave, etq in metodos_pago().get("transferencia", {}).items()}
+        if _SUBMETODOS:
+            st.caption("Billetera / canal" + (" · tramo de transferencia" if es_mixto else ""))
+            sub_label = st.radio(
+                "Billetera", list(_SUBMETODOS.keys()),
+                horizontal=True, label_visibility="collapsed", key=f"submetodo_{uid}",
+            )
+            submetodo_val = _SUBMETODOS.get(sub_label)
         comprobante_val = (st.text_input(
             "N.º de comprobante", key=f"comprobante_{uid}",
             placeholder="Referencia de la transacción (opcional)",

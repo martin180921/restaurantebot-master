@@ -10,8 +10,9 @@
 --
 -- Es idempotente: seguro de correr en una base nueva o ya existente (todo es
 -- CREATE/ALTER ... IF NOT EXISTS y los seeds están guardados). Crea exactamente
--- las mismas 16 tablas, columnas e índices que el código, y siembra los 12
--- componentes del Plato del Día y los 4 ajustes de precios/recargo.
+-- las mismas 17 tablas, columnas e índices que el código, y siembra los 12
+-- componentes del Plato del Día, los ajustes de precios/recargo/branding y los
+-- 5 grupos clásicos del Plato del Día (plato_dia_grupos).
 --
 -- NOTA: a diferencia del bot, NO inserta los 3 platos de ejemplo del menú; arranca
 -- con la carta vacía para que cargues tus platos reales en 🍔 Menú.
@@ -61,7 +62,22 @@ CREATE TABLE IF NOT EXISTS menu_componentes (
     stock         INTEGER
 );
 
--- Ajustes clave/valor: precios planos, recargo de entrega y nº de acompañamientos.
+-- Grupos del Plato del Día como datos (replicabilidad): 'clave' = valor de
+-- menu_componentes.grupo (sin FK dura). min_sel=0 → opcional; max_sel>1 →
+-- multi-selección; permite_repetir → 2x la misma opción (acompañamientos).
+CREATE TABLE IF NOT EXISTS plato_dia_grupos (
+    id              SERIAL  PRIMARY KEY,
+    clave           TEXT    UNIQUE NOT NULL,
+    etiqueta        TEXT    NOT NULL,
+    orden           INTEGER NOT NULL DEFAULT 0,
+    activo          BOOLEAN NOT NULL DEFAULT TRUE,
+    min_sel         INTEGER NOT NULL DEFAULT 1,
+    max_sel         INTEGER NOT NULL DEFAULT 1,
+    permite_repetir BOOLEAN NOT NULL DEFAULT FALSE
+);
+
+-- Ajustes clave/valor: precios planos, recargo de entrega, nº de acompañamientos
+-- y branding del restaurante (nombre, saludo del bot, métodos de pago, moneda).
 CREATE TABLE IF NOT EXISTS ajustes (
     clave VARCHAR(50) PRIMARY KEY,
     valor TEXT        NOT NULL
@@ -350,6 +366,38 @@ INSERT INTO ajustes (clave, valor) VALUES
     ('especiales_precio', '25000'),
     ('fee_entrega',       '4000'),
     ('acompanamientos_n', '3')
+ON CONFLICT (clave) DO NOTHING;
+
+-- Branding/identidad y métodos de pago: defaults = los valores que antes
+-- estaban quemados en el código. Editables en el panel (🍔 Menú → ⚙️ Ajustes).
+INSERT INTO ajustes (clave, valor) VALUES
+    ('restaurante_nombre',    'RestauranteBOT'),
+    ('restaurante_direccion', ''),
+    ('restaurante_telefono',  ''),
+    ('bot_saludo', E'¡Hola! \U0001F44B Bienvenido a *{nombre}*.\n\n\U0001F4F2 Haz tu pedido a domicilio o para llevar desde nuestra carta digital:\n{link}\n\nElige cómo lo quieres, arma tu pedido y nosotros nos encargamos. ¡Gracias!'),
+    ('metodos_pago', '{"efectivo": true, "transferencia": {"nequi": "Nequi", "daviplata": "Daviplata", "breb": "Bre-B"}}'),
+    ('moneda_simbolo', '$')
+ON CONFLICT (clave) DO NOTHING;
+
+-- Grupos clásicos del Plato del Día. Solo siembra si la tabla está vacía (no
+-- resucita grupos borrados). Los acompañamientos heredan el 'acompanamientos_n'
+-- vigente para respetar lo que el restaurante ya tenía configurado.
+INSERT INTO plato_dia_grupos (clave, etiqueta, orden, min_sel, max_sel, permite_repetir)
+SELECT v.clave, v.etiqueta, v.orden,
+       COALESCE(v.min_sel, n.n), COALESCE(v.max_sel, n.n), v.permite_repetir
+FROM (VALUES
+    ('entrada',        'Entrada',            1, 1,    1,    FALSE),
+    ('principio',      'Principio',          2, 1,    1,    FALSE),
+    ('proteina',       'Carnes o Proteína',  3, 1,    1,    FALSE),
+    ('acompanamiento', 'Acompañamientos',    4, NULL, NULL, TRUE),
+    ('bebida',         'Bebida',             5, 0,    1,    FALSE)
+) AS v(clave, etiqueta, orden, min_sel, max_sel, permite_repetir)
+CROSS JOIN (
+    SELECT GREATEST(1, COALESCE(
+        (SELECT valor::int FROM ajustes WHERE clave = 'acompanamientos_n'), 3
+    )) AS n
+) AS n
+WHERE NOT EXISTS (SELECT 1 FROM plato_dia_grupos)
 ON CONFLICT (clave) DO NOTHING;
 
 -- Solo siembra si la tabla está vacía (no resucita opciones borradas en re-runs).

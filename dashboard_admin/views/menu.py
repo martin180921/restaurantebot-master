@@ -19,15 +19,18 @@ from sqlalchemy import text
 import html
 import io
 import csv
+import json
 import numbers
+import re
 import unicodedata
 import pandas as pd
 
 import auth
 from db import (engine, titulo_seccion, cargar_menu, cargar_componentes, cargar_catalogo,
                 cargar_ajustes, fmt_money, flash, disponibles,
-                componentes_activos_por_grupo, precio_plato_dia, num_acompanamientos,
-                GRUPOS_COMPONENTE, GRUPO_LABEL,
+                componentes_activos_por_grupo, precio_plato_dia,
+                cargar_grupos_pd, etiquetas_grupos_pd, crear_grupo_pd,
+                guardar_grupo_pd, eliminar_grupo_pd,
                 guardar_inventario, stock_int, STOCK_BAJO, agotado_por_stock, hoy_bogota)
 
 
@@ -378,33 +381,63 @@ def _dialog_stock(scope: str, oid: int, nombre: str, stock_actual):
 # ══════════════════════════════════════════════════════════════════════════════
 # Pestaña 1 · Plato del Día (componentes por grupo)
 # ══════════════════════════════════════════════════════════════════════════════
+def _regla_grupo(g: dict) -> str:
+    """Texto corto de la regla de selección de un grupo: 'elige 1', 'elige 3',
+    'elige 2-4', 'opcional'…"""
+    mn, mx = g["min_sel"], g["max_sel"]
+    if mn == 0:
+        return "opcional" if mx == 1 else f"opcional (hasta {mx})"
+    if mn == mx:
+        return f"elige {mx}"
+    return f"elige {mn}-{mx}"
+
+
 def _render_plato_dia():
-    from db import precio_plato_dia, num_acompanamientos
+    from db import precio_plato_dia
+    grupos = cargar_grupos_pd(solo_activos=False)
+    reglas = " · ".join(f"{g['etiqueta']}: {_regla_grupo(g)}"
+                        for g in grupos if g.get("activo"))
     st.markdown(
         f'<div style="background:#fafaf8; border:1px solid #ececec; border-radius:10px; '
         f'padding:0.8rem 1rem; font-size:0.85rem; color:#45443e; margin-bottom:1rem;">'
-        f'💡 Precio plano del Plato del Día: <b>${fmt_money(precio_plato_dia())}</b> · '
-        f'el cliente elige <b>{num_acompanamientos()}</b> acompañamientos. '
-        f'Cambia ambos en ⚙️ Ajustes.</div>',
+        f'💡 Precio plano del Plato del Día: <b>${fmt_money(precio_plato_dia())}</b> '
+        f'(se cambia en ⚙️ Ajustes) · {html.escape(reglas)}<br>'
+        f'Los pasos de selección se configuran abajo en 🧩 Grupos.</div>',
         unsafe_allow_html=True,
     )
 
-    # Cada grupo (Entrada / Principio / Proteína / Acompañamientos / Bebida) es ahora un
-    # acordeón a lo ANCHO en vez de una columna alta: las opciones crecían mucho hacia
-    # abajo. Solo se despliega el grupo que el admin está editando; el primero queda
-    # abierto para orientar. El estado abierto/cerrado sobrevive a los st.rerun() de cada
-    # acción (mismo mecanismo _acc_header que los acordeones del catálogo).
+    # Cada grupo es un acordeón a lo ANCHO en vez de una columna alta: las opciones
+    # crecían mucho hacia abajo. Solo se despliega el grupo que el admin está editando;
+    # el primero queda abierto para orientar. El estado abierto/cerrado sobrevive a los
+    # st.rerun() de cada acción (mismo mecanismo _acc_header que los acordeones del
+    # catálogo). Los grupos ya no son fijos: salen de la tabla plato_dia_grupos.
     df = cargar_componentes()
-    for idx, grupo in enumerate(GRUPOS_COMPONENTE):
-        sub = df[df["grupo"] == grupo] if not df.empty else df
-        _render_grupo(sub, grupo, default_open=(idx == 0))
+    for idx, g in enumerate(grupos):
+        sub = df[df["grupo"] == g["clave"]] if not df.empty else df
+        _render_grupo(sub, g, default_open=(idx == 0))
+
+    # Componentes huérfanos: su 'grupo' no coincide con ningún grupo definido (p. ej.
+    # el grupo se borró o la clave cambió a mano en la BD). Se muestran para que no
+    # desaparezcan en silencio.
+    if not df.empty:
+        claves = {g["clave"] for g in grupos}
+        huerf = df[~df["grupo"].isin(claves)]
+        if not huerf.empty:
+            st.warning(f"⚠️ Hay {len(huerf)} opción(es) cuyo grupo ya no existe: "
+                       + ", ".join(f"{r['nombre']} ({r['grupo']})"
+                                   for _, r in huerf.iterrows()))
+
+    _render_grupos_editor(grupos)
 
 
-def _render_grupo(sub, grupo: str, *, default_open: bool = False):
-    label = GRUPO_LABEL.get(grupo, grupo.capitalize())
+def _render_grupo(sub, g: dict, *, default_open: bool = False):
+    grupo = g["clave"]
+    label = g["etiqueta"]
     activos = int((sub["activo"] == True).sum()) if not sub.empty else 0
-    if not _acc_header(f"grupo_{grupo}", f"{label} · {activos} activo(s)",
-                       default_open=default_open):
+    titulo = f"{label} · {activos} activo(s) · {_regla_grupo(g)}"
+    if not g.get("activo"):
+        titulo += " · ⏸ grupo desactivado"
+    if not _acc_header(f"grupo_{grupo}", titulo, default_open=default_open):
         return
 
     if grupo == "entrada":
@@ -487,6 +520,97 @@ def _componente_card(row, grupo: str):
     with b4:
         if st.button("🗑", key=f"eliminar_comp_{cid}", help="Eliminar", use_container_width=True):
             _dialog_eliminar_componente(cid, str(nombre))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Editor de GRUPOS del Plato del Día (pasos de selección, tabla plato_dia_grupos)
+# ══════════════════════════════════════════════════════════════════════════════
+def _render_grupos_editor(grupos):
+    """Gestión de los pasos de selección: etiqueta, orden, mín/máx, repetir, activo,
+    alta de grupos nuevos y borrado (solo si el grupo no tiene opciones cargadas)."""
+    st.markdown("<div style='height:10px;'></div>", unsafe_allow_html=True)
+    if not _acc_header("grupos_editor", "🧩 Grupos (pasos de selección del Plato del Día)",
+                       default_open=False):
+        return
+    # id=0 = fallback en memoria (tabla sin sembrar): nada que editar todavía.
+    if any(int(g.get("id") or 0) == 0 for g in grupos):
+        st.info("Los grupos aún no están sembrados en la base de datos; se usan los "
+                "clásicos por defecto. Arranca el bot (o corre el script de "
+                "aprovisionamiento) y vuelve aquí para editarlos.")
+        return
+    st.caption("Cada grupo es un paso del configurador del Plato del Día. "
+               "Mín 0 = opcional · Máx = cuántas opciones elige el cliente · "
+               "Repetir = puede llevar 2x la misma opción. La clave (entre paréntesis) "
+               "no se edita: ancla las opciones ya cargadas del grupo.")
+    h = st.columns([2.4, 0.9, 0.9, 0.9, 1.0, 1.0, 0.7])
+    for col, t in zip(h, ["Etiqueta", "Orden", "Mín", "Máx", "Repetir", "Activo", ""]):
+        col.markdown(f"<span style='font-size:0.72rem; color:#a3a39b;'>{t}</span>",
+                     unsafe_allow_html=True)
+    vals = {}
+    for g in grupos:
+        gid = int(g["id"])
+        c1, c2, c3, c4, c5, c6, c7 = st.columns([2.4, 0.9, 0.9, 0.9, 1.0, 1.0, 0.7])
+        with c1:
+            et = st.text_input("Etiqueta", value=g["etiqueta"], key=f"gpd_et_{gid}",
+                               label_visibility="collapsed")
+            st.caption(f"({g['clave']})")
+        with c2:
+            orden = st.number_input("Orden", min_value=0, step=1, value=int(g["orden"]),
+                                    key=f"gpd_or_{gid}", label_visibility="collapsed")
+        with c3:
+            mn = st.number_input("Mín", min_value=0, max_value=9, step=1,
+                                 value=int(g["min_sel"]), key=f"gpd_mn_{gid}",
+                                 label_visibility="collapsed")
+        with c4:
+            mx = st.number_input("Máx", min_value=1, max_value=9, step=1,
+                                 value=int(g["max_sel"]), key=f"gpd_mx_{gid}",
+                                 label_visibility="collapsed")
+        with c5:
+            rep = st.checkbox("Repetir", value=bool(g["permite_repetir"]),
+                              key=f"gpd_rep_{gid}")
+        with c6:
+            act = st.checkbox("Activo", value=bool(g["activo"]), key=f"gpd_act_{gid}")
+        with c7:
+            if st.button("🗑", key=f"gpd_del_{gid}",
+                         help="Eliminar grupo (solo si no tiene opciones cargadas)"):
+                err = eliminar_grupo_pd(gid)
+                flash(err, "⚠️") if err else flash("Grupo eliminado", "🗑")
+                st.rerun()
+        vals[gid] = (et, orden, mn, mx, rep, act)
+
+    if st.button("💾 Guardar grupos", type="primary", key="gpd_guardar"):
+        for gid, (et, orden, mn, mx, rep, act) in vals.items():
+            guardar_grupo_pd(gid, etiqueta=et, orden=int(orden), min_sel=int(mn),
+                             max_sel=int(mx), permite_repetir=bool(rep),
+                             activo=bool(act))
+        flash("Grupos guardados", "🧩")
+        st.rerun()
+
+    # Alta de un grupo nuevo (p. ej. 'Sopa' separada de la entrada, 'Postre'…).
+    st.markdown(titulo_seccion("➕ Nuevo grupo", style="margin-top:0.8rem;"),
+                unsafe_allow_html=True)
+    nonce = st.session_state.get("gpd_new_nonce", 0)
+    c1, c2, c3, c4 = st.columns([2.4, 0.9, 0.9, 1.6])
+    with c1:
+        net = st.text_input("Etiqueta del grupo", key=f"gpd_new_et_{nonce}",
+                            placeholder="P. ej. Sopa, Postre…")
+    with c2:
+        nmn = st.number_input("Mín", min_value=0, max_value=9, step=1, value=1,
+                              key=f"gpd_new_mn_{nonce}")
+    with c3:
+        nmx = st.number_input("Máx", min_value=1, max_value=9, step=1, value=1,
+                              key=f"gpd_new_mx_{nonce}")
+    with c4:
+        nrep = st.checkbox("Puede repetir la misma opción", key=f"gpd_new_rep_{nonce}")
+    if st.button("➕ Crear grupo", key="gpd_new_btn"):
+        err = crear_grupo_pd(net, net, min_sel=int(nmn), max_sel=int(nmx),
+                             permite_repetir=bool(nrep))
+        if err:
+            st.error(err)
+        else:
+            st.session_state["gpd_new_nonce"] = nonce + 1
+            flash("Grupo creado", "🧩")
+            st.rerun()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -659,6 +783,7 @@ def _int_aj(aj: dict, clave: str, default: int) -> int:
 
 
 def _render_ajustes():
+    from db import metodos_pago
     aj = cargar_ajustes()
     st.markdown('<div class="section-title">Precios y recargos</div>', unsafe_allow_html=True)
 
@@ -666,17 +791,68 @@ def _render_ajustes():
     with c1:
         pd_precio = st.number_input("Precio Plato del Día", min_value=0, step=1000,
                                     value=_int_aj(aj, "plato_dia_precio", 0), key="aj_plato_dia")
+    with c2:
         fee = st.number_input("Recargo de entrega (Domicilio / Para Llevar)", min_value=0,
                               step=500, value=_int_aj(aj, "fee_entrega", 0), key="aj_fee")
+    st.caption("El nº de acompañamientos (y todos los pasos del Plato del Día) se "
+               "configura en 🍽️ Plato del Día → 🧩 Grupos.")
+
+    # ── Identidad del restaurante (antes quemada en el código) ────────────────
+    st.markdown('<div class="section-title" style="margin-top:1rem;">Identidad del '
+                'restaurante</div>', unsafe_allow_html=True)
+    c1, c2, c3 = st.columns([1.6, 1.2, 1])
+    with c1:
+        r_nombre = st.text_input("Nombre", value=str(aj.get("restaurante_nombre") or ""),
+                                 key="aj_r_nombre",
+                                 help="Aparece en el panel, el saludo del bot y los recibos.")
     with c2:
-        n_ac = st.number_input("Acompañamientos a elegir", min_value=1, max_value=6, step=1,
-                               value=_int_aj(aj, "acompanamientos_n", 3), key="aj_n_ac")
+        r_dir = st.text_input("Dirección", value=str(aj.get("restaurante_direccion") or ""),
+                              key="aj_r_dir", help="Se imprime en el encabezado del recibo.")
+    with c3:
+        r_tel = st.text_input("Teléfono", value=str(aj.get("restaurante_telefono") or ""),
+                              key="aj_r_tel", help="Se imprime en el encabezado del recibo.")
+    saludo = st.text_area(
+        "Saludo del bot de WhatsApp", value=str(aj.get("bot_saludo") or ""),
+        key="aj_saludo", height=140,
+        help="Plantilla del mensaje de bienvenida. {nombre} = nombre del restaurante, "
+             "{link} = enlace a la carta digital. Déjalo vacío para usar el texto por defecto.")
+
+    # ── Métodos de pago (antes quemados: Nequi/Daviplata/Bre-B) ───────────────
+    st.markdown('<div class="section-title" style="margin-top:1rem;">Métodos de pago</div>',
+                unsafe_allow_html=True)
+    mp = metodos_pago()
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        mp_ef = st.checkbox("Acepta efectivo", value=bool(mp.get("efectivo", True)),
+                            key="aj_mp_ef")
+    with c2:
+        mp_txt = st.text_area(
+            "Transferencias aceptadas (una por línea: clave=Etiqueta, o solo la etiqueta)",
+            value="\n".join(f"{k}={v}" for k, v in mp.get("transferencia", {}).items()),
+            key="aj_mp_txt", height=100,
+            help="Ejemplos: nequi=Nequi · daviplata=Daviplata · breb=Bre-B. "
+                 "Deja el cuadro vacío si el restaurante no recibe transferencias.")
 
     if st.button("💾 Guardar ajustes", type="primary", key="btn_guardar_ajustes"):
+        transf = {}
+        for linea in (mp_txt or "").splitlines():
+            linea = linea.strip()
+            if not linea:
+                continue
+            k, _, v = linea.partition("=")
+            clave_mp = re.sub(r"[^a-z0-9_]", "", k.strip().lower()
+                              .replace(" ", "_").replace("ñ", "n"))[:20]
+            if clave_mp:
+                transf[clave_mp] = v.strip() or k.strip()
         guardar_ajustes({
             "plato_dia_precio": int(pd_precio),
             "fee_entrega": int(fee),
-            "acompanamientos_n": int(n_ac),
+            "restaurante_nombre": r_nombre.strip(),
+            "restaurante_direccion": r_dir.strip(),
+            "restaurante_telefono": r_tel.strip(),
+            "bot_saludo": saludo.strip(),
+            "metodos_pago": json.dumps(
+                {"efectivo": bool(mp_ef), "transferencia": transf}, ensure_ascii=False),
         })
         st.rerun()
 
@@ -686,8 +862,10 @@ def _render_ajustes():
         '<div style="color:#45443e; font-weight:600; margin-bottom:6px;">💡 Cómo se aplican</div>'
         'El <b>Plato del Día</b> cuesta lo mismo sin importar la combinación elegida.<br>'
         'Cada <b>Especial</b> tiene su propio precio (se edita en la pestaña ⭐ Especiales).<br>'
-        'El <b>recargo de entrega</b> se suma una vez a cada pedido de Domicilio o Para Llevar.'
-        '</div>',
+        'El <b>recargo de entrega</b> se suma una vez a cada pedido de Domicilio o Para Llevar.<br>'
+        'El <b>nombre</b> sale en el panel, el bot y los recibos; el <b>saludo</b> lo envía el '
+        'bot al primer mensaje; los <b>métodos de pago</b> alimentan el cobro en caja y la app '
+        'del cliente.</div>',
         unsafe_allow_html=True,
     )
 
@@ -763,11 +941,14 @@ def _render_inventario():
         else:
             # Un acordeón por grupo (colapsado): mantiene la pantalla compacta y solo se
             # despliega hacia abajo el grupo que el admin toca. El título lleva el resumen.
-            for grupo in GRUPOS_COMPONENTE:
+            etiquetas = etiquetas_grupos_pd()
+            for grupo in list(dict.fromkeys(
+                    [g["clave"] for g in cargar_grupos_pd(solo_activos=False)]
+                    + df_comp["grupo"].tolist())):
                 sub = df_comp[df_comp["grupo"] == grupo]
                 if sub.empty:
                     continue
-                with st.expander(f"{GRUPO_LABEL.get(grupo, grupo)} · {_resumen_inv(sub)}",
+                with st.expander(f"{etiquetas.get(grupo, grupo)} · {_resumen_inv(sub)}",
                                  expanded=False):
                     for _, row in sub.iterrows():
                         cid = int(row["id"])
@@ -1352,12 +1533,15 @@ def _render_readonly():
                 unsafe_allow_html=True,
             )
 
-    # 🍽️ Plato del Día (precio plano + componentes disponibles por grupo)
+    # 🍽️ Plato del Día (precio plano + componentes disponibles por grupo dinámico)
+    grupos_ro = cargar_grupos_pd()
+    reglas_ro = " · ".join(f"{g['etiqueta'].lower()}: {_regla_grupo(g)}"
+                           for g in grupos_ro if g["max_sel"] > 1 or g["min_sel"] == 0)
     st.markdown(
         f'<div style="background:#fafaf8; border:1px solid #ececec; border-radius:10px; '
         f'padding:0.7rem 1rem; font-size:0.85rem; color:#45443e; margin:0.5rem 0 1rem 0;">'
-        f'🍽️ <b>Plato del Día</b> · ${fmt_money(precio_plato_dia())} · '
-        f'elige {num_acompanamientos()} acompañamientos</div>',
+        f'🍽️ <b>Plato del Día</b> · ${fmt_money(precio_plato_dia())}'
+        f'{" · " + html.escape(reglas_ro) if reglas_ro else ""}</div>',
         unsafe_allow_html=True,
     )
     def _opt_label(o):
@@ -1374,14 +1558,15 @@ def _render_readonly():
         return f'{nom} <span style="color:{color}; font-weight:600;">({s})</span>'
 
     por_grupo = componentes_activos_por_grupo()
-    for grupo in GRUPOS_COMPONENTE:
+    etiquetas_ro = etiquetas_grupos_pd()
+    for grupo in por_grupo:
         opciones = por_grupo.get(grupo, [])
         if not opciones:
             continue
         nombres = " · ".join(_opt_label(o) for o in opciones)
         st.markdown(
             f'<div style="margin-bottom:0.6rem;"><span style="font-weight:600; color:#26262b;">'
-            f'{html.escape(GRUPO_LABEL.get(grupo, grupo))}:</span> '
+            f'{html.escape(etiquetas_ro.get(grupo, grupo))}:</span> '
             f'<span style="color:#6b6b64; font-size:0.88rem;">{nombres}</span></div>',
             unsafe_allow_html=True,
         )

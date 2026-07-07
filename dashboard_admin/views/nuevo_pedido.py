@@ -1,8 +1,9 @@
 """Vista de Nuevo pedido (POS de meseros): arma un pedido de MESA con la misma
 taxonomía de 4 secciones que la app del cliente.
 
-  #1 Plato del Día — configurable por plato (entrada / principio / proteína / N
-     acompañamientos con repetición). Si pides más de uno, se repite la config.
+  #1 Plato del Día — configurable por plato según los GRUPOS DINÁMICOS de
+     plato_dia_grupos (radio si max_sel==1, contadores si max_sel>1). Si pides
+     más de uno, se repite la config.
   #2 Especiales — precio plano + descripción.
   #3 A la carta — con sub-grupo de Bebidas.
   #4 Nota general del pedido.
@@ -20,10 +21,11 @@ import uuid
 import auth
 from db import (engine, titulo_seccion, cargar_mesas_activas, componentes_activos_por_grupo,
                 cargar_catalogo, disponibles, precio_plato_dia,
-                num_acompanamientos, fmt_money, flash, drain_toasts,
+                cargar_grupos_pd, etiquetas_grupos_pd, fmt_money, flash, drain_toasts,
                 fee_entrega, upsert_cliente, aplicar_inventario, SinStock,
                 siguiente_num_dia, resumen_disponibilidad_componentes, agotado_por_stock,
-                stock_int, STOCK_BAJO, GRUPO_LABEL)
+                stock_int, STOCK_BAJO)
+from utils.items import componentes_lineas
 from utils.print_jobs import enqueue_comanda, badge_agente_html, badge_fallos_html, estado_agente
 
 
@@ -158,23 +160,13 @@ def _catalogo_seccion(df_cat, categoria):
 
 
 def _cfg_text(it) -> str:
-    """Configuración de un plato del día como texto corto para el resumen."""
-    cfg = it.get("config") or {}
-    partes = [cfg.get("entrada"), cfg.get("principio"), cfg.get("proteina")]
-    ac = cfg.get("acompanamientos") or []
-    if ac:
-        orden, cnt = [], {}
-        for a in ac:
-            if a not in cnt:
-                orden.append(a)
-            cnt[a] = cnt.get(a, 0) + 1
-        partes.append(", ".join(f"{cnt[a]}x {a}" for a in orden))
-    if cfg.get("bebida"):
-        partes.append(str(cfg.get("bebida")))
-    txt = " · ".join(p for p in partes if p)
-    if it.get("nota"):
-        txt += f" · Nota: {it['nota']}"
-    return txt
+    """Configuración de un plato del día como texto corto para el resumen. Delegado a
+    utils.items.componentes_lineas: entiende el formato nuevo (config['sel']) y el
+    legado con la misma salida."""
+    partes = []
+    for et, v in componentes_lineas(it):
+        partes.append(f"Nota: {v}" if et == "Nota" else str(v))
+    return " · ".join(partes)
 
 
 # ── Secciones del configurador ──────────────────────────────────────────────────
@@ -330,13 +322,14 @@ def _render_alerta_cocina():
     ago, bajos = r["agotados"], r["bajos"]
     if not ago and not bajos:
         return
+    etiquetas = etiquetas_grupos_pd()
     bloques = []
     if ago:
         chips = " ".join(
             f'<span style="display:inline-block; background:#fee2e2; color:#991b1b; '
             f'border:1px solid #fecaca; border-radius:999px; padding:2px 10px; margin:2px; '
             f'font-size:0.78rem; font-weight:600;">'
-            f'{html.escape(GRUPO_LABEL.get(a["grupo"], a["grupo"]))}: {html.escape(a["nombre"])}</span>'
+            f'{html.escape(etiquetas.get(a["grupo"], a["grupo"]))}: {html.escape(a["nombre"])}</span>'
             for a in ago)
         bloques.append(f'<div style="margin-bottom:4px;">'
                        f'<b style="color:#991b1b;">🚫 Agotado:</b> {chips}</div>')
@@ -358,11 +351,61 @@ def _render_alerta_cocina():
     )
 
 
-def _seccion_plato_dia(comp, precio, n):
-    """Configurador del Plato del Día. Devuelve (items, ok)."""
+def _selector_multi(uid, g, opciones):
+    """Contador por opción para un grupo de selección MÚLTIPLE (max_sel > 1, p. ej. los
+    acompañamientos). Respeta min_sel/max_sel y, si el grupo no permite repetir, limita
+    cada opción a 1. Devuelve (lista de nombres con repetición, ok)."""
+    clave, n_min, n_max = g["clave"], g["min_sel"], g["max_sel"]
+    cuentas = st.session_state.setdefault(f"pdpos_{uid}_multi_{clave}", {})
+    elegidos = sum(cuentas.values())
+    rango = f"{elegidos}/{n_max}" if n_min == n_max else f"{elegidos} de {n_min}-{n_max}"
+    st.markdown(_grupo_label(f"{g['etiqueta']} ({rango})"), unsafe_allow_html=True)
+    for a in opciones:
+        aid = str(a["id"])
+        stock_a = a.get("stock")
+        agot = agotado_por_stock(stock_a)
+        c = int(cuentas.get(aid, 0))
+        with st.container(key=f"fila_item_pdmulti_{clave}_{uid}_{aid}"):
+            ac1, ac2, ac3, ac4 = st.columns([3, 1, 1, 1])
+            with ac1:
+                color = "#a3a39b" if agot else "#26262b"
+                st.markdown(f'<div style="padding:4px 0;"><span class="item-nombre" '
+                            f'style="font-size:0.88rem; color:{color};">'
+                            f'{html.escape(str(a["nombre"]))}{_stock_suffix(stock_a)}</span></div>',
+                            unsafe_allow_html=True)
+            with ac2:
+                if st.button("−", key=f"pdpos_{uid}_mm_{clave}_{aid}", use_container_width=True):
+                    if c > 0:
+                        cuentas[aid] = c - 1
+                        if cuentas[aid] == 0:
+                            del cuentas[aid]
+                    st.rerun(scope="fragment")
+            with ac3:
+                st.markdown(f'<div style="text-align:center; padding:4px 0; font-weight:600;">{c}</div>',
+                            unsafe_allow_html=True)
+            with ac4:
+                # Tope: máximo del grupo, agotado, stock del componente, o repetición
+                # no permitida por el grupo.
+                tope_stock = (stock_a is not None and c >= int(stock_a))
+                tope_rep = (not g["permite_repetir"] and c >= 1)
+                if st.button("+", key=f"pdpos_{uid}_mp_{clave}_{aid}", use_container_width=True,
+                             disabled=(elegidos >= n_max or agot or tope_stock or tope_rep)):
+                    cuentas[aid] = c + 1
+                    st.rerun(scope="fragment")
+    lista = []
+    for a in opciones:
+        lista += [a["nombre"]] * int(cuentas.get(str(a["id"]), 0))
+    return lista, (n_min <= sum(cuentas.values()) <= n_max)
+
+
+def _seccion_plato_dia(comp, precio, grupos):
+    """Configurador del Plato del Día con GRUPOS DINÁMICOS (plato_dia_grupos): un paso
+    por grupo activo, radio-botones si max_sel==1 y contadores si max_sel>1. Escribe la
+    config en el formato nuevo {'sel': [{k, l, v, inv?}, ...]}. Devuelve (items, ok)."""
     st.markdown(titulo_seccion('🍛 Plato del Día'), unsafe_allow_html=True)
-    faltan = [g for g in ("entrada", "principio", "proteina", "acompanamiento") if not comp.get(g)]
-    if faltan:
+    # Disponibilidad: todos los grupos OBLIGATORIOS (min_sel>=1) necesitan opciones vivas.
+    faltan = [g["etiqueta"] for g in grupos if g["min_sel"] >= 1 and not comp.get(g["clave"])]
+    if not grupos or faltan:
         st.markdown('<p style="color:#a3a39b; font-size:0.85rem;">No disponible hoy: faltan '
                     'opciones activas. Configúralas en 🍔 Menú → Plato del Día.</p>',
                     unsafe_allow_html=True)
@@ -371,7 +414,7 @@ def _seccion_plato_dia(comp, precio, n):
     # Alerta proactiva de cocina (agotados / quedan pocos) ANTES de armar el plato.
     _render_alerta_cocina()
 
-    st.caption(f"${fmt_money(precio)} c/u · elige {n} acompañamientos (puedes repetir)")
+    st.caption(f"${fmt_money(precio)} c/u")
 
     instancias = st.session_state.setdefault("pd_instancias", [])
     if st.button("➕ Agregar plato del día", key="pdpos_add", use_container_width=True):
@@ -392,72 +435,46 @@ def _seccion_plato_dia(comp, precio, n):
                 _eliminar_plato_dia(uid)
                 st.rerun(scope="fragment")
 
-        # Selectores con porciones restantes; las opciones en 0 quedan deshabilitadas.
-        entrada   = _selector_grupo(uid, "entrada",   comp["entrada"],   "Entrada")
-        # Principio admite 'mitad y mitad' (mixto): principio_mixto trae los dos componentes
-        # reales para que el inventario descuente ambos; principio es la etiqueta a mostrar.
-        principio, principio_mixto = _selector_principio(uid, comp["principio"], "Principio")
-        proteina  = _selector_grupo(uid, "proteina",  comp["proteina"],  "Carnes o Proteína")
-        # Bebida del día (incluida en el precio plano): solo se ofrece si el restaurante
-        # configuró opciones de bebida para el Plato del Día. "Ninguno" permite omitirla.
-        bebida = (_selector_grupo(uid, "bebida", comp["bebida"], "Bebida")
-                  if comp.get("bebida") else None)
-
-        cuentas = st.session_state.setdefault(f"pdpos_{uid}_acomp", {})
-        elegidos = sum(cuentas.values())
-        st.markdown(_grupo_label(f"Acompañamientos ({elegidos}/{n})"), unsafe_allow_html=True)
-        for a in comp["acompanamiento"]:
-            aid = str(a["id"])
-            stock_a = a.get("stock")
-            agot = agotado_por_stock(stock_a)
-            c = int(cuentas.get(aid, 0))
-            with st.container(key=f"fila_item_pdacomp_{uid}_{aid}"):
-                ac1, ac2, ac3, ac4 = st.columns([3, 1, 1, 1])
-                with ac1:
-                    color = "#a3a39b" if agot else "#26262b"
-                    st.markdown(f'<div style="padding:4px 0;"><span class="item-nombre" '
-                                f'style="font-size:0.88rem; color:{color};">'
-                                f'{html.escape(str(a["nombre"]))}{_stock_suffix(stock_a)}</span></div>',
+        sel_cfg = []
+        for g in grupos:
+            clave = g["clave"]
+            opciones = comp.get(clave) or []
+            if not opciones:
+                continue  # grupo opcional sin opciones hoy → se omite el paso
+            if g["max_sel"] == 1:
+                # Selectores con porciones restantes; opciones en 0 deshabilitadas.
+                # El grupo 'principio' conserva el 'mitad y mitad' (mixto): 'inv' lleva
+                # los dos componentes reales para que el inventario descuente ambos.
+                mixto = None
+                if clave == "principio":
+                    valor, mixto = _selector_principio(uid, opciones, g["etiqueta"])
+                else:
+                    valor = _selector_grupo(uid, clave, opciones, g["etiqueta"],
+                                            default_ninguno=(g["min_sel"] == 0))
+                if valor:
+                    e = {"k": clave, "l": g["etiqueta"], "v": [valor]}
+                    if mixto:
+                        e["inv"] = mixto
+                    sel_cfg.append(e)
+            else:
+                lista, ok_multi = _selector_multi(uid, g, opciones)
+                if not ok_multi:
+                    ok = False
+                    regla = (f"exactamente {g['max_sel']}"
+                             if g["min_sel"] == g["max_sel"]
+                             else f"entre {g['min_sel']} y {g['max_sel']}")
+                    st.markdown(f'<p style="color:#b45309; font-size:0.8rem;">Elige {regla} '
+                                f'de {html.escape(g["etiqueta"])} para el Plato #{pos+1}.</p>',
                                 unsafe_allow_html=True)
-                with ac2:
-                    if st.button("−", key=f"pdpos_{uid}_acm_{aid}", use_container_width=True):
-                        if c > 0:
-                            cuentas[aid] = c - 1
-                            if cuentas[aid] == 0:
-                                del cuentas[aid]
-                        st.rerun(scope="fragment")
-                with ac3:
-                    st.markdown(f'<div style="text-align:center; padding:4px 0; font-weight:600;">{c}</div>',
-                                unsafe_allow_html=True)
-                with ac4:
-                    # Tope: ya se eligieron n, o el componente está agotado, o ya se tomaron
-                    # todas sus porciones rastreadas en este plato.
-                    tope_stock = (stock_a is not None and c >= int(stock_a))
-                    if st.button("+", key=f"pdpos_{uid}_acp_{aid}", use_container_width=True,
-                                 disabled=(elegidos >= n or agot or tope_stock)):
-                        cuentas[aid] = c + 1
-                        st.rerun(scope="fragment")
+                if lista:
+                    sel_cfg.append({"k": clave, "l": g["etiqueta"], "v": lista})
 
         nota = st.text_input("Nota", key=f"pdpos_{uid}_nota", label_visibility="collapsed",
                              placeholder="Nota para este plato (opcional)")
 
-        acomp_list = []
-        for a in comp["acompanamiento"]:
-            acomp_list += [a["nombre"]] * int(cuentas.get(str(a["id"]), 0))
-        if elegidos != n:
-            ok = False
-            st.markdown(f'<p style="color:#b45309; font-size:0.8rem;">Elige exactamente {n} '
-                        f'acompañamientos para el Plato #{pos+1}.</p>', unsafe_allow_html=True)
-
-        cfg = {"entrada": entrada, "principio": principio, "proteina": proteina,
-               "acompanamientos": acomp_list}
-        if principio_mixto:
-            cfg["principio_mixto"] = principio_mixto
-        if bebida:
-            cfg["bebida"] = bebida
         plates.append({
             "tipo": "plato_dia", "nombre": "Plato del Día", "precio": int(precio),
-            "cantidad": 1, "config": cfg, "nota": (nota or "").strip(),
+            "cantidad": 1, "config": {"sel": sel_cfg}, "nota": (nota or "").strip(),
         })
     return plates, ok
 
@@ -542,8 +559,14 @@ def _seccion_con_extras(productos, tipo, titulo, comp, con_desc=False, mostrar=T
             st.markdown('<p style="color:#a3a39b; font-size:0.85rem;">Sin opciones disponibles.</p>',
                         unsafe_allow_html=True)
         return []
+    # Los extras incluidos siguen anclados a los grupos con clave 'entrada'/'bebida':
+    # si el restaurante los desactivó o no existen, la sección se comporta como
+    # catálogo simple (sin selectores).
     ofrece_entrada = bool(comp.get("entrada"))
     ofrece_bebida  = bool(comp.get("bebida"))
+    etiquetas = etiquetas_grupos_pd()
+    et_entrada = etiquetas.get("entrada", "Entrada")
+    et_bebida = etiquetas.get("bebida", "Bebida")
     carrito = st.session_state["carrito_manual"]
     elegidos = []
     for p in productos:
@@ -591,37 +614,38 @@ def _seccion_con_extras(productos, tipo, titulo, comp, con_desc=False, mostrar=T
                              "precio": int(p["precio"]), "cantidad": qty})
             continue
 
-        # Con extras: una config por unidad. Cabecera "Unidad #i" solo si hay 2 o más.
+        # Con extras: una config por unidad (formato nuevo 'sel'). Cabecera "Unidad #i"
+        # solo si hay 2 o más.
         for u in range(qty):
             uid = f"{tipo}_{pid}_{u}"
-            cfg = {}
+            sel_cfg = []
             if mostrar:
                 if qty > 1:
                     st.markdown(_grupo_label(f'{html.escape(str(p["nombre"]))} · Unidad #{u+1}'),
                                 unsafe_allow_html=True)
                 if ofrece_entrada:
-                    ent = _selector_grupo(uid, "entrada", comp["entrada"], "Entrada (incluida)",
-                                          default_ninguno=True)
+                    ent = _selector_grupo(uid, "entrada", comp["entrada"],
+                                          f"{et_entrada} (incluida)", default_ninguno=True)
                     if ent:
-                        cfg["entrada"] = ent
+                        sel_cfg.append({"k": "entrada", "l": et_entrada, "v": [ent]})
                 if ofrece_bebida:
-                    beb = _selector_grupo(uid, "bebida", comp["bebida"], "Bebida (incluida)",
-                                          default_ninguno=True)
+                    beb = _selector_grupo(uid, "bebida", comp["bebida"],
+                                          f"{et_bebida} (incluida)", default_ninguno=True)
                     if beb:
-                        cfg["bebida"] = beb
+                        sel_cfg.append({"k": "bebida", "l": et_bebida, "v": [beb]})
             else:
                 if ofrece_entrada:
                     ent = _peek_selector_grupo(uid, "entrada", comp["entrada"], default_ninguno=True)
                     if ent:
-                        cfg["entrada"] = ent
+                        sel_cfg.append({"k": "entrada", "l": et_entrada, "v": [ent]})
                 if ofrece_bebida:
                     beb = _peek_selector_grupo(uid, "bebida", comp["bebida"], default_ninguno=True)
                     if beb:
-                        cfg["bebida"] = beb
+                        sel_cfg.append({"k": "bebida", "l": et_bebida, "v": [beb]})
             item = {"tipo": tipo, "id": pid, "nombre": p["nombre"],
                     "precio": int(p["precio"]), "cantidad": 1}
-            if cfg:
-                item["config"] = cfg
+            if sel_cfg:
+                item["config"] = {"sel": sel_cfg}
             elegidos.append(item)
     return elegidos
 
@@ -727,7 +751,7 @@ def _form_fragment():
     df_cat = cargar_catalogo()
     comp   = componentes_activos_por_grupo()
     precio_pd = precio_plato_dia()
-    n_ac      = num_acompanamientos()
+    grupos_pd = cargar_grupos_pd()
 
     col_form, col_resumen = st.columns([3, 2])
 
@@ -762,7 +786,7 @@ def _form_fragment():
                 cli_dir = (st.text_area("Dirección de entrega", key="ent_dir",
                                         placeholder="Dirección + referencias") or "").strip()
 
-        plates, ok_pd = _seccion_plato_dia(comp, precio_pd, n_ac)
+        plates, ok_pd = _seccion_plato_dia(comp, precio_pd, grupos_pd)
 
         # Mesero: cada categoría de catálogo (Plato del Día queda fuera) es un acordeón
         # plegado por defecto para no obligar a bajar por toda la carta en el celular;

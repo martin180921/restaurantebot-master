@@ -1,8 +1,13 @@
-"""Formateo compartido de los items de un pedido (modelo por secciones + legado).
+"""Formateo compartido de los items de un pedido (modelo por secciones + legados).
 
 Un elemento de `pedidos.items` (JSON) es uno de:
-  - Plato del Día: {tipo:'plato_dia', nombre, precio, cantidad:1,
-                    config:{entrada, principio, proteina, acompanamientos:[...]}, nota}
+  - Plato del Día (formato ACTUAL, grupos dinámicos):
+      {tipo:'plato_dia', nombre, precio, cantidad:1,
+       config:{sel:[{k:clave_grupo, l:etiqueta, v:[elegidos], inv:[reales]?}, ...]}, nota}
+    'v' es lo que se muestra/imprime; 'inv' (opcional) son los componentes reales
+    que descuenta el inventario cuando difieren (p. ej. principio mixto ½ y ½).
+  - Plato del Día (formato LEGADO, pedidos históricos):
+      {tipo:'plato_dia', ..., config:{entrada, principio, proteina, acompanamientos:[...]}}
   - Especial / a la carta / bebida: {tipo:'especial'|'item'|'bebida', id, nombre, precio, cantidad}
   - Legado (sin 'tipo'): {id, nombre, precio, cantidad}  → se trata como item simple.
 
@@ -68,25 +73,40 @@ def _agrupa_acomp(acomp) -> str:
 
 def componentes_lineas(item):
     """[[etiqueta, valor], ...] del desglose de un item según su config:
-      · plato_dia → entrada/principio/proteína/acomp + bebida + nota.
-      · especial  → entrada + bebida del Plato del Día INCLUIDAS (opcionales); los demás
-                    grupos no existen en su config, así que se omiten solos.
+      · formato ACTUAL  → config['sel'] (grupos dinámicos, auto-descriptivo: la
+                          etiqueta viaja embebida en 'l', sin depender de la BD).
+      · formato LEGADO  → claves fijas entrada/principio/proteína/acomp/bebida
+                          (pedidos históricos: renderizan igual para siempre).
+      · especial        → entrada + bebida INCLUIDAS (opcionales); los demás
+                          grupos no existen en su config, así que se omiten solos.
     Listas (no tuplas) para serializar limpio a JSON. [] si el item no trae config
     (especial sin extras, a la carta, bebida o legado)."""
     cfg = item.get("config") or {}
     if not cfg:
         return []
     out = []
-    for g in ("entrada", "principio", "proteina"):
-        v = cfg.get(g)
-        if v:
-            out.append([GRUPO_LABEL[g], str(v)])
-    acomp = _agrupa_acomp(cfg.get("acompanamientos"))
-    if acomp:
-        out.append([GRUPO_LABEL["acompanamiento"], acomp])
-    beb = cfg.get("bebida")
-    if beb:
-        out.append([GRUPO_LABEL["bebida"], str(beb)])
+    sel = cfg.get("sel")
+    if isinstance(sel, list):
+        for e in sel:
+            if not isinstance(e, dict):
+                continue
+            nombres = [str(x) for x in (e.get("v") or []) if x]
+            if not nombres:
+                continue
+            etiqueta = str(e.get("l") or e.get("k") or "?")
+            valor = nombres[0] if len(nombres) == 1 else _agrupa_acomp(nombres)
+            out.append([etiqueta, valor])
+    else:
+        for g in ("entrada", "principio", "proteina"):
+            v = cfg.get(g)
+            if v:
+                out.append([GRUPO_LABEL[g], str(v)])
+        acomp = _agrupa_acomp(cfg.get("acompanamientos"))
+        if acomp:
+            out.append([GRUPO_LABEL["acompanamiento"], acomp])
+        beb = cfg.get("bebida")
+        if beb:
+            out.append([GRUPO_LABEL["bebida"], str(beb)])
     nota = str(item.get("nota") or "").strip()
     if nota:
         out.append(["Nota", nota])

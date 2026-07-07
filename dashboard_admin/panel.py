@@ -13,6 +13,7 @@ su propio módulo dentro de views/ para poder trabajarlas de forma independiente
     - views/resumen.py, cancelaciones.py, reporte_personal.py → pestañas del entorno de
       Administración (🔐, solo admin, al fondo del menú lateral; ver _render_admin)
 """
+import html as _html
 import streamlit as st
 import streamlit.components.v1
 from dotenv import load_dotenv
@@ -24,13 +25,15 @@ import mesero_keys
 import remember
 from views import (pedidos, monitor_mesas, nuevo_pedido, menu, mesas, resumen,
                    caja, cancelaciones, meseros, reporte_personal)
-from db import fecha_larga, ahora_bogota
+from db import fecha_larga, ahora_bogota, restaurante_nombre
 
 load_dotenv()
 
 # ── Config ─────────────────────────────────────────────────────────────────────
+# El nombre del restaurante vive en 'ajustes' (editable en 🍔 Menú → ⚙️ Ajustes);
+# el fallback "Restaurante" cubre la BD sin sembrar.
 st.set_page_config(
-    page_title="Restaurante · Panel",
+    page_title=f"{restaurante_nombre()} · Panel",
     page_icon="🍽️",
     layout="wide",
     initial_sidebar_state="collapsed"
@@ -231,9 +234,9 @@ if not st.session_state["autenticado"]:
     st.markdown("<div style='height: 8vh'></div>", unsafe_allow_html=True)
     col_c, col_i, col_c2 = st.columns([1, 2, 1])
     with col_i:
-        st.markdown("""
+        st.markdown(f"""
         <div style='text-align:center; margin-bottom: 2rem;'>
-          <div style='font-family:"DM Sans",sans-serif; font-size:1.4rem; font-weight:300; letter-spacing:0.16em; text-transform:uppercase; color:#26262b;'>Restaurante</div>
+          <div style='font-family:"DM Sans",sans-serif; font-size:1.4rem; font-weight:300; letter-spacing:0.16em; text-transform:uppercase; color:#26262b;'>{_html.escape(restaurante_nombre())}</div>
           <div style='font-size:0.82rem; color:#a3a39b; margin-top:6px;'>Panel de operaciones · Acceso restringido</div>
         </div>
         """, unsafe_allow_html=True)
@@ -845,7 +848,7 @@ def _render_mobile_shell():
 
     top_l, top_r = st.columns([3, 1])
     with top_l:
-        st.markdown('<div class="nav-brand">Restaurante</div>'
+        st.markdown(f'<div class="nav-brand">{_html.escape(restaurante_nombre())}</div>'
                     '<div class="nav-brand-sub">Mesero</div>', unsafe_allow_html=True)
     with top_r:
         if st.button("Salir", key="btn_logout_m", use_container_width=True):
@@ -880,7 +883,7 @@ def _render_desktop_shell():
             # y darle el acabado de panel claro sin tocar otros contenedores con borde.
             st.markdown(
                 '<span class="nav-box"></span>'
-                '<div class="nav-brand">Restaurante</div>'
+                f'<div class="nav-brand">{_html.escape(restaurante_nombre())}</div>'
                 f'<div class="nav-brand-sub">{fecha_larga(ahora_bogota())}</div>',
                 unsafe_allow_html=True,
             )

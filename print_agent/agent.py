@@ -135,11 +135,41 @@ def _imprimir_recargo_entrega(printer, payload: dict) -> None:
 
 
 # Billeteras de transferencia (submetodo del payload → etiqueta legible en el ticket).
+# FALLBACK: el panel ya manda 'submetodo_label' con la etiqueta configurada por el
+# restaurante; este mapa solo cubre payloads de paneles/pedidos anteriores.
 SUBMETODO_LABEL = {
     "nequi":     "Nequi",
     "daviplata": "Daviplata",
     "breb":      "Bre-B",
 }
+
+
+def _submetodo_etiqueta(d: dict):
+    """Etiqueta de la billetera de un payload/tramo: primero la que manda el panel
+    ('submetodo_label', configurable por restaurante), si no el mapa clásico."""
+    lbl = str(d.get("submetodo_label") or "").strip()
+    if lbl:
+        return lbl
+    return SUBMETODO_LABEL.get(str(d.get("submetodo") or "").lower())
+
+
+def _imprimir_encabezado_restaurante(printer, payload: dict) -> None:
+    """Identidad del restaurante en el ticket (nombre/dirección/teléfono): la manda el
+    panel desde 'ajustes' (replicabilidad). Payloads de paneles anteriores no traen
+    estas claves → no se imprime nada (compatible hacia atrás). Deja align=center."""
+    nombre = str(payload.get("restaurante_nombre") or "").strip()
+    direccion = str(payload.get("restaurante_direccion") or "").strip()
+    tel = str(payload.get("restaurante_telefono") or "").strip()
+    if not (nombre or direccion or tel):
+        return
+    printer.set(align="center", bold=True)
+    if nombre:
+        printer.text(f"{nombre}\n")
+    printer.set(bold=False)
+    if direccion:
+        printer.text(f"{direccion}\n")
+    if tel:
+        printer.text(f"Tel: {tel}\n")
 
 
 def cargar_config(requeridas=("DATABASE_URL", "RESTAURANTE_ID", "PRINTER_CONNECTION")) -> dict:
@@ -305,6 +335,7 @@ def imprimir_recibo(printer, payload: dict) -> None:
     printer.set(font="a", align="center", bold=True, double_height=True, double_width=True)
     printer.text("RECIBO\n")
     printer.set(align="center", bold=False, double_height=False, double_width=False)
+    _imprimir_encabezado_restaurante(printer, payload)   # nombre/dir/tel del restaurante
     mesa = payload.get("mesa") or "—"
     printer.text(f"{mesa}\n")
     printer.text(datetime.now().strftime("%d/%m/%Y  %H:%M") + "\n")
@@ -340,7 +371,7 @@ def imprimir_recibo(printer, payload: dict) -> None:
         for tramo in desglose:
             etiqueta = str(tramo.get("metodo", "")).capitalize()
             if tramo.get("metodo") == "transferencia":
-                sub = SUBMETODO_LABEL.get(str(tramo.get("submetodo") or "").lower())
+                sub = _submetodo_etiqueta(tramo)
                 if sub:
                     etiqueta = f"{etiqueta} · {sub}"
             printer.text(linea_precio(f"  {etiqueta}", tramo.get("monto", 0), ANCHO_B) + "\n")
@@ -357,7 +388,7 @@ def imprimir_recibo(printer, payload: dict) -> None:
         # método: 'Pagado (Transferencia · Nequi)'. En efectivo queda 'Pagado (Efectivo)'.
         metodo = str(payload.get("metodo", "")).capitalize()
         if payload.get("metodo") == "transferencia":
-            sub = SUBMETODO_LABEL.get(str(payload.get("submetodo") or "").lower())
+            sub = _submetodo_etiqueta(payload)
             if sub:
                 metodo = f"{metodo} · {sub}"
         printer.text(linea_precio(f"Pagado ({metodo})", payload.get("pagado", 0), ANCHO_B) + "\n")
@@ -451,6 +482,7 @@ def imprimir_prerecibo(printer, payload: dict) -> None:
     printer.text("PRERECIBO\n")
     printer.set(align="center", bold=False, double_height=False, double_width=False)
     printer.text("** NO ES FACTURA VALIDA **\n")
+    _imprimir_encabezado_restaurante(printer, payload)   # nombre/dir/tel del restaurante
     # 2) MESA siempre visible (requisito): de qué mesa proviene la cuenta.
     printer.set(bold=True)
     printer.text(f"Mesa: {payload.get('mesa') or '—'}\n")

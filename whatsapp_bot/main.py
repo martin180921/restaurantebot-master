@@ -290,6 +290,77 @@ def init_db():
             ON CONFLICT (clave) DO NOTHING
         """))
 
+        # Identidad/branding del restaurante y métodos de pago (replicabilidad):
+        # los defaults son los valores que antes estaban quemados en el código.
+        # Editables desde el panel (🍔 Menú → ⚙️ Ajustes). 'bot_saludo' es una
+        # plantilla con {nombre} y {link}; 'metodos_pago' es JSON con el switch de
+        # efectivo y el mapa clave→etiqueta de las transferencias aceptadas.
+        for _k, _v in {
+            "restaurante_nombre":    "RestauranteBOT",
+            "restaurante_direccion": "",
+            "restaurante_telefono":  "",
+            "bot_saludo": (
+                "¡Hola! 👋 Bienvenido a *{nombre}*.\n\n"
+                "📲 Haz tu pedido a domicilio o para llevar desde nuestra carta digital:\n"
+                "{link}\n\n"
+                "Elige cómo lo quieres, arma tu pedido y nosotros nos encargamos. "
+                "¡Gracias!"
+            ),
+            "metodos_pago": (
+                '{"efectivo": true, "transferencia": '
+                '{"nequi": "Nequi", "daviplata": "Daviplata", "breb": "Bre-B"}}'
+            ),
+            "moneda_simbolo": "$",
+        }.items():
+            conn.execute(text(
+                "INSERT INTO ajustes (clave, valor) VALUES (:k, :v) "
+                "ON CONFLICT (clave) DO NOTHING"
+            ), {"k": _k, "v": _v})
+
+        # ── Grupos del Plato del Día como DATOS (replicabilidad) ───────────────
+        # Antes los grupos (entrada/principio/proteina/acompanamiento/bebida)
+        # estaban quemados en el código; ahora cada restaurante define los suyos.
+        # 'clave' es el mismo valor de menu_componentes.grupo (sin FK dura: los
+        # componentes existentes siguen mapeando solos). min_sel=0 → grupo
+        # opcional; max_sel>1 → multi-selección; permite_repetir → se puede pedir
+        # 2x la misma opción (acompañamientos).
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS plato_dia_grupos (
+                id              SERIAL  PRIMARY KEY,
+                clave           TEXT    UNIQUE NOT NULL,
+                etiqueta        TEXT    NOT NULL,
+                orden           INTEGER NOT NULL DEFAULT 0,
+                activo          BOOLEAN NOT NULL DEFAULT TRUE,
+                min_sel         INTEGER NOT NULL DEFAULT 1,
+                max_sel         INTEGER NOT NULL DEFAULT 1,
+                permite_repetir BOOLEAN NOT NULL DEFAULT FALSE
+            )
+        """))
+        # Seed one-time con la semántica EXACTA del código anterior: radio único
+        # en entrada/principio/proteína, bebida opcional, y N acompañamientos
+        # tomados del ajuste 'acompanamientos_n' VIGENTE — así la migración
+        # respeta lo que cada restaurante ya tenía configurado.
+        if not _ya_sembrado('seed_pd_grupos'):
+            _n_acomp = conn.execute(text(
+                "SELECT valor FROM ajustes WHERE clave = 'acompanamientos_n'"
+            )).scalar()
+            try:
+                _n_acomp = max(1, int(_n_acomp))
+            except (TypeError, ValueError):
+                _n_acomp = 3
+            conn.execute(text("""
+                INSERT INTO plato_dia_grupos
+                    (clave, etiqueta, orden, min_sel, max_sel, permite_repetir)
+                VALUES
+                    ('entrada',        'Entrada',           1, 1,  1,  FALSE),
+                    ('principio',      'Principio',         2, 1,  1,  FALSE),
+                    ('proteina',       'Carnes o Proteína', 3, 1,  1,  FALSE),
+                    ('acompanamiento', 'Acompañamientos',   4, :n, :n, TRUE),
+                    ('bebida',         'Bebida',            5, 0,  1,  FALSE)
+                ON CONFLICT (clave) DO NOTHING
+            """), {"n": _n_acomp})
+            _marcar_sembrado('seed_pd_grupos')
+
         # Base de clientes: la alimenta la app pública (tel como identidad).
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS clientes (
@@ -358,23 +429,63 @@ async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
 
     numero = params.get("From", "")
     if numero:
-        # C4: la llamada a Twilio es bloqueante; la lanzamos en segundo plano para
-        # no frenar el event loop ni demorar el 200 (si tardamos, Twilio reintenta
-        # y se enviaban bienvenidas duplicadas).
-        background_tasks.add_task(enviar_mensaje, numero, mensaje_bienvenida(numero))
+        # C4: la llamada a Twilio es bloqueante (y ahora el saludo puede leer la
+        # BD); todo va en segundo plano para no frenar el event loop ni demorar
+        # el 200 (si tardamos, Twilio reintenta y se enviaban bienvenidas
+        # duplicadas).
+        background_tasks.add_task(_enviar_bienvenida, numero)
     return {"status": "ok"}
+
+
+# ── Branding configurable (nombre y saludo viven en 'ajustes') ─────────────────
+# El webhook NUNCA debe dejar de responder por culpa de la BD: si la lectura
+# falla se usa el texto por defecto (el que antes estaba quemado). Cache en
+# memoria de 60s para no golpear la BD en cada mensaje.
+_NOMBRE_DEFAULT = "RestauranteBOT"
+_SALUDO_DEFAULT = (
+    "¡Hola! 👋 Bienvenido a *{nombre}*.\n\n"
+    "📲 Haz tu pedido a domicilio o para llevar desde nuestra carta digital:\n"
+    "{link}\n\n"
+    "Elige cómo lo quieres, arma tu pedido y nosotros nos encargamos. "
+    "¡Gracias!"
+)
+_branding_cache = {"ts": 0.0, "nombre": _NOMBRE_DEFAULT, "saludo": _SALUDO_DEFAULT}
+
+
+def _branding():
+    """(nombre, saludo) desde 'ajustes', con cache de 60s y fallback quemado."""
+    if time.time() - _branding_cache["ts"] > 60:
+        try:
+            with engine.connect() as conn:
+                rows = conn.execute(text(
+                    "SELECT clave, valor FROM ajustes "
+                    "WHERE clave IN ('restaurante_nombre', 'bot_saludo')"
+                )).fetchall()
+            d = {r[0]: r[1] for r in rows}
+            nombre = (d.get("restaurante_nombre") or "").strip()
+            _branding_cache["nombre"] = nombre or _NOMBRE_DEFAULT
+            _branding_cache["saludo"] = d.get("bot_saludo") or _SALUDO_DEFAULT
+        except Exception as e:
+            print(f"[WARN] No se pudo leer el branding de 'ajustes': {e}")
+        # ts se actualiza también si falló: reintenta en 60s, no en cada mensaje.
+        _branding_cache["ts"] = time.time()
+    return _branding_cache["nombre"], _branding_cache["saludo"]
 
 
 def mensaje_bienvenida(numero: str) -> str:
     tel  = numero.replace("whatsapp:", "").strip()
     link = f"{APP_CLIENTE_URL}/?tel={urllib.parse.quote(tel)}"
-    return (
-        "¡Hola! 👋 Bienvenido a *RestauranteBOT*.\n\n"
-        "📲 Haz tu pedido a domicilio o para llevar desde nuestra carta digital:\n"
-        f"{link}\n\n"
-        "Elige cómo lo quieres, arma tu pedido y nosotros nos encargamos. "
-        "¡Gracias!"
-    )
+    nombre, saludo = _branding()
+    try:
+        return saludo.format(nombre=nombre, link=link)
+    except (KeyError, IndexError, ValueError):
+        # Plantilla malformada guardada desde el panel (llaves sueltas, campos
+        # desconocidos): degradar al saludo por defecto antes que no responder.
+        return _SALUDO_DEFAULT.format(nombre=nombre, link=link)
+
+
+def _enviar_bienvenida(numero: str):
+    enviar_mensaje(numero, mensaje_bienvenida(numero))
 
 
 # ── Enviar mensaje WhatsApp ────────────────────────────────────────────────────
