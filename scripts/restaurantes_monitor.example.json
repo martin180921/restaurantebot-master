@@ -1,0 +1,7 @@
+{
+  "_ayuda": "Lista de bases a vigilar con scripts/monitor_salud.py. Copia este archivo a restaurantes_monitor.json (ignorado por git: contiene credenciales) y pon una entrada por restaurante. Las claves con '_' son comentarios.",
+  "restaurantes": [
+    { "nombre": "Doña Marta",   "database_url": "postgresql://postgres:CLAVE@HOST.proxy.rlwy.net:PUERTO/railway" },
+    { "nombre": "El Corrientazo", "database_url": "postgresql://postgres:CLAVE@HOST.proxy.rlwy.net:PUERTO/railway" }
+  ]
+}

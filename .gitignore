@@ -33,3 +33,6 @@ Thumbs.db
 # Respaldos de BD (nunca subir datos de clientes)
 backups/
 *.sql.gz
+
+# Config del monitor (URLs con credenciales de todos los restaurantes)
+scripts/restaurantes_monitor.json
