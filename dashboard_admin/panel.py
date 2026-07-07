@@ -40,6 +40,33 @@ st.set_page_config(
 )
 
 
+# ── Blindaje contra el traductor del navegador ──────────────────────────────────
+# Streamlit sirve su index.html con lang="en"; en un celular en español Chrome ofrece
+# (o aplica solo) "Traducir página" y Google Translate envuelve los textos en <font>.
+# React deja de reconocer sus propios nodos y el siguiente rerun revienta con
+# "NotFoundError: removeChild ... no es un hijo de este nodo" (react#17256), matando
+# la vista (visto en el POS de meseros en producción). Se corrige declarando el idioma
+# real y marcando el documento como no-traducible; el script corre en cada rerun y es
+# idempotente.
+def _blindar_traductor() -> None:
+    st.components.v1.html("""
+    <script>
+      const doc = window.parent.document;
+      doc.documentElement.lang = "es";
+      doc.documentElement.setAttribute("translate", "no");
+      doc.documentElement.classList.add("notranslate");
+      if (!doc.querySelector('meta[name="google"][content="notranslate"]')) {
+        const m = doc.createElement("meta");
+        m.name = "google"; m.content = "notranslate";
+        doc.head.appendChild(m);
+      }
+    </script>
+    """, height=0)
+
+
+_blindar_traductor()
+
+
 # ── Marcaje de turno (clock-in / clock-out) + auditoría de sesión ────────────────
 # El login abre una sesión de turno (sesiones_empleado) y la anota en el libro mayor; el
 # logout la cierra. Vive en panel.py (no en auth.py, que se mantiene sin dependencias de

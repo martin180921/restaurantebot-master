@@ -21,6 +21,7 @@
 App aislada: su propia conexión; comparte con el panel solo el esquema de la BD.
 """
 import streamlit as st
+import streamlit.components.v1
 from streamlit_autorefresh import st_autorefresh
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
@@ -795,6 +796,24 @@ def pedidos_activos_telefono(tel: str) -> int:
 # El título lleva el nombre del restaurante (ajuste 'restaurante_nombre').
 st.set_page_config(page_title=f"{_restaurante_nombre()} · Carta",
                    page_icon="🍽️", layout="centered", initial_sidebar_state="collapsed")
+
+# Blindaje contra el traductor del navegador (mismo fix que el panel): Streamlit sirve
+# lang="en" y Chrome móvil puede auto-traducir la página; Google Translate envuelve los
+# textos en <font> y React revienta con "NotFoundError: removeChild" (react#17256) al
+# siguiente rerun. Se declara el idioma real y se marca el documento como no-traducible.
+st.components.v1.html("""
+<script>
+  const doc = window.parent.document;
+  doc.documentElement.lang = "es";
+  doc.documentElement.setAttribute("translate", "no");
+  doc.documentElement.classList.add("notranslate");
+  if (!doc.querySelector('meta[name="google"][content="notranslate"]')) {
+    const m = doc.createElement("meta");
+    m.name = "google"; m.content = "notranslate";
+    doc.head.appendChild(m);
+  }
+</script>
+""", height=0)
 
 st.markdown("""
 <style>
