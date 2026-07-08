@@ -582,9 +582,18 @@ def _dialog_base(cierre_id: int):
         st.session_state["_base_prev_sel"] = sel_actual
         st.session_state["base_monto"] = sugerida
 
+    # Caja de sugerencia en HTML (no st.info): Streamlit interpreta '$…$' como fórmula
+    # LaTeX y partía el mensaje; con HTML + texto oscuro se lee claro y con contraste.
     if vueltas_total > 0:
-        st.info(f"Estos {len(ids)} pedido(s) necesitan **${fmt_money(vueltas_total)}** en "
-                f"vueltas → base sugerida **${fmt_money(sugerida)}**.")
+        n_txt = "1 pedido" if len(ids) == 1 else f"{len(ids)} pedidos"
+        st.markdown(
+            f'<div style="background:#eef2ff; border:1px solid #c7d2fe; border-radius:10px; '
+            f'padding:12px 14px; margin:6px 0; color:#1e1b4b; line-height:1.5;">'
+            f'El repartidor necesita <b>${fmt_money(vueltas_total)}</b> en vueltas para {n_txt}.'
+            f'<br><span style="font-size:1.05rem;">Base sugerida: '
+            f'<b>${fmt_money(sugerida)}</b></span> '
+            f'<span style="color:#4b43b0;">(puedes cambiarla abajo)</span></div>',
+            unsafe_allow_html=True)
     elif ids:
         st.caption("Ninguno de los pedidos elegidos necesita vueltas (pago exacto o "
                    "transferencia).")
