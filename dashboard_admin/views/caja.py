@@ -18,7 +18,7 @@ import audit
 import empleados
 import mesero_keys
 from db import engine, fmt_money, flash, saldo_pedido, titulo_seccion
-from utils.print_jobs import badge_agente_html, enqueue_hoja_ruta
+from utils.print_jobs import badge_agente_html, enqueue_hoja_ruta, enqueue_recibo
 from views import pedidos, menu
 
 
@@ -132,7 +132,7 @@ def cierres_recientes(n: int = 8):
 #   gasto           → efectivo SALE del cajón (−)
 #   reingreso_gasto → vuelve el cambio del gasto (+)
 #   base_repartidor → efectivo SALE como base de cambio del repartidor (−)
-#   retorno_base    → el repartidor devuelve el float sobrante al volver (+)
+#   retorno_base    → el repartidor devuelve las vueltas sobrantes al volver (+)
 # Los COBROS de los pedidos de domicilio NO entran aquí: se cobran al volver por el
 # libro 'pagos' (ventas en efectivo del arqueo), así no se cuentan dos veces.
 TIPOS_SALIDA  = ("gasto", "base_repartidor")
@@ -242,10 +242,15 @@ def registrar_base_repartidor(cierre_id: int, monto: int, nombre: str, pedidos_i
     return True, "ok"
 
 
-def registrar_retorno_base(base_id: int, monto: int) -> tuple:
-    """Devuelve al cajón el float sobrante de una base de repartidor y la cierra. Devuelve
-    (ok, mensaje). Los pedidos ya se cobraron por separado (libro 'pagos'); aquí solo vuelve
-    el cambio que no se usó.
+def registrar_retorno_base(base_id: int, monto: int, entregado: int = None,
+                           esperado: int = None) -> tuple:
+    """Devuelve al cajón las vueltas sobrantes de una base de repartidor y la cierra.
+    Devuelve (ok, mensaje). Los pedidos ya se cobraron por separado (libro 'pagos'); aquí
+    solo vuelve el cambio que no se usó.
+
+    'entregado'/'esperado' (opcionales): la liquidación en efectivo que el cajero verificó
+    contra el repartidor (ver _dialog_retorno) — se anotan en la auditoría como rastro de la
+    conciliación, aunque el monto asentado en el cajón sigue siendo 'monto' (las vueltas).
 
     H1 — no se cierra con cobros pendientes: dentro del MISMO txn (FOR UPDATE sobre la base)
     se suma el saldo de los pedidos enlazados (base_id). Si es > 0, el repartidor volvió con
@@ -281,15 +286,55 @@ def registrar_retorno_base(base_id: int, monto: int) -> tuple:
     except _BaseConflict:
         return False, ("Aún hay pedidos de esta base sin cobrar. Cóbralos en 💵 Cobrar antes "
                        "de cerrar la base (evita descuadrar la caja).")
-    audit.registrar("retorno_base", "caja", int(cid) if cid is not None else None,
-                    {"base_id": int(base_id), "monto": int(monto)})
+    detalle = {"base_id": int(base_id), "monto": int(monto)}
+    if entregado is not None:
+        detalle["entregado"] = int(entregado)
+    if esperado is not None:
+        detalle["esperado"] = int(esperado)
+    if entregado is not None and esperado is not None:
+        detalle["diferencia"] = int(entregado) - int(esperado)
+    audit.registrar("retorno_base", "caja", int(cid) if cid is not None else None, detalle)
     return True, "ok"
+
+
+# ── Vueltas: cuánto cambio necesita el repartidor por cada pedido ───────────────
+def _vueltas_pedido(saldo: int, metodo, paga_con) -> int:
+    """Cambio (vueltas) que el repartidor debe llevar para ESTE pedido: solo aplica si paga
+    en efectivo y el cliente indicó con cuánto paga (paga_con > saldo). Transferencia, pago
+    ya cubierto, o sin dato de paga_con → 0 vueltas (nada que cambiar en la puerta)."""
+    saldo = max(0, int(saldo or 0))
+    paga_con = int(paga_con or 0)
+    if (metodo or "efectivo") != "efectivo" or paga_con <= 0:
+        return 0
+    return max(0, paga_con - saldo)
+
+
+def _base_sugerida(vueltas_total: int) -> int:
+    """Redondea la suma de vueltas necesarias HACIA ARRIBA al múltiplo de $5.000 más cercano
+    (billetes/monedas manejables). 0 → 0 (no forzar una base si nadie necesita cambio)."""
+    v = max(0, int(vueltas_total or 0))
+    if v <= 0:
+        return 0
+    return -(-v // 5000) * 5000
+
+
+def _vueltas_devueltas(entregado: int, efectivo_cobrado: int, base_monto: int) -> int:
+    """Cuánto de lo que el repartidor pone sobre el mostrador son VUELTAS que vuelven al
+    cajón (el resto ya se registró como cobro en 'pagos'). El repartidor entrega UN solo
+    fajo (base + lo cobrado en efectivo en la puerta); el cajero solo cuenta ese fajo, y de
+    aquí se deriva la partición — nunca se le pide partirlo a él. Acotado a [0, base_monto]:
+    ni negativo (si entregó menos de lo cobrado) ni más de lo que se llevó de base."""
+    return max(0, min(int(base_monto or 0),
+                      int(entregado or 0) - int(efectivo_cobrado or 0)))
 
 
 # ── Pedidos de domicilio para el flujo del repartidor ───────────────────────────
 def pedidos_domicilio_pendientes():
-    """[{id, nombre, saldo}] de pedidos de domicilio/para_llevar de HOY, con saldo y que
-    AÚN no van en una base, para asignarlos a la base de un repartidor. Tolerante a fallos.
+    """[{id, nombre, saldo, metodo, paga_con, vueltas}] de pedidos de domicilio/para_llevar
+    de HOY, con saldo y que AÚN no van en una base, para asignarlos a la base de un
+    repartidor. 'vueltas' es el cambio que ese pedido exige en la puerta (ver
+    _vueltas_pedido) — permite sugerir la base sin que el cajero calcule de cabeza.
+    Tolerante a fallos.
 
     Filtros (cada uno corrige un problema real):
       · fecha::date = CURRENT_DATE → solo los de HOY. CURRENT_DATE es hora de Bogotá (la
@@ -302,7 +347,8 @@ def pedidos_domicilio_pendientes():
         with engine.connect() as conn:
             rows = conn.execute(text("""
                 SELECT id, numero_cliente, cliente_nombre, total,
-                       COALESCE(total_pagado, 0) AS total_pagado, pagado
+                       COALESCE(total_pagado, 0) AS total_pagado, pagado,
+                       metodo_pago, COALESCE(paga_con, 0) AS paga_con
                 FROM pedidos
                 WHERE tipo_entrega IN ('domicilio', 'para_llevar')
                   AND estado <> 'cancelado' AND pagado = FALSE
@@ -319,19 +365,24 @@ def pedidos_domicilio_pendientes():
         if s > 0:
             out.append({"id": int(d["id"]),
                         "nombre": d.get("cliente_nombre") or d.get("numero_cliente") or f"#{d['id']}",
-                        "saldo": s})
+                        "saldo": s, "metodo": d.get("metodo_pago") or "efectivo",
+                        "paga_con": int(d.get("paga_con") or 0),
+                        "vueltas": _vueltas_pedido(s, d.get("metodo_pago"), d.get("paga_con"))})
     return out
 
 
 def pedidos_de_base(base_id: int):
-    """[{id, nombre, total, cobrado, saldo, pagado, metodo_pago}] de los pedidos ENLAZADOS a
-    una base de repartidor por pedidos.base_id (H1) — la fuente de verdad del flujo del
-    repartidor, en vez del JSON pedidos_ref. Excluye cancelados. Tolerante a fallos."""
+    """[{id, nombre, total, cobrado, saldo, pagado, metodo_pago, paga_con, vueltas}] de los
+    pedidos ENLAZADOS a una base de repartidor por pedidos.base_id (H1) — la fuente de
+    verdad del flujo del repartidor, en vez del JSON pedidos_ref. Excluye cancelados.
+    'vueltas' es el cambio que ESTE pedido exige en la puerta (0 si ya está cobrado, es
+    transferencia, o el cliente no dio paga_con). Tolerante a fallos."""
     try:
         with engine.connect() as conn:
             rows = conn.execute(text(
                 "SELECT id, numero_cliente, cliente_nombre, total, "
-                "       COALESCE(total_pagado, 0) AS total_pagado, pagado, metodo_pago "
+                "       COALESCE(total_pagado, 0) AS total_pagado, pagado, metodo_pago, "
+                "       COALESCE(paga_con, 0) AS paga_con "
                 "FROM pedidos WHERE base_id = :bid AND estado <> 'cancelado' ORDER BY id"
             ), {"bid": int(base_id)}).mappings().all()
     except Exception:
@@ -339,11 +390,13 @@ def pedidos_de_base(base_id: int):
     out = []
     for r in rows:
         d = dict(r)
+        saldo = saldo_pedido(d)
         out.append({"id": int(d["id"]),
                     "nombre": d.get("cliente_nombre") or d.get("numero_cliente") or f"#{d['id']}",
                     "total": int(d["total"] or 0), "cobrado": int(d["total_pagado"] or 0),
-                    "saldo": saldo_pedido(d), "pagado": bool(d["pagado"]),
-                    "metodo_pago": d.get("metodo_pago")})
+                    "saldo": saldo, "pagado": bool(d["pagado"]),
+                    "metodo_pago": d.get("metodo_pago"), "paga_con": int(d.get("paga_con") or 0),
+                    "vueltas": _vueltas_pedido(saldo, d.get("metodo_pago"), d.get("paga_con"))})
     return out
 
 
@@ -483,12 +536,11 @@ def _dialog_reingreso(gasto_id: int, gasto_monto: int, motivo: str = ""):
 
 @st.dialog("🛵 Base de repartidor")
 def _dialog_base(cierre_id: int):
-    st.markdown("Saca una base de cambio y asigna los pedidos de domicilio que lleva el "
-                "repartidor. Al volver, esos pedidos se cobran y devuelve el float sobrante.")
+    st.markdown("Elige los pedidos que lleva el repartidor: el sistema sugiere la base de "
+                "cambio que necesita. Al volver, esos pedidos se cobran y devuelve las "
+                "vueltas sobrantes.")
     nombre = st.text_input("Nombre del repartidor", key="base_nombre",
                            placeholder="Ej: Carlos")
-    monto = int(st.number_input("Base de cambio que se lleva ($)", min_value=0, value=0,
-                                step=1000, format="%d", key="base_monto") or 0)
 
     pendientes = pedidos_domicilio_pendientes()
     if pendientes is None:
@@ -498,16 +550,47 @@ def _dialog_base(cierre_id: int):
         if st.button("Volver", key="base_volver_err", use_container_width=True):
             st.rerun()
         return
+
     ids = []
+    vueltas_total = 0
     if pendientes:
-        opciones = {f"#{p['id']} · {p['nombre']} · ${fmt_money(p['saldo'])}": p["id"]
-                    for p in pendientes}
+        def _etiqueta(p) -> str:
+            if p["vueltas"] > 0:
+                return (f"#{p['id']} · {p['nombre']} · ${fmt_money(p['saldo'])} · "
+                        f"paga con ${fmt_money(p['paga_con'])} → vueltas ${fmt_money(p['vueltas'])}")
+            if (p["metodo"] or "efectivo") != "efectivo":
+                return f"#{p['id']} · {p['nombre']} · ${fmt_money(p['saldo'])} · transferencia (sin vueltas)"
+            return f"#{p['id']} · {p['nombre']} · ${fmt_money(p['saldo'])}"
+
+        opciones = {_etiqueta(p): p for p in pendientes}
         elegidos = st.multiselect("Pedidos que lleva (se cobran al volver)",
                                   list(opciones.keys()), key="base_pedidos")
-        ids = [opciones[l] for l in elegidos]
+        seleccion = [opciones[l] for l in elegidos]
+        ids = [p["id"] for p in seleccion]
+        vueltas_total = sum(p["vueltas"] for p in seleccion)
     else:
         st.caption("No hay pedidos de domicilio pendientes para asignar (puedes entregar "
                    "la base igual).")
+
+    # A — Base sugerida reactiva: si la selección de pedidos cambió desde el último run,
+    # recalculamos la sugerencia y la escribimos en el widget ANTES de instanciarlo (patrón
+    # de valor controlado en Streamlit). Si el cajero YA editó el monto a mano y la selección
+    # no cambió, su edición se respeta (no se pisa en cada rerun).
+    sel_actual = tuple(sorted(ids))
+    sugerida = _base_sugerida(vueltas_total)
+    if st.session_state.get("_base_prev_sel") != sel_actual:
+        st.session_state["_base_prev_sel"] = sel_actual
+        st.session_state["base_monto"] = sugerida
+
+    if vueltas_total > 0:
+        st.info(f"Estos {len(ids)} pedido(s) necesitan **${fmt_money(vueltas_total)}** en "
+                f"vueltas → base sugerida **${fmt_money(sugerida)}**.")
+    elif ids:
+        st.caption("Ninguno de los pedidos elegidos necesita vueltas (pago exacto o "
+                   "transferencia).")
+
+    monto = int(st.number_input("Base de cambio que se lleva ($)", min_value=0,
+                                step=1000, format="%d", key="base_monto") or 0)
 
     c1, c2 = st.columns(2)
     with c1:
@@ -527,7 +610,7 @@ def _dialog_base(cierre_id: int):
             st.rerun()
 
 
-@st.dialog("🟢 Cerrar base · float devuelto")
+@st.dialog("🟢 Cerrar base · devolver vueltas")
 def _dialog_retorno(base_id: int, base_monto: int, nombre: str = "", pendientes_saldo: int = 0):
     quien = f"**{html.escape(nombre)}** · " if nombre else ""
     st.markdown(f"{quien}base entregada **${fmt_money(base_monto)}**.")
@@ -551,44 +634,57 @@ def _dialog_retorno(base_id: int, base_monto: int, nombre: str = "", pendientes_
     if saldo > 0:
         st.warning(f"Aún hay ${fmt_money(saldo)} sin cobrar en sus pedidos. Cóbralos antes de "
                    "cerrar para no descuadrar la caja (el cierre se rechazará).")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.button("🟢 Cerrar base", key=f"ret_confirm_{base_id}", type="primary",
+                     use_container_width=True, disabled=True)
+        with c2:
+            if st.button("Volver", key=f"ret_volver_{base_id}", use_container_width=True):
+                st.rerun()
+        return
+
+    # B — El repartidor entrega UN solo fajo de efectivo (vueltas sobrantes + lo cobrado en
+    # la puerta): el cajero solo cuenta ese fajo y teclea UN número. El sistema deriva cuánto
+    # de eso son vueltas que vuelven al cajón (el resto ya quedó asentado como cobro en 'pagos').
+    efectivo_cobrado = efectivo_cobrado_de_base(int(base_id))
+    esperado_vuelta = int(base_monto) + int(efectivo_cobrado)
+    st.markdown(
+        f'<div style="background:#f6f5ff; border:1px solid #e1ddf7; border-radius:10px; '
+        f'padding:10px 14px; margin:6px 0; font-size:0.85rem; color:#45443e;">'
+        f'Efectivo cobrado en la puerta: <b>${fmt_money(efectivo_cobrado)}</b><br>'
+        f'Base entregada: <b>${fmt_money(base_monto)}</b><br>'
+        f'<span style="color:#4b43b0;">Debe traer de vuelta (base + efectivo): '
+        f'<b>${fmt_money(esperado_vuelta)}</b></span></div>',
+        unsafe_allow_html=True)
+    entregado = int(st.number_input(
+        "💵 Efectivo que entrega el repartidor ($)", min_value=0, value=int(esperado_vuelta),
+        step=1000, format="%d", key=f"liq_{base_id}",
+        help="Cuenta TODO el efectivo que te da el repartidor (un solo fajo); el sistema "
+             "reparte cuánto es cobro y cuánto son vueltas.") or 0)
+    dif = entregado - esperado_vuelta
+    if dif == 0:
+        st.success("✅ Cuadra: el efectivo entregado coincide con lo esperado.")
+    elif dif > 0:
+        st.info(f"Sobra ${fmt_money(dif)} sobre lo esperado (¿cobró de más o quedó propina?).")
     else:
-        # E4 — liquidación de efectivo: el repartidor debe traer de vuelta la base + lo que
-        # cobró en efectivo en la puerta. Contrastarlo con lo que entrega caza un faltante en
-        # el mostrador (no solo en el cierre). Es una verificación; lo asentado es el float.
-        efectivo_cobrado = efectivo_cobrado_de_base(int(base_id))
-        esperado_vuelta = int(base_monto) + int(efectivo_cobrado)
-        st.markdown(
-            f'<div style="background:#f6f5ff; border:1px solid #e1ddf7; border-radius:10px; '
-            f'padding:10px 14px; margin:6px 0; font-size:0.85rem; color:#45443e;">'
-            f'Efectivo cobrado en la puerta: <b>${fmt_money(efectivo_cobrado)}</b><br>'
-            f'Base entregada: <b>${fmt_money(base_monto)}</b><br>'
-            f'<span style="color:#4b43b0;">Debe traer de vuelta (base + efectivo): '
-            f'<b>${fmt_money(esperado_vuelta)}</b></span></div>',
-            unsafe_allow_html=True)
-        entregado = int(st.number_input(
-            "Efectivo que entrega el repartidor ($)", min_value=0, value=int(esperado_vuelta),
-            step=1000, format="%d", key=f"liq_{base_id}",
-            help="Cuenta el efectivo que te da el repartidor y contrástalo con lo esperado.") or 0)
-        dif = entregado - esperado_vuelta
-        if dif == 0:
-            st.success("✅ Cuadra: el efectivo entregado coincide con lo esperado.")
-        elif dif > 0:
-            st.info(f"Sobra ${fmt_money(dif)} sobre lo esperado (¿cobró de más o quedó propina?).")
-        else:
-            st.error(f"⚠️ Faltan ${fmt_money(-dif)} respecto a lo esperado. Verifica antes de cerrar.")
-    monto = int(st.number_input("Float que devuelve al cajón ($)", min_value=0,
-                                max_value=int(base_monto), value=int(base_monto), step=1000,
-                                format="%d", key=f"ret_monto_{base_id}",
-                                help="El cambio sobrante de la base. Los cobros de los "
-                                     "pedidos se registran aparte en 💵 Cobrar.") or 0)
+        st.error(f"⚠️ Faltan ${fmt_money(-dif)} respecto a lo esperado. Verifica antes de cerrar.")
+
+    monto = _vueltas_devueltas(entregado, efectivo_cobrado, base_monto)
+    st.markdown(
+        f'<div style="font-size:0.8rem; color:#6b6b64; margin-top:2px;">De ese efectivo: '
+        f'${fmt_money(efectivo_cobrado)} ya están registrados como cobro · '
+        f'<b style="color:#45443e;">${fmt_money(monto)} son vueltas que vuelven al cajón</b>'
+        f'</div>', unsafe_allow_html=True)
+
     c1, c2 = st.columns(2)
     with c1:
         # Doble candado: deshabilitado en UI + rechazado en servidor (registrar_retorno_base).
         if st.button("🟢 Cerrar base", key=f"ret_confirm_{base_id}", type="primary",
                      use_container_width=True, disabled=saldo > 0):
-            ok, msg = registrar_retorno_base(base_id, monto)
+            ok, msg = registrar_retorno_base(base_id, monto, entregado=entregado,
+                                             esperado=esperado_vuelta)
             if ok:
-                flash(f"Base cerrada · float devuelto ${fmt_money(monto)}", "🟢")
+                flash(f"Base cerrada · vueltas devueltas ${fmt_money(monto)}", "🟢")
                 st.rerun()
             else:
                 st.error(msg)
@@ -597,12 +693,46 @@ def _dialog_retorno(base_id: int, base_monto: int, nombre: str = "", pendientes_
             st.rerun()
 
 
+# D — Cobro masivo en efectivo de los pedidos de UNA base de repartidor. La mayoría de
+# domicilios se pagan en efectivo exacto en la puerta; obligar a un modal de cobro por cada
+# pedido (con su propio método/comprobante) es fricción innecesaria cuando el repartidor ya
+# trae todo en efectivo. Los pedidos por transferencia se cobran aparte (botón individual).
+@st.dialog("💵 Cobrar todo en efectivo")
+def _dialog_cobro_masivo(bid: int, nombre: str, ids: list, saldo_total: int):
+    st.markdown(f"Repartidor **{html.escape(nombre)}** · {len(ids)} pedido(s) en efectivo · "
+               f"total **${fmt_money(saldo_total)}**.")
+    st.caption("Si algún pedido se pagó por transferencia, cóbralo individual antes de usar "
+              "este botón (aquí solo se registran pagos en efectivo).")
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("💵 Confirmar cobro", key=f"basecobro_masivo_confirm_{bid}",
+                     type="primary", use_container_width=True):
+            aplicado = pedidos.registrar_pago(ids, saldo_total, "efectivo")
+            if aplicado <= 0:
+                flash("⚠️ Estos pedidos ya estaban cobrados (otra caja o doble toque); "
+                     "no se registró de nuevo.", "⚠️")
+                st.rerun()
+            audit.registrar("cobrar", "pedido", None, {
+                "ids": ids, "monto": int(aplicado), "metodo": "efectivo",
+                "via": "base_repartidor_bulk", "base_id": int(bid),
+            })
+            # Abre el cajón (sin imprimir papel: es un cobro de domicilio, no una cuenta de
+            # mesa) para que el cajero guarde el efectivo entregado.
+            enqueue_recibo(ids, f"Base · {nombre}", saldo_total, aplicado, "efectivo",
+                           imprimir=False)
+            flash(f"Cobrado en efectivo · ${fmt_money(aplicado)} · {len(ids)} pedido(s)", "💵")
+            st.rerun()
+    with c2:
+        if st.button("Volver", key=f"basecobro_masivo_volver_{bid}", use_container_width=True):
+            st.rerun()
+
+
 # ── Sección de flujo de caja (dentro del turno abierto) ─────────────────────────
 _MOV_LABEL = {
     "gasto":           ("🧾 Gasto", "#dc2626"),
     "reingreso_gasto": ("↩️ Devolución", "#16a34a"),
     "base_repartidor": ("🛵 Base repartidor", "#dc2626"),
-    "retorno_base":    ("🟢 Float devuelto", "#16a34a"),
+    "retorno_base":    ("🟢 Vueltas devueltas", "#16a34a"),
 }
 
 
@@ -619,6 +749,12 @@ def _seccion_flujo_caja(cierre: dict):
     with b2:
         if st.button("🛵 Base de repartidor", key="btn_open_base",
                      use_container_width=True):
+            # A.5 — higiene de estado: una base anterior no debe dejar nombre/monto/selección
+            # pegados en el diálogo (las etiquetas del multiselect cambian con cada apertura,
+            # ya que embeben montos dinámicos; sin este pop, un valor viejo en session_state
+            # podría no calzar con las opciones nuevas).
+            for _k in ("base_nombre", "base_monto", "base_pedidos", "_base_prev_sel"):
+                st.session_state.pop(_k, None)
             _dialog_base(cid)
 
     # Gastos abiertos (esperan la devolución del cambio).
@@ -640,9 +776,9 @@ def _seccion_flujo_caja(cierre: dict):
             if st.button("↩️ Devolver", key=f"btn_reing_{gid}", use_container_width=True):
                 _dialog_reingreso(gid, int(g["monto"]), motivo)
 
-    # Bases de repartidor abiertas: el repartidor está en ruta con su float y sus
+    # Bases de repartidor abiertas: el repartidor está en ruta con su base de cambio y sus
     # pedidos. Al volver se cobran los pedidos (💵 Cobrar → libro 'pagos') y se cierra
-    # la base devolviendo el float sobrante.
+    # la base devolviendo las vueltas sobrantes.
     bases = movimientos_abiertos(cid, "base_repartidor")
     for b in bases:
         bid = int(b["id"])
@@ -674,18 +810,39 @@ def _seccion_flujo_caja(cierre: dict):
             unsafe_allow_html=True,
         )
 
-        # Un botón de cobro por cada pedido del repartidor que aún tenga saldo. El cobro
-        # usa el modal compartido (efectivo/transferencia + comprobante), que registra en
-        # 'pagos' → entra a las ventas en efectivo del arqueo (no por movimientos_caja).
+        # D — Cobro masivo: si hay más de un pedido pendiente EN EFECTIVO, un solo botón
+        # cobra todos de un golpe (el caso típico: el repartidor trae todo en efectivo). Los
+        # pedidos por transferencia se quedan con su botón individual.
+        efectivo_ids = [int(o["id"]) for o in ordenes
+                        if o["saldo"] > 0 and (o["metodo_pago"] or "efectivo") == "efectivo"]
+        efectivo_saldo = sum(o["saldo"] for o in ordenes
+                             if o["saldo"] > 0 and (o["metodo_pago"] or "efectivo") == "efectivo")
+        if len(efectivo_ids) > 1:
+            if st.button(f"💵 Cobrar todo en efectivo (${fmt_money(efectivo_saldo)})",
+                         key=f"btn_basecobro_masivo_{bid}", use_container_width=True):
+                _dialog_cobro_masivo(bid, nombre, efectivo_ids, efectivo_saldo)
+
+        # E — Un botón de cobro por cada pedido del repartidor que aún tenga saldo, con el
+        # detalle de vueltas que ya lleva impreso en la hoja de ruta (mismo criterio: solo
+        # efectivo con paga_con conocido exige vueltas). El cobro usa el modal compartido
+        # (efectivo/transferencia + comprobante), que registra en 'pagos' → entra a las
+        # ventas en efectivo del arqueo (no por movimientos_caja).
         for o in ordenes:
             oid = int(o["id"])
             col_o, col_b = st.columns([3, 1])
             with col_o:
-                pagado_txt = ("✓ cobrado" if o["saldo"] <= 0
-                              else f'por cobrar ${fmt_money(o["saldo"])}')
+                if o["saldo"] <= 0:
+                    detalle = "✓ cobrado"
+                elif o["vueltas"] > 0:
+                    detalle = (f'por cobrar ${fmt_money(o["saldo"])} · paga con '
+                              f'${fmt_money(o["paga_con"])} → vueltas ${fmt_money(o["vueltas"])}')
+                elif (o["metodo_pago"] or "efectivo") != "efectivo":
+                    detalle = f'por cobrar ${fmt_money(o["saldo"])} · 📱 transferencia'
+                else:
+                    detalle = f'por cobrar ${fmt_money(o["saldo"])}'
                 st.markdown(
                     f'<div style="font-size:0.8rem; color:#6b6b64; padding:4px 0;">'
-                    f'#{oid} · {html.escape(str(o["nombre"]))} · {pagado_txt}</div>',
+                    f'#{oid} · {html.escape(str(o["nombre"]))} · {detalle}</div>',
                     unsafe_allow_html=True,
                 )
             with col_b:
@@ -698,11 +855,11 @@ def _seccion_flujo_caja(cierre: dict):
         # el servidor: registrar_retorno_base lo rechaza). Así no se cierra una base con
         # cobros sin registrar → la caja no se descuadra.
         cerrar_bloqueado = pend_saldo > 0
-        if st.button("🟢 Cerrar base / float devuelto", key=f"btn_ret_{bid}",
+        if st.button("🟢 Cerrar base · recibir vueltas", key=f"btn_ret_{bid}",
                      use_container_width=True, disabled=cerrar_bloqueado,
                      help=("Cobra primero los pedidos pendientes para poder cerrar."
                            if cerrar_bloqueado else
-                           "Devuelve el float sobrante y concilia la base.")):
+                           "Devuelve las vueltas sobrantes y concilia la base.")):
             _dialog_retorno(bid, base_monto, nombre, pend_saldo)
         if cerrar_bloqueado:
             st.caption(f"⚠️ Faltan ${fmt_money(pend_saldo)} por cobrar para cerrar esta base.")
