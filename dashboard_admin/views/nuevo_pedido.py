@@ -245,20 +245,23 @@ def _selector_grupo(uid, grupo, opciones, label, *, default_ninguno=False, defau
     sel = st.session_state.get(key)
     if mostrar_label:
         st.markdown(_grupo_label(label), unsafe_allow_html=True)
-    botones = [{"nombre": NINGUNO, "stock": None, "disabled": False}]
+    botones = [{"nombre": NINGUNO, "id": "ninguno", "stock": None, "disabled": False}]
     for o in opciones:
-        botones.append({"nombre": o["nombre"], "stock": o.get("stock"),
+        botones.append({"nombre": o["nombre"], "id": o.get("id"), "stock": o.get("stock"),
                         "disabled": agotado_por_stock(o.get("stock"))})
     por_fila = 3
     for inicio in range(0, len(botones), por_fila):
         fila = botones[inicio:inicio + por_fila]
         cols = st.columns(len(fila))
-        for col, b in zip(cols, fila):
+        for offset, (col, b) in enumerate(zip(cols, fila)):
             with col:
                 nombre = b["nombre"]
                 activo = (sel == nombre)
                 etiqueta = f"{'● ' if activo else ''}{nombre}{_stock_suffix(b['stock'])}"
-                if st.button(etiqueta, key=f"pdpos_{uid}_{grupo}_opt_{nombre}",
+                # key por posición+id, NO por nombre: dos componentes activos con el
+                # mismo nombre en un grupo (dato duplicado) no deben chocar y tumbar
+                # la pantalla con StreamlitDuplicateElementKey.
+                if st.button(etiqueta, key=f"pdpos_{uid}_{grupo}_opt_{inicio + offset}_{b['id']}",
                              use_container_width=True, disabled=b["disabled"],
                              type=("primary" if activo else "secondary")):
                     st.session_state[key] = nombre

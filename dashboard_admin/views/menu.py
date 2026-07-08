@@ -149,14 +149,25 @@ def _acc_header(key: str, label: str, resumen: str = "", *, default_open: bool =
 # DB: componentes del Plato del Día (tabla menu_componentes)
 # ══════════════════════════════════════════════════════════════════════════════
 def agregar_componente(grupo: str, nombre: str):
+    """Inserta una opción nueva en el grupo, salvo que ya exista una con el mismo
+    nombre (sin distinguir mayúsculas/espacios) en ese grupo: dos componentes
+    iguales chocan en el selector del POS (misma key de botón) y revientan la
+    pantalla con StreamlitDuplicateElementKey."""
+    nombre = nombre.strip()
     with engine.begin() as conn:
+        ya_existe = conn.execute(text(
+            "SELECT 1 FROM menu_componentes WHERE grupo = :g AND lower(nombre) = lower(:n)"
+        ), {"g": grupo, "n": nombre}).first()
+        if ya_existe:
+            flash(f"'{nombre}' ya existe en este grupo", "⚠️")
+            return
         mx = conn.execute(text(
             "SELECT COALESCE(MAX(orden),0) FROM menu_componentes WHERE grupo = :g"
         ), {"g": grupo}).scalar()
         conn.execute(text(
             "INSERT INTO menu_componentes (grupo, nombre, activo, orden) "
             "VALUES (:g, :n, TRUE, :o)"
-        ), {"g": grupo, "n": nombre.strip(), "o": mx + 1})
+        ), {"g": grupo, "n": nombre, "o": mx + 1})
     cargar_componentes.clear()
     flash("Opción agregada", "✅")
 
