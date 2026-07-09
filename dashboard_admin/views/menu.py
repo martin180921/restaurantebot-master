@@ -1601,11 +1601,106 @@ def _render_readonly():
     _seccion("🥤 Bebidas", "bebida")
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# Buscador global del menú (sobre las pestañas)
+# ══════════════════════════════════════════════════════════════════════════════
+# (categoria, label, con_precio, con_desc) de las 4 secciones de catálogo — mismo
+# criterio que las pestañas del render(). Se reutiliza para agrupar los resultados de
+# búsqueda y para volver a pintar el formulario de edición inline cuando corresponde.
+CAT_BUSQUEDA = [
+    ("especial", "⭐ Especiales", True, True),
+    ("a_la_carta", "📋 A la carta", True, False),
+    ("adicional", "🍟 Adicionales", True, False),
+    ("bebida", "🥤 Bebidas", True, False),
+]
+
+
+def _buscar_en_menu(termino: str):
+    """Buscador global: encuentra cualquier alimento (componente del Plato del Día o plato
+    de catálogo) por nombre/descripción sin recorrer las 6 pestañas — útil con menús grandes
+    para activar/86 rápido los del día. Reutiliza las MISMAS tarjetas de acción de las
+    pestañas (_componente_card / _item_card), así activar/stock/editar/eliminar funciona
+    igual desde el resultado. Se muestra EN LUGAR de las pestañas (ver render): las tarjetas
+    se llavean por id y pintarlas en ambos sitios reventaría con StreamlitDuplicateElementKey."""
+    q = _norm(termino)
+    etiquetas = etiquetas_grupos_pd()
+
+    # 1) Componentes del Plato del Día que casan por nombre.
+    df_comp = cargar_componentes()
+    comp_hits = []
+    if df_comp is not None and not df_comp.empty:
+        for _, row in df_comp.iterrows():
+            if q in _norm(_txt(row.get("nombre"))):
+                comp_hits.append(row)
+
+    # 2) Catálogo (especiales / a la carta / adicionales / bebidas) por nombre o descripción.
+    df_cat = cargar_catalogo()
+    cat_hits = {}
+    if df_cat is not None and not df_cat.empty:
+        for _, row in df_cat.iterrows():
+            if q in _norm(_txt(row.get("nombre"))) or q in _norm(_txt(row.get("descripcion"))):
+                cat_hits.setdefault(row["categoria"], []).append(row)
+
+    total = len(comp_hits) + sum(len(v) for v in cat_hits.values())
+    if total == 0:
+        st.markdown(f'<p style="color:#a3a39b; font-size:0.9rem;">Sin coincidencias para '
+                    f'«{html.escape(termino)}». Prueba con menos letras o revisa la ortografía.</p>',
+                    unsafe_allow_html=True)
+        return
+    st.caption(f"{total} coincidencia(s) para «{termino}» · borra el buscador para volver a las pestañas")
+
+    # Si se pulsó ✏️ en un resultado de catálogo, la edición usa el mismo formulario inline
+    # que la pestaña (_item_form lee ed_<cat>_id). En la vista de búsqueda no se pintan las
+    # pestañas, así que lo mostramos aquí arriba mientras haya una edición activa.
+    for categoria, label, con_precio, con_desc in CAT_BUSQUEDA:
+        if f"ed_{categoria}_id" in st.session_state:
+            _item_form(categoria, label, con_precio, con_desc)
+
+    # Plato del Día — agrupado por su grupo (entrada / principio / …) en rejilla de 3, igual
+    # que _render_grupo. Conserva el orden de aparición (df ya viene ordenado por grupo/orden).
+    if comp_hits:
+        st.markdown(titulo_seccion('🍽️ Plato del Día'), unsafe_allow_html=True)
+        por_grupo = {}
+        for row in comp_hits:
+            por_grupo.setdefault(row["grupo"], []).append(row)
+        for grupo, filas in por_grupo.items():
+            st.markdown(f'<div style="font-weight:600; color:#26262b; margin:0.6rem 0 0.2rem;">'
+                        f'{html.escape(etiquetas.get(grupo, grupo))}</div>', unsafe_allow_html=True)
+            ncols = 3
+            for i in range(0, len(filas), ncols):
+                cols = st.columns(ncols)
+                for j, col in enumerate(cols):
+                    if i + j < len(filas):
+                        with col:
+                            _componente_card(filas[i + j], grupo)
+
+    # Catálogo — agrupado por categoría, con las tarjetas de acción existentes.
+    for categoria, label, con_precio, con_desc in CAT_BUSQUEDA:
+        filas = cat_hits.get(categoria, [])
+        if not filas:
+            continue
+        st.markdown(titulo_seccion(label), unsafe_allow_html=True)
+        for row in filas:
+            _item_card(row, categoria, con_precio, con_desc)
+
+
 def render():
     # RBAC: el mesero solo CONSULTA la carta. Bloquea todas las pestañas de edición,
     # los modales (crear/editar/eliminar) y los toggles (activo / 86).
     if not auth.can("edit_menu"):
         _render_readonly()
+        return
+
+    # Buscador global: encuentra cualquier alimento sin recorrer las 6 pestañas (útil con
+    # menús grandes para activar/86 rápido los del día). Con texto (≥2 letras) se muestran
+    # SOLO los resultados en vez de las pestañas — las tarjetas se llavean por id y pintarlas
+    # en ambos lados reventaría con StreamlitDuplicateElementKey.
+    termino = st.text_input("🔎 Buscar en todo el menú", key="menu_buscar",
+                            placeholder="Nombre de un plato, sopa, proteína, bebida…",
+                            label_visibility="collapsed")
+    if termino and len(termino.strip()) >= 2:
+        _inject_accordion_css()   # las tarjetas de componente reutilizan su estilo
+        _buscar_en_menu(termino.strip())
         return
 
     # Las CATEGORÍAS siguen siendo las pestañas de arriba. Lo que se pliega/despliega son

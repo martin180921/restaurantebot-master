@@ -7,20 +7,32 @@ la tabla `print_jobs` como contrato.
 
 ## Instalación (una vez por local)
 
+**Windows — un clic:** doble clic en **`instalar_agente.bat`** (dentro de esta
+carpeta, en el PC del restaurante). Crea el entorno virtual, instala las
+dependencias, abre el asistente de configuración (`--setup`: pide la cadena de
+conexión, el `RESTAURANTE_ID` y la impresora — en Windows la lista para elegir por
+número) y registra la tarea programada `PrintAgent` para que el agente arranque solo
+al iniciar sesión, en segundo plano (sin ventana). Puede pedir permisos de
+administrador (se reabre solo, es necesario para crear la tarea programada).
+
+**Manual / Linux / Raspberry Pi:**
 ```bash
 cd print_agent
 python -m venv .venv && .venv\Scripts\activate        # Windows
 pip install -r requirements.txt
-copy config.example.json config.json                  # y edítalo
+python agent.py --setup    # asistente: BD, RESTAURANTE_ID e impresora → config.json
 python agent.py
 ```
 
-Para que arranque solo al encender el PC: Task Scheduler (Windows) o un servicio
-systemd (Linux/Raspberry Pi) ejecutando `python agent.py`.
+Para que arranque solo al encender el PC en Linux/Raspberry Pi: un servicio systemd
+ejecutando `python agent.py` (en Windows ya lo hace `instalar_agente.bat` vía Task
+Scheduler).
 
 ## Probar antes de producción
 
 ```bash
+python agent.py --setup     # asistente interactivo: crea/actualiza config.json
+                            # (BD, RESTAURANTE_ID, impresora) y valida la conexión
 python agent.py --dry-run   # imprime un recibo de muestra como TEXTO en consola
                             # (no usa impresora ni BD ni escpos) → revisa el layout
 python agent.py --test      # imprime el recibo de muestra en la impresora REAL
@@ -103,6 +115,15 @@ imprimir duplicados. Para reintentar un fallo: `UPDATE print_jobs SET estado='pe
 El cajón se abre **solo en pagos en efectivo**: el panel pone `abrir_cajon:true` en el
 payload y el agente envía el pulso `\x1b\x70\x00\x19\x96` al inicio del buffer. En
 transferencia no se abre.
+
+## Log (`agent.log`)
+
+La tarea programada `PrintAgent` corre con `pythonw.exe` (sin ventana de consola), así
+que no hay dónde ver los `print()` del agente. Cuando corre así, el agente redirige su
+salida a `agent.log` (en esta misma carpeta) automáticamente — ábrelo con cualquier
+editor de texto para revisar errores o confirmar que sigue latiendo. Al correr `python
+agent.py` a mano desde una consola (pruebas, `--test`, `--setup`…) la salida sigue
+yendo a la terminal como siempre; el archivo solo se usa cuando no hay consola.
 
 ## Actualizar el agente en el local (tras un cambio en `agent.py`)
 

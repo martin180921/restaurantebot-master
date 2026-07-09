@@ -805,6 +805,23 @@ def modo_once(cfg: dict) -> int:
         conn.close()
 
 
+def _listar_impresoras_windows():
+    """[nombre, ...] de las impresoras instaladas en Windows (locales + conexiones de
+    red mapeadas), o None si no aplica (no es Windows) o falta pywin32. Factoreado de
+    modo_list_printers para que --setup pueda ofrecer la misma lista sin duplicar la
+    llamada a win32print."""
+    if sys.platform != "win32":
+        return None
+    # Import perezoso: pywin32 solo existe en Windows (ver requirements.txt).
+    try:
+        import win32print
+    except ImportError:
+        return None
+    flags = win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS
+    impresoras = win32print.EnumPrinters(flags)
+    return [p[2] for p in impresoras]  # nivel 1: índice 2 = nombre de la impresora
+
+
 def modo_list_printers() -> int:
     """Lista las impresoras instaladas en Windows para copiar el 'printer_name' exacto
     a config.json (modo 'windows'). Solo aplica en Windows."""
@@ -812,20 +829,196 @@ def modo_list_printers() -> int:
         print("[list-printers] Solo disponible en Windows. En Linux/macOS usa el modo "
               "'usb' o 'network' (ver README), o 'lpstat -p' para ver colas CUPS.")
         return 1
-    # Import perezoso: pywin32 solo existe en Windows (ver requirements.txt).
-    try:
-        import win32print
-    except ImportError:
+    nombres = _listar_impresoras_windows()
+    if nombres is None:
         sys.exit("[FATAL] Falta pywin32. Corre: pip install -r requirements.txt")
-    # Combinamos impresoras locales y conexiones de red mapeadas.
-    flags = win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS
-    impresoras = win32print.EnumPrinters(flags)
-    if not impresoras:
+    if not nombres:
         print("[list-printers] No se encontraron impresoras instaladas en Windows.")
         return 1
     print("Impresoras de Windows (copia el nombre EXACTO a config.json → printer_name):")
-    for i, p in enumerate(impresoras, 1):
-        print(f"  {i}. {p[2]}")  # nivel 1: índice 2 = nombre de la impresora
+    for i, n in enumerate(nombres, 1):
+        print(f"  {i}. {n}")
+    return 0
+
+
+def _preguntar(prompt: str, default: str = "") -> str:
+    """input() con el valor por defecto mostrado entre corchetes; Enter lo conserva."""
+    sufijo = f" [{default}]" if default else ""
+    resp = input(f"{prompt}{sufijo}: ").strip()
+    return resp or default
+
+
+def _input_opcional(prompt: str, default: str = "") -> str:
+    """input() que NO revienta si la consola se corta (EOF): devuelve el default.
+    Solo para prompts s/n cuyo default es seguro (p. ej. el ticket de prueba DESPUES
+    de guardar config.json: un EOF ahi no debe tumbar el instalador con exit != 0)."""
+    try:
+        return input(prompt).strip().lower()
+    except EOFError:
+        print()
+        return default
+
+
+def _preguntar_red(existente: dict) -> dict:
+    """Sub-prompt de una impresora de RED (Ethernet/Wi-Fi por IP): host + puerto."""
+    host = _preguntar("Host/IP de la impresora", existente.get("host", "192.168.1.50"))
+    port_raw = _preguntar("Puerto", str(existente.get("port", 9100)))
+    try:
+        port = int(port_raw)
+    except ValueError:
+        port = 9100
+    return {"type": "network", "host": host, "port": port}
+
+
+def _aviso_dummy() -> dict:
+    """PRINTER_CONNECTION dummy con su advertencia (nada se imprime de verdad)."""
+    print("OJO: en modo dummy NADA se imprime de verdad (los tickets se marcan como")
+    print("impresos). Cuando llegue la impresora, corre de nuevo 'python agent.py --setup'.")
+    return {"type": "dummy"}
+
+
+def _preguntar_impresora(existente: dict) -> dict:
+    """Sub-asistente de PRINTER_CONNECTION para --setup: en Windows ofrece elegir de la
+    lista de impresoras instaladas (mismo listado de --list-printers) y ademas 'r'
+    (impresora de red por IP) y 'd' (dummy: piloto sin impresora fisica aun); si no
+    hay pywin32 (o no es Windows) cae a elegir el tipo a mano (network/usb/dummy)."""
+    nombres = _listar_impresoras_windows()
+    if nombres is not None:
+        if nombres:
+            print("Impresoras detectadas en Windows:")
+            for i, n in enumerate(nombres, 1):
+                print(f"  {i}. {n}")
+        else:
+            print("No se detectaron impresoras instaladas en Windows.")
+        print("Enter = impresora predeterminada de Windows · r = impresora de red (IP) "
+              "· d = sin impresora (dummy)")
+        raw = input("Elige el numero (o Enter/r/d): ").strip().lower()
+        if raw == "d":
+            return _aviso_dummy()
+        if raw == "r":
+            return _preguntar_red(existente)
+        if raw and nombres:
+            try:
+                idx = int(raw)
+                if 1 <= idx <= len(nombres):
+                    return {"type": "windows", "printer_name": nombres[idx - 1]}
+            except ValueError:
+                pass
+        return {"type": "windows"}
+
+    print("No se detecto Windows/pywin32: configura la conexion a mano.")
+    print("  1) network — impresora por Ethernet/Wi-Fi")
+    print("  2) usb     — impresora directa por libusb")
+    print("  3) dummy   — sin impresora (pruebas/piloto sin hardware aun)")
+    tipo_default = {"network": "1", "usb": "2", "dummy": "3"}.get(existente.get("type"), "1")
+    op = _preguntar("Tipo de conexion", tipo_default)
+    if op == "2":
+        vid = _preguntar("vendor_id (hex, ej 0x04b8)", existente.get("vendor_id", "0x04b8"))
+        pid = _preguntar("product_id (hex, ej 0x0202)", existente.get("product_id", "0x0202"))
+        return {"type": "usb", "vendor_id": vid, "product_id": pid}
+    if op == "3":
+        return _aviso_dummy()
+    return _preguntar_red(existente)
+
+
+def modo_setup() -> int:
+    """Asistente interactivo de instalación: crea/actualiza config.json (BD, restaurante,
+    impresora) sin editar JSON a mano, valida la conexión a la BD y ofrece disparar un
+    ticket de prueba. Lo invoca instalar_agente.bat; también corre suelto con --setup
+    para reconfigurar un local ya instalado."""
+    print("================================")
+    print(" Configuracion del Agente de Impresion")
+    print("================================")
+    print()
+
+    existente = {}
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, encoding="utf-8") as fh:
+                existente = json.load(fh)
+        except Exception:
+            existente = {}
+        print(f"Ya existe un config.json (restaurante_id={existente.get('RESTAURANTE_ID', '?')}).")
+        resp = _input_opcional("¿Reconfigurar desde cero? (s/N): ", "n")
+        if resp not in ("s", "si", "sí", "y", "yes"):
+            print("Sin cambios. Corre 'python agent.py --test' para probar la impresora actual.")
+            return 0
+        print()
+
+    dsn = ""
+    while not dsn:
+        dsn = _preguntar("Cadena de conexion de Postgres (DATABASE_URL)",
+                         existente.get("DATABASE_URL", ""))
+        if not dsn:
+            print("  → es obligatoria.")
+
+    rid = None
+    while rid is None:
+        raw = _preguntar("ID del restaurante (RESTAURANTE_ID, numero entero)",
+                         str(existente.get("RESTAURANTE_ID", "") or ""))
+        try:
+            rid = int(raw)
+        except (TypeError, ValueError):
+            print("  → debe ser un numero entero.")
+
+    try:
+        poll_default = float(existente.get("POLL_SECONDS", 2))
+    except (TypeError, ValueError):
+        poll_default = 2.0
+    default_txt = str(int(poll_default)) if poll_default == int(poll_default) else str(poll_default)
+    try:
+        poll = float(_preguntar("Segundos entre sondeos (POLL_SECONDS)", default_txt) or 2)
+    except ValueError:
+        poll = 2.0
+    if poll <= 0:           # 0 o negativo = bucle sin pausa contra la BD; nunca se quiere
+        poll = 2
+    if poll == int(poll):   # '2' en vez de '2.0' en config.json cuando es un entero
+        poll = int(poll)
+
+    print()
+    print("-- Impresora --")
+    printer_cfg = _preguntar_impresora(existente.get("PRINTER_CONNECTION") or {})
+
+    cfg = {
+        "DATABASE_URL": dsn,
+        "RESTAURANTE_ID": rid,
+        "POLL_SECONDS": poll,
+        "PRINTER_CONNECTION": printer_cfg,
+    }
+    with open(CONFIG_PATH, "w", encoding="utf-8") as fh:
+        json.dump(cfg, fh, ensure_ascii=False, indent=2)
+    print()
+    print(f"[setup] config.json guardado en {CONFIG_PATH}")
+
+    print()
+    print("Probando conexion a la base de datos...")
+    try:
+        conn = _conectar(dsn)
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+        conn.close()
+        print("[setup] Conexion a la BD OK.")
+    except Exception as exc:
+        print(f"[setup] AVISO: no se pudo conectar ahora ({exc}).")
+        print("         Si el local aun no tiene internet, ignora esto y continua.")
+
+    resp = _input_opcional("\n¿Imprimir un ticket de prueba ahora? (S/n): ", "n")
+    if resp in ("n", "no"):
+        print("\nListo. Corre 'python agent.py --test' cuando quieras probar la impresora.")
+        return 0
+    # La prueba es INFORMATIVA, no fatal: si falla (sin papel, cable suelto, nombre mal
+    # escrito) la configuracion YA quedo guardada y el instalador debe seguir registrando
+    # la tarea programada — el agente reintentara cuando la impresora este lista. Un
+    # exit code != 0 aqui haria que instalar_agente.bat aborte a mitad de instalacion.
+    try:
+        rc = modo_test(cfg)
+    except SystemExit:
+        rc = 1
+    if rc != 0:
+        print("[setup] AVISO: la prueba de impresion fallo, pero la configuracion SI quedo "
+              "guardada.")
+        print("        Revisa cable/papel/nombre de impresora y reintenta con "
+              "'python agent.py --test'.")
     return 0
 
 
@@ -1009,6 +1202,21 @@ def _parar(*_):
 
 
 def main() -> None:
+    # La tarea programada corre pythonw.exe (sin consola) para no dejar una ventana negra
+    # abierta en el PC del restaurante: bajo pythonw, sys.stdout/stderr son None y todo
+    # print() se pierde (o revienta). Los redirigimos a un archivo de log junto al agente
+    # ANTES de nada más, para que soporte pueda revisar qué pasó.
+    if sys.stdout is None or sys.stderr is None:
+        log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent.log")
+        try:
+            log_fh = open(log_path, "a", encoding="utf-8", buffering=1)
+            sys.stdout = log_fh
+            sys.stderr = log_fh
+        except OSError:
+            # Sin log posible (permisos/disco): el agente DEBE seguir imprimiendo igual.
+            # Con sys.stdout None, print() es un no-op seguro en Python 3.
+            pass
+
     # Consola Windows: por defecto usa cp1252 y revienta (UnicodeEncodeError) con
     # acentos o box-drawing. Forzamos UTF-8 en la salida para logs y --dry-run.
     for stream in (sys.stdout, sys.stderr):
@@ -1028,12 +1236,22 @@ def main() -> None:
                         help="Muestra el conteo de la cola por estado y los últimos errores, y sale.")
     parser.add_argument("--once", action="store_true",
                         help="Procesa un único trabajo pendiente y sale (debug on-site).")
+    parser.add_argument("--setup", action="store_true",
+                        help="Asistente interactivo: crea/actualiza config.json y prueba la impresora.")
     args = parser.parse_args()
 
     if args.list_printers:
         sys.exit(modo_list_printers())
     if args.dry_run:
         sys.exit(modo_dry_run())
+    if args.setup:
+        # Ctrl+C o consola cerrada a mitad del asistente → salida limpia con codigo 1
+        # (instalar_agente.bat lo detecta y avisa), sin traceback que asuste on-site.
+        try:
+            sys.exit(modo_setup())
+        except (KeyboardInterrupt, EOFError):
+            print("\n[setup] Cancelado: la configuracion no se completo.")
+            sys.exit(1)
     if args.status:
         # Solo lee la cola: necesita BD + tenant, no la impresora.
         sys.exit(modo_status(cargar_config(requeridas=("DATABASE_URL", "RESTAURANTE_ID"))))

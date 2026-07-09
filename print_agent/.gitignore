@@ -1,3 +1,4 @@
 config.json
+agent.log
 __pycache__/
 *.pyc

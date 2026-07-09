@@ -252,20 +252,24 @@ def _selector_grupo(uid, grupo, opciones, label, *, default_ninguno=False, defau
     por_fila = 3
     for inicio in range(0, len(botones), por_fila):
         fila = botones[inicio:inicio + por_fila]
-        cols = st.columns(len(fila))
-        for offset, (col, b) in enumerate(zip(cols, fila)):
-            with col:
-                nombre = b["nombre"]
-                activo = (sel == nombre)
-                etiqueta = f"{'● ' if activo else ''}{nombre}{_stock_suffix(b['stock'])}"
-                # key por posición+id, NO por nombre: dos componentes activos con el
-                # mismo nombre en un grupo (dato duplicado) no deben chocar y tumbar
-                # la pantalla con StreamlitDuplicateElementKey.
-                if st.button(etiqueta, key=f"pdpos_{uid}_{grupo}_opt_{inicio + offset}_{b['id']}",
-                             use_container_width=True, disabled=b["disabled"],
-                             type=("primary" if activo else "secondary")):
-                    st.session_state[key] = nombre
-                    st.rerun(scope="fragment")
+        # Contenedor con key 'fila_pd_*' para que el CSS móvil (_inject_mobile_item_css)
+        # mantenga las 3 opciones en una sola línea compacta en celular; por defecto
+        # Streamlit las apilaría a pantalla completa (min-width:100% <640px).
+        with st.container(key=f"fila_pd_{uid}_{grupo}_{inicio}"):
+            cols = st.columns(len(fila))
+            for offset, (col, b) in enumerate(zip(cols, fila)):
+                with col:
+                    nombre = b["nombre"]
+                    activo = (sel == nombre)
+                    etiqueta = f"{'● ' if activo else ''}{nombre}{_stock_suffix(b['stock'])}"
+                    # key por posición+id, NO por nombre: dos componentes activos con el
+                    # mismo nombre en un grupo (dato duplicado) no deben chocar y tumbar
+                    # la pantalla con StreamlitDuplicateElementKey.
+                    if st.button(etiqueta, key=f"pdpos_{uid}_{grupo}_opt_{inicio + offset}_{b['id']}",
+                                 use_container_width=True, disabled=b["disabled"],
+                                 type=("primary" if activo else "secondary")):
+                        st.session_state[key] = nombre
+                        st.rerun(scope="fragment")
     return None if sel == NINGUNO else sel
 
 
@@ -420,10 +424,31 @@ def _seccion_plato_dia(comp, precio, grupos):
     st.caption(f"${fmt_money(precio)} c/u")
 
     instancias = st.session_state.setdefault("pd_instancias", [])
-    if st.button("➕ Agregar plato del día", key="pdpos_add", use_container_width=True):
-        st.session_state["pd_seq"] = int(st.session_state.get("pd_seq", 0)) + 1
-        instancias.append(st.session_state["pd_seq"])
-        st.rerun(scope="fragment")
+    # Stepper −/N/+ (mismo lenguaje que los steppers del catálogo) en vez de un botón único:
+    # muestra cuántos platos del día lleva el pedido y deja quitar el último sin bajar a
+    # buscar su 🗑. '+' agrega una instancia nueva; '−' elimina la ÚLTIMA (con su estado de
+    # widgets, vía _eliminar_plato_dia). El 🗑 por instancia sigue para quitar una del medio.
+    with st.container(key="fila_item_pd_add"):
+        c_lbl, c_stepper = st.columns([3, 2])
+        with c_lbl:
+            st.markdown('<div style="padding:6px 0;"><span class="item-nombre" '
+                        'style="font-size:0.9rem; color:#26262b;">Plato del Día</span></div>',
+                        unsafe_allow_html=True)
+        with c_stepper:
+            m, q, pl = st.columns([1, 1, 1])
+            with m:
+                if st.button("−", key="pdpos_menos", use_container_width=True):
+                    if instancias:
+                        _eliminar_plato_dia(instancias[-1])
+                    st.rerun(scope="fragment")
+            with q:
+                st.markdown(f'<div style="text-align:center; padding:4px 0; font-weight:600;">'
+                            f'{len(instancias)}</div>', unsafe_allow_html=True)
+            with pl:
+                if st.button("+", key="pdpos_mas", use_container_width=True):
+                    st.session_state["pd_seq"] = int(st.session_state.get("pd_seq", 0)) + 1
+                    instancias.append(st.session_state["pd_seq"])
+                    st.rerun(scope="fragment")
 
     plates, ok = [], True
     for pos, uid in enumerate(list(instancias)):
@@ -660,28 +685,37 @@ def _conteo_seccion(productos, tipo) -> int:
 
 
 def _inject_mobile_item_css():
-    """Compacta las filas de producto (nombre + stepper −/cant/+) SOLO en pantallas
-    angostas (celular): por debajo de 640px Streamlit fuerza min-width:100% en cada
-    columna y las apila (nombre en una línea, cada botón ocupando la pantalla entera).
+    """Compacta las filas de producto (nombre + stepper −/cant/+) y las filas de opciones
+    del Plato del Día (Entrada/Principio/Proteína…) SOLO en pantallas angostas (celular):
+    por debajo de 640px Streamlit fuerza min-width:100% en cada columna y las apila (cada
+    botón ocupando la pantalla entera → un plato con varios grupos se estira muchísimo).
     Aquí se revierte ese min-width dentro de las filas marcadas con key='fila_item_*'
-    para que nombre + stepper vuelvan a quedar en una sola línea compacta, y se
-    aprovecha el espacio ganado para agrandar el nombre. No toca nada por encima de
-    640px, así que el escritorio queda intacto."""
+    (steppers) y 'fila_pd_*' (opciones del Plato del Día) para que vuelvan a quedar en una
+    sola línea compacta. No toca nada por encima de 640px: el escritorio queda intacto."""
     st.markdown("""
     <style>
     @media (max-width: 640px) {
-        [class*="st-key-fila_item_"] div[data-testid="stColumn"] {
+        [class*="st-key-fila_item_"] div[data-testid="stColumn"],
+        [class*="st-key-fila_pd_"] div[data-testid="stColumn"] {
             min-width: 0 !important;
         }
         [class*="st-key-fila_item_"] span.item-nombre {
             font-size: 1.05rem !important;
         }
-        [class*="st-key-fila_item_"] div[data-testid="stHorizontalBlock"] {
+        [class*="st-key-fila_item_"] div[data-testid="stHorizontalBlock"],
+        [class*="st-key-fila_pd_"] div[data-testid="stHorizontalBlock"] {
             gap: 0.5rem !important;
         }
-        [class*="st-key-fila_item_"] .stButton button {
+        [class*="st-key-fila_item_"] .stButton button,
+        [class*="st-key-fila_pd_"] .stButton button {
             padding: 0.25rem !important;
             min-height: 0 !important;
+        }
+        /* Opciones del Plato del Día: texto más chico para que 3 quepan por fila sin
+           romper el nombre (llevan '(N disp.)' además del nombre). */
+        [class*="st-key-fila_pd_"] .stButton button p {
+            font-size: 0.78rem !important;
+            line-height: 1.15 !important;
         }
     }
     </style>
@@ -777,7 +811,10 @@ def _form_fragment():
                 st.markdown('<p style="color:#a3a39b; font-size:0.85rem;">No hay mesas activas. '
                             'Crea una en la pestaña 🪑 Mesas.</p>', unsafe_allow_html=True)
                 return
-            mesa_id = st.selectbox("Mesa", options=mesa_ids,
+            # index=None: sin mesa preseleccionada — obliga a elegir a propósito (antes
+            # caía en la 1ª mesa y se colaban pedidos a la mesa equivocada por descuido).
+            mesa_id = st.selectbox("Mesa", options=mesa_ids, index=None,
+                                   placeholder="Selecciona la mesa…",
                                    format_func=lambda i: mesa_labels[i], key="mesa_sel_manual")
         else:
             # Datos del cliente para la entrega (se guardan en el pedido y la base de clientes).
@@ -878,7 +915,8 @@ def _form_fragment():
             </div>""", unsafe_allow_html=True)
 
         if es_mesa:
-            destino = mesa_labels[mesa_id]
+            # mesa_id puede ser None (sin mesa elegida aún): no indexar mesa_labels[None].
+            destino = mesa_labels[mesa_id] if mesa_id is not None else "Elige la mesa"
         else:
             destino = cli_nombre or cli_tel or ("Domicilio" if es_domicilio else "Para llevar")
         st.markdown(f"""
@@ -918,6 +956,13 @@ def _form_fragment():
             st.markdown('<p style="color:#b45309; font-size:0.8rem;">Ingresa la dirección de '
                         'entrega antes de confirmar.</p>', unsafe_allow_html=True)
 
+        # Mesa obligatoria: el pedido de mesa no se confirma sin elegirla (ya no hay una
+        # mesa por defecto que se colara sin querer).
+        falta_mesa = es_mesa and mesa_id is None
+        if falta_mesa:
+            st.markdown('<p style="color:#b45309; font-size:0.8rem;">Selecciona la mesa '
+                        'antes de confirmar.</p>', unsafe_allow_html=True)
+
         # E7: si el agente de impresión está caído, avisarlo AQUÍ — la comanda no saldrá al
         # confirmar y hay que escribirla a mano. Con el agente en línea no se añade ruido.
         _ag = estado_agente()
@@ -934,7 +979,7 @@ def _form_fragment():
         # Un doble clic / reintento reusa la misma clave → no se duplica el pedido.
         idem_key = st.session_state.setdefault("pos_idem", str(uuid.uuid4()))
         if st.button("✓ Confirmar pedido", type="primary", key="btn_confirmar_manual",
-                     use_container_width=True, disabled=(not ok_pd or falta_dir)):
+                     use_container_width=True, disabled=(not ok_pd or falta_dir or falta_mesa)):
             if es_mesa:
                 ok = crear_pedido_manual(mesa_id, mesa_labels[mesa_id], items, total,
                                          (nota_general or "").strip(), idem_key=idem_key)
@@ -966,5 +1011,6 @@ def _limpiar_pedido():
     for k in [k for k in st.session_state if str(k).startswith("pdpos_")]:
         del st.session_state[k]
     for k in ("nota_general_pos", "ent_nombre", "ent_tel", "ent_dir",
-              "ent_metodo", "ent_pagacon", "pos_idem"):   # pos_idem: nueva clave H3 al próximo pedido
+              "ent_metodo", "ent_pagacon", "pos_idem",   # pos_idem: nueva clave H3 al próximo pedido
+              "mesa_sel_manual"):   # sin mesa heredada: el próximo pedido vuelve a exigir elegirla
         st.session_state.pop(k, None)
