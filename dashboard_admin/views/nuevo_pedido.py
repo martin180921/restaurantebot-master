@@ -225,6 +225,19 @@ def _grupo_label(texto) -> str:
             f'margin:14px 0 4px 0; letter-spacing:0.01em;">{texto}</div>')
 
 
+def _distribuir_filas(n, max_por_fila=3):
+    """Reparte n botones en filas BALANCEADAS (simétricas) con un tope por fila: usa el
+    mínimo de filas posible y las deja lo más parejas que se pueda, con las más llenas
+    arriba. Así las opciones no quedan como una columna alta ni con una fila casi vacía al
+    final — se ajustan al espacio de forma simétrica:
+      2→[2] · 3→[3] · 4→[2,2] · 5→[3,2] · 6→[3,3] · 7→[3,2,2] · 8→[3,3,2]."""
+    if n <= 0:
+        return []
+    nfilas = -(-n // max_por_fila)     # techo de n/max_por_fila sin importar math
+    base, resto = divmod(n, nfilas)
+    return [base + 1] * resto + [base] * (nfilas - resto)
+
+
 def _selector_grupo(uid, grupo, opciones, label, *, default_ninguno=False, default_nombre=None,
                     mostrar_label=True):
     """Selector de UNA opción (entrada/principio/proteína) en botones — no st.radio —
@@ -249,15 +262,20 @@ def _selector_grupo(uid, grupo, opciones, label, *, default_ninguno=False, defau
     for o in opciones:
         botones.append({"nombre": o["nombre"], "id": o.get("id"), "stock": o.get("stock"),
                         "disabled": agotado_por_stock(o.get("stock"))})
-    por_fila = 3
-    for inicio in range(0, len(botones), por_fila):
-        fila = botones[inicio:inicio + por_fila]
+    # Filas BALANCEADAS según cuántas opciones haya (2→2, 4→2x2, 5→3+2…): se ajustan al
+    # espacio de forma simétrica en vez de dejar una fila casi vacía al final. gi = índice
+    # global de cada botón (estable), para que la key no cambie al variar el reparto.
+    filas_tam = _distribuir_filas(len(botones))
+    idx = 0
+    for fila_i, tam in enumerate(filas_tam):
+        fila = botones[idx:idx + tam]
         # Contenedor con key 'fila_pd_*' para que el CSS móvil (_inject_mobile_item_css)
-        # mantenga las 3 opciones en una sola línea compacta en celular; por defecto
-        # Streamlit las apilaría a pantalla completa (min-width:100% <640px).
-        with st.container(key=f"fila_pd_{uid}_{grupo}_{inicio}"):
-            cols = st.columns(len(fila))
+        # mantenga las opciones en una fila compacta en celular; por defecto Streamlit las
+        # apilaría a pantalla completa (min-width:100% <640px).
+        with st.container(key=f"fila_pd_{uid}_{grupo}_{fila_i}"):
+            cols = st.columns(tam)
             for offset, (col, b) in enumerate(zip(cols, fila)):
+                gi = idx + offset
                 with col:
                     nombre = b["nombre"]
                     activo = (sel == nombre)
@@ -265,11 +283,12 @@ def _selector_grupo(uid, grupo, opciones, label, *, default_ninguno=False, defau
                     # key por posición+id, NO por nombre: dos componentes activos con el
                     # mismo nombre en un grupo (dato duplicado) no deben chocar y tumbar
                     # la pantalla con StreamlitDuplicateElementKey.
-                    if st.button(etiqueta, key=f"pdpos_{uid}_{grupo}_opt_{inicio + offset}_{b['id']}",
+                    if st.button(etiqueta, key=f"pdpos_{uid}_{grupo}_opt_{gi}_{b['id']}",
                                  use_container_width=True, disabled=b["disabled"],
                                  type=("primary" if activo else "secondary")):
                         st.session_state[key] = nombre
                         st.rerun(scope="fragment")
+        idx += tam
     return None if sel == NINGUNO else sel
 
 
@@ -452,16 +471,19 @@ def _seccion_plato_dia(comp, precio, grupos):
 
     plates, ok = [], True
     for pos, uid in enumerate(list(instancias)):
-        c_tit, c_del = st.columns([5, 1])
-        with c_tit:
-            st.markdown(f'<div style="border-left:3px solid #26262b; padding:2px 0 2px 10px; '
-                        f'margin:10px 0 4px 0; font-weight:700; font-size:0.9rem;">Plato #{pos+1}</div>',
-                        unsafe_allow_html=True)
-        with c_del:
-            if st.button("🗑", key=f"pdpos_{uid}_del", use_container_width=True,
-                         help="Quitar este plato del día"):
-                _eliminar_plato_dia(uid)
-                st.rerun(scope="fragment")
+        # Container 'fila_pd_' para que el CSS móvil no apile el título y el 🗑 (si no, en
+        # celular el 🗑 cae solo en una caja de ancho completo, ver _inject_mobile_item_css).
+        with st.container(key=f"fila_pd_titulo_{uid}"):
+            c_tit, c_del = st.columns([5, 1])
+            with c_tit:
+                st.markdown(f'<div style="border-left:3px solid #26262b; padding:2px 0 2px 10px; '
+                            f'margin:10px 0 4px 0; font-weight:700; font-size:0.9rem;">Plato #{pos+1}</div>',
+                            unsafe_allow_html=True)
+            with c_del:
+                if st.button("🗑", key=f"pdpos_{uid}_del", use_container_width=True,
+                             help="Quitar este plato del día"):
+                    _eliminar_plato_dia(uid)
+                    st.rerun(scope="fragment")
 
         sel_cfg = []
         for g in grupos:
@@ -708,13 +730,16 @@ def _inject_mobile_item_css():
         }
         [class*="st-key-fila_item_"] .stButton button,
         [class*="st-key-fila_pd_"] .stButton button {
-            padding: 0.25rem !important;
+            padding: 0.3rem 0.4rem !important;
             min-height: 0 !important;
         }
-        /* Opciones del Plato del Día: texto más chico para que 3 quepan por fila sin
-           romper el nombre (llevan '(N disp.)' además del nombre). */
-        [class*="st-key-fila_pd_"] .stButton button p {
-            font-size: 0.78rem !important;
+        /* Opciones del Plato del Día: texto más chico y ajustado para que quepan varias
+           por fila sin estirarse (llevan '(N disp.)' además del nombre). Se fija en el
+           botón Y en su <p>/<div> interno para ganar a la especificidad base de Streamlit. */
+        [class*="st-key-fila_pd_"] .stButton button,
+        [class*="st-key-fila_pd_"] .stButton button p,
+        [class*="st-key-fila_pd_"] .stButton button div {
+            font-size: 0.8rem !important;
             line-height: 1.15 !important;
         }
     }
