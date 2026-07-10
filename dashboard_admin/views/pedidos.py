@@ -641,6 +641,22 @@ def urgencia(mins, estado):
     return "#16a34a"      # verde: reciente
 
 
+def fmt_espera(mins) -> str:
+    """Minutos crudos → texto legible: '8 min' / '2h 15m' / '+3 d'. Un pedido
+    abierto por días mostraba '2845 min' sin contexto; aquí se redondea a la
+    unidad que el cajero de verdad necesita leer de un vistazo."""
+    if mins is None:
+        return ""
+    mins = int(mins)
+    if mins < 60:
+        return f"{mins} min"
+    if mins < 1440:
+        h, m = divmod(mins, 60)
+        return f"{h}h {m}m"
+    dias = mins // 1440
+    return f"+{dias} d"
+
+
 # ── Origen del pedido (U6) ──────────────────────────────────────────────────────
 def icono_cliente(row, mesa_nombres=None):
     """(emoji, etiqueta) según el origen: 📲 auto-servicio QR de mesa, 🪑 mesa (mesero)
@@ -948,6 +964,36 @@ def dialog_cobrar(ids, titulo, total, uid):
 
     st.markdown("<br>", unsafe_allow_html=True)
 
+    # ── Modo de cobro: por MONTO o POR PLATO — se decide ANTES que el método ────
+    # 'Por plato' cobra unidades concretas (ej: 1 de 2 Coca-Colas): el modo natural para
+    # dividir una cuenta entre comensales. Se ofrece solo con UN pedido y si el valor de
+    # las unidades pendientes cuadra con el saldo; si hubo un abono por monto suelto (o
+    # el total lleva recargo de envío), los dos libros no cuadrarían, así que se oculta
+    # para no descuadrar (ver registrar_pago_items). Antes este selector aparecía DESPUÉS
+    # del método de pago y la billetera/comprobante — fácil de pasar por alto, así que
+    # el cajero terminaba cobrando "por monto" sin quererlo. Ponerlo primero, con la
+    # preferencia recordada por pedido, evita que el segundo/tercer comensal de una mesa
+    # tenga que volver a elegir el modo.
+    lineas = lineas_pagables(ids[0]) if len(ids) == 1 else []
+    precio_idx = {l["idx"]: l["precio"] for l in lineas}
+    valor_items = sum(l["restante"] * l["precio"] for l in lineas)
+    por_plato_ok = (len(ids) == 1 and any(l["restante"] > 0 for l in lineas)
+                    and valor_items == total)
+
+    modo_por_plato = False
+    if por_plato_ok:
+        pref_key = f"modo_pref_{ids[0]}"
+        opciones_modo = ["💵 Monto", "🍽️ Por plato"]
+        modo_default = st.session_state.get(pref_key, opciones_modo[0])
+        st.caption("¿Van a dividir la cuenta? Cobra por plato para elegir justo qué se paga.")
+        modo = st.radio(
+            "Modo de cobro", opciones_modo, horizontal=True, label_visibility="collapsed",
+            key=f"modo_{uid}",
+            index=opciones_modo.index(modo_default) if modo_default in opciones_modo else 0,
+        )
+        modo_por_plato = modo == "🍽️ Por plato"
+        st.session_state[pref_key] = modo
+
     # Método de pago. El CSS global pinta el st.radio horizontal como píldoras
     # (segmented-control) y oculta su label → ponemos uno propio con st.caption.
     st.caption("Método de pago")
@@ -958,8 +1004,13 @@ def dialog_cobrar(ids, titulo, total, uid):
     es_efectivo = metodo == "💵 Efectivo"
     es_mixto = metodo == "🔀 Mixto"
     # 'Mixto' = UNA persona paga ESTA cuenta repartiendo el monto entre efectivo y
-    # transferencia → un solo ticket. (Para DOS personas que dividen la cuenta en dos
+    # transferencia → un solo ticket, sobre el TOTAL (no unidades concretas), así que es
+    # incompatible con 'Por plato'. (Para DOS personas que dividen la cuenta en dos
     # recibos, se hacen dos cobros aparte: por monto o '🍽️ Por plato'.)
+    por_plato = modo_por_plato and not es_mixto
+    if modo_por_plato and es_mixto:
+        st.caption("🔀 Mixto cobra por monto — cambia a Efectivo o Transferencia para "
+                   "dividir por plato.")
 
     # El tender de efectivo solo aplica al método Efectivo puro. Limpiamos su estado
     # cuando no estamos en ese modo para que un valor "insuficiente" previo no quede
@@ -986,26 +1037,6 @@ def dialog_cobrar(ids, titulo, total, uid):
             "N.º de comprobante", key=f"comprobante_{uid}",
             placeholder="Referencia de la transacción (opcional)",
         ) or "").strip() or None
-
-    # ── Modo de cobro: por MONTO o POR PLATO ────────────────────────────────────
-    # 'Por plato' cobra unidades concretas (ej: 1 de 2 Coca-Colas). Se ofrece solo con
-    # UN pedido y si el valor de las unidades pendientes cuadra con el saldo: si hubo un
-    # abono por monto suelto (o el total lleva recargo de envío), los dos libros no
-    # cuadrarían, así que se oculta para no descuadrar. Ver registrar_pago_items.
-    # En 'Mixto' no se ofrece el cobro por plato: el mixto reparte el MONTO entre dos
-    # métodos sobre el total, no unidades concretas.
-    lineas = lineas_pagables(ids[0]) if (len(ids) == 1 and not es_mixto) else []
-    precio_idx = {l["idx"]: l["precio"] for l in lineas}
-    valor_items = sum(l["restante"] * l["precio"] for l in lineas)
-    por_plato_ok = (len(ids) == 1 and not es_mixto and any(l["restante"] > 0 for l in lineas)
-                    and valor_items == total)
-
-    por_plato = False
-    if por_plato_ok:
-        st.caption("Modo de cobro")
-        modo = st.radio("Modo de cobro", ["💵 Monto", "🍽️ Por plato"],
-                        horizontal=True, label_visibility="collapsed", key=f"modo_{uid}")
-        por_plato = modo == "🍽️ Por plato"
 
     seleccion = {}
     ef_monto, tr_monto, mixto_sobra, mixto_corto, recibe_ef = 0, 0, False, False, 0
@@ -1067,13 +1098,22 @@ def dialog_cobrar(ids, titulo, total, uid):
                     unsafe_allow_html=True,
                 )
     elif por_plato:
-        st.markdown('<div style="font-size:0.82rem; color:#45443e; margin:6px 0 2px;">'
-                    'Unidades a cobrar</div>', unsafe_allow_html=True)
+        # Progreso del cobro por plato: cuánto de este pedido ya se pagó por unidades
+        # concretas y cuántas quedan, para que el cajero vea de un vistazo cómo va la
+        # división de la cuenta sin tener que sumar las líneas mentalmente.
+        valor_pagado_ya = sum(l["pagada"] * l["precio"] for l in lineas)
+        valor_total_lineas = sum(l["cantidad"] * l["precio"] for l in lineas)
+        unidades_restantes = sum(l["restante"] for l in lineas)
+        st.markdown(
+            f'<div style="font-size:0.82rem; color:#45443e; margin:6px 0 2px;">'
+            f'Pagado ${fmt_money(valor_pagado_ya)} de ${fmt_money(valor_total_lineas)} · '
+            f'quedan {unidades_restantes} unidad{"es" if unidades_restantes != 1 else ""}</div>',
+            unsafe_allow_html=True)
         for l in lineas:
             idx = l["idx"]
             ppkey = f"pp_{uid}_{idx}"
             restante = int(l["restante"])
-            col_n, col_m, col_c, col_p = st.columns([4, 1, 1, 1])
+            col_n, col_m, col_c, col_p, col_t = st.columns([3.0, 0.7, 0.9, 0.7, 1.2])
             with col_n:
                 if restante <= 0:
                     st.markdown(f'<div style="font-size:0.85rem; color:#a3a39b; padding:8px 0;">'
@@ -1088,10 +1128,12 @@ def dialog_cobrar(ids, titulo, total, uid):
             if restante <= 0:
                 st.session_state.pop(ppkey, None)   # línea ya pagada: sin selector ni estado
                 continue
-            # Stepper −/+ (mismo estilo que el resto de la app, en vez de digitar el número).
-            # OJO: NADA de st.rerun() aquí — dentro de un st.dialog cerraría el modal; el click
-            # del botón ya re-ejecuta solo el cuerpo del diálogo. La cuenta se pinta DESPUÉS de
-            # ambos botones (col_c se escribe al final) para que refleje el valor recién tocado.
+            # Stepper −/+ y "Todo" (selecciona de un toque las unidades restantes de ESTA
+            # línea — cobrar 3 Coca-Colas de una persona sin tocar '+' tres veces). Mismo
+            # estilo que el resto de la app, en vez de digitar el número. OJO: NADA de
+            # st.rerun() aquí — dentro de un st.dialog cerraría el modal; el click del botón
+            # ya re-ejecuta solo el cuerpo del diálogo. La cuenta (col_c) se escribe AL FINAL,
+            # después de los tres botones, para que refleje el valor recién tocado.
             cur = max(0, min(int(st.session_state.get(ppkey, 0) or 0), restante))
             with col_m:
                 if st.button("−", key=f"ppm_{uid}_{idx}", use_container_width=True,
@@ -1101,6 +1143,11 @@ def dialog_cobrar(ids, titulo, total, uid):
                 if st.button("+", key=f"ppp_{uid}_{idx}", use_container_width=True,
                              disabled=cur >= restante):
                     st.session_state[ppkey] = min(restante, cur + 1)
+            with col_t:
+                if st.button("Todo", key=f"ppt_{uid}_{idx}", use_container_width=True,
+                             disabled=cur >= restante,
+                             help=f"Selecciona las {restante} unidades restantes"):
+                    st.session_state[ppkey] = restante
             with col_c:
                 val = max(0, min(int(st.session_state.get(ppkey, 0) or 0), restante))
                 st.markdown(f'<div style="text-align:center; padding:6px 0; font-weight:700;">'
@@ -1129,6 +1176,13 @@ def dialog_cobrar(ids, titulo, total, uid):
                 format="%d", key=f"abono_{uid}",
                 help="min_value=0 bloquea negativos; max_value=total impide sobre-cobrar.",
             ) or 0)
+            # Un abono PARCIAL por monto (no por plato) descuadra lineas_pagables para lo
+            # que quede: el saldo restante ya no coincidirá con el valor de las unidades
+            # pendientes, así que 'Por plato' desaparecerá para el resto de esta cuenta.
+            # Se avisa ANTES de confirmar, no después de que el cajero lo descubra solo.
+            if por_plato_ok and abono < total:
+                st.caption("⚠️ Este abono es por monto, no por plato: si van a dividir la "
+                           "cuenta por platos, usa 'Por plato' en vez de reducir este monto.")
         else:
             st.session_state.pop(f"abono_{uid}", None)   # no arrastrar un parcial previo
             abono = total
@@ -1196,8 +1250,11 @@ def dialog_cobrar(ids, titulo, total, uid):
     c1, c2 = st.columns(2)
     with c1:
         # Transferencia se confirma solo con abono > 0 (sin cálculo de cambio); en
-        # efectivo además exige que el tender alcance (no efectivo_corto).
-        if st.button("✓ Confirmar pago", key=f"confirm_cobrar_{uid}", type="primary",
+        # efectivo además exige que el tender alcance (no efectivo_corto). En modo por
+        # plato el botón muestra el monto seleccionado: un "+" de más no se confirma a
+        # ciegas, el cajero ve exactamente cuánto está a punto de cobrar.
+        confirm_label = f"✓ Cobrar ${fmt_money(abono)}" if por_plato else "✓ Confirmar pago"
+        if st.button(confirm_label, key=f"confirm_cobrar_{uid}", type="primary",
                      use_container_width=True,
                      disabled=(abono <= 0 or (es_efectivo and efectivo_corto)
                                or mixto_sobra or mixto_corto)):

@@ -18,8 +18,10 @@ import html
 import time
 
 import auth
-from db import fmt_money, cargar_mesas_activas, saldo_pedido, titulo_seccion, hoy_bogota
+from db import (fmt_money, cargar_mesas_activas, saldo_pedido, titulo_seccion,
+                hoy_bogota, cobrado_pedido)
 from utils.print_jobs import badge_agente_html, badge_fallos_html
+from utils.items import parse_items, etiqueta_item
 from views import pedidos
 from views import nuevo_pedido as npos
 
@@ -724,17 +726,33 @@ def _monitor_en_vivo():
         ocupadas  = sum(1 for mid in por_mesa if color_por_mesa[mid] == AMBAR)
         por_cobrar = sum(1 for mid in por_mesa if color_por_mesa[mid] == AZUL)
         atencion  = sum(1 for mid in por_mesa if color_por_mesa[mid] == ROJO)
-        m1, m2, m3, m4, m5 = st.columns(5)
-        with m1:
-            st.markdown(f'<div class="metric-card"><div class="metric-value">{len(mesas)}</div><div class="metric-label">Mesas</div></div>', unsafe_allow_html=True)
-        with m2:
-            st.markdown(f'<div class="metric-card"><div class="metric-value metric-green">{libres}</div><div class="metric-label">Libres</div></div>', unsafe_allow_html=True)
-        with m3:
-            st.markdown(f'<div class="metric-card"><div class="metric-value metric-accent">{ocupadas}</div><div class="metric-label">Ocupadas</div></div>', unsafe_allow_html=True)
-        with m4:
-            st.markdown(f'<div class="metric-card"><div class="metric-value metric-blue">{por_cobrar}</div><div class="metric-label">Por cobrar</div></div>', unsafe_allow_html=True)
-        with m5:
-            st.markdown(f'<div class="metric-card"><div class="metric-value" style="color:{ROJO}">{atencion}</div><div class="metric-label">Atención</div></div>', unsafe_allow_html=True)
+        # Ventas hoy: misma definición que el tablero (dinero realmente cobrado,
+        # incluye abonos parciales) — ver pedidos.py ventas_hoy.
+        hoy_df = df[(pd.to_datetime(df["fecha"]).dt.date == hoy_bogota())
+                    & (df["estado"] != "cancelado")]
+        ventas_hoy = int(hoy_df.apply(cobrado_pedido, axis=1).sum()) if not hoy_df.empty else 0
+        # Franja compacta (reutiliza .ped-stats/.ped-stat, ya usada en el tablero para
+        # el mismo fin): las 5 metric-cards grandes ocupaban una fila entera para 5
+        # números. "Atención" solo se pinta de rojo cuando hay algo que atender; en
+        # 0 queda neutra para que el rojo siga significando "urgente ahora".
+        atencion_style = ' style="color:#dc2626"' if atencion else ""
+        st.markdown(
+            '<div class="ped-stats">'
+            f'<div class="ped-stat"><span class="ped-stat-n">{len(mesas)}</span>'
+            '<span class="ped-stat-l">Mesas</span></div>'
+            f'<div class="ped-stat"><span class="ped-stat-n metric-green">{libres}</span>'
+            '<span class="ped-stat-l">Libres</span></div>'
+            f'<div class="ped-stat"><span class="ped-stat-n metric-accent">{ocupadas}</span>'
+            '<span class="ped-stat-l">Ocupadas</span></div>'
+            f'<div class="ped-stat"><span class="ped-stat-n metric-blue">{por_cobrar}</span>'
+            '<span class="ped-stat-l">Por cobrar</span></div>'
+            f'<div class="ped-stat"><span class="ped-stat-n"{atencion_style}>{atencion}</span>'
+            '<span class="ped-stat-l">Atención</span></div>'
+            f'<div class="ped-stat"><span class="ped-stat-n">${fmt_money(ventas_hoy)}</span>'
+            '<span class="ped-stat-l">Ventas hoy</span></div>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
 
     # ── CSS: botones-tarjeta de la fila superior (objetivo 3: horizontal) ───────
     st.markdown("""
@@ -810,7 +828,7 @@ def _monitor_en_vivo():
                 saldo  = int(sub.apply(saldo_pedido, axis=1).sum())
                 etiqueta = "por cobrar" if color == AZUL else "pedido(s)"
                 espera = _espera_mesa(sub)
-                chip = f" · ⏱ {espera}m" if espera > 0 else ""
+                chip = f" · ⏱ {pedidos.fmt_espera(espera)}" if espera > 0 else ""
                 resumen = f"{len(sub)} {etiqueta} · ${fmt_money(saldo)}{chip}"
                 # Rastro de cambio de mesa en vivo: si esta mesa recibió una cuenta hace
                 # poco, añade "(origen ➡️ destino)" al texto inferior de su preview.
@@ -948,7 +966,6 @@ def _detalle_pedido(row, idx: int):
     pid     = int(row["id"])
     num_dia = row.get("num_dia") or pid   # número diario; fallback al id global (pre-migración)
     estado  = row.get("estado", "pendiente")
-    items   = pedidos.formatear_items(row.get("items", []))
     total_p = int(row.get("total", 0) or 0)
     saldo   = saldo_pedido(row)          # lo que falta por cobrar de este pedido
     abonado = max(0, total_p - saldo)    # abono parcial ya recibido (0 si no hay)
@@ -957,13 +974,9 @@ def _detalle_pedido(row, idx: int):
 
     mins      = pedidos.minutos_espera(row.get("fecha"))
     color_urg = pedidos.urgencia(mins, estado)
-    chip = (f'<div style="font-size:0.72rem; color:{color_urg}; font-weight:700; margin-top:6px;">⏱ {mins} min</div>'
+    chip = (f'<div style="font-size:0.72rem; color:{color_urg}; font-weight:700; margin-top:6px;">⏱ {pedidos.fmt_espera(mins)}</div>'
             if color_urg else "")
     borde = f' style="border-left:4px solid {color_urg};"' if color_urg else ""
-    # Cuando hay abono parcial, el número grande es el SALDO y se anota lo abonado.
-    abono_html = (f'<div style="font-size:0.72rem; color:#4b43b0; font-weight:600; margin-top:2px;">'
-                  f'Abonado ${fmt_money(abonado)} de ${fmt_money(total_p)}</div>'
-                  if abonado > 0 else "")
 
     # Auto-servicio por QR: chip distintivo junto al n.º de pedido para que el mesero sepa
     # que lo pidió el propio comensal desde la mesa (req #4).
@@ -980,65 +993,120 @@ def _detalle_pedido(row, idx: int):
     nota_html = (f'<div style="font-size:0.8rem; color:#b45309; margin-top:4px;">📝 '
                  f'{html.escape(nota_txt)}</div>') if nota_txt else ""
 
+    # ── Pre-cuenta: una línea por ítem con su precio, en vez de texto corrido. Cuando
+    # hay abono parcial se consultan las unidades ya cobradas por plato (lineas_pagables)
+    # para marcar "✓ pagado" o "N de M pagadas" — así el cajero ve el progreso del cobro
+    # por plato sin tener que reabrir el diálogo. Solo se consulta con abono>0: evita
+    # una query extra por pedido en el refresco de 30 s cuando nadie ha abonado nada.
+    items_list = parse_items(row.get("items", []))
+    lineas_pago = {}
+    if abonado > 0:
+        try:
+            lineas_pago = {l["idx"]: l for l in pedidos.lineas_pagables(pid)}
+        except Exception:
+            lineas_pago = {}
+    if items_list:
+        filas = []
+        for i, it in enumerate(items_list):
+            cant = int(it.get("cantidad", 1) or 1)
+            nombre = html.escape(etiqueta_item(it))
+            precio_linea = int(it.get("precio") or 0) * cant
+            pago = lineas_pago.get(i)
+            marca = ""
+            if pago and pago["pagada"] > 0:
+                marca = (' <span style="color:#16a34a; font-weight:600;">✓ pagado</span>'
+                         if pago["restante"] == 0 else
+                         f' <span style="color:#4b43b0; font-weight:600;">· {pago["pagada"]} de {cant} pagadas</span>')
+            filas.append(
+                '<div style="display:flex; justify-content:space-between; padding:3px 0; '
+                'font-size:0.82rem; color:#45443e;">'
+                f'<span>{cant}x {nombre}{marca}</span>'
+                f'<span style="white-space:nowrap; margin-left:10px;">${fmt_money(precio_linea)}</span>'
+                '</div>'
+            )
+        items_block = "".join(filas)
+    else:
+        items_block = f'<div class="order-items">{pedidos.formatear_items(row.get("items", []))}</div>'
+
+    if abonado > 0:
+        total_row = (
+            '<div style="display:flex; justify-content:space-between; padding-top:6px; margin-top:4px; '
+            'border-top:1px solid #ececec; font-size:0.82rem; color:#6b6b64;">'
+            f'<span>Total</span><span>${fmt_money(total_p)}</span></div>'
+            '<div style="display:flex; justify-content:space-between; font-size:0.78rem; '
+            'color:#4b43b0; font-weight:600;">'
+            f'<span>Abonado</span><span>${fmt_money(abonado)}</span></div>'
+            '<div style="display:flex; justify-content:space-between; padding-top:4px; margin-top:2px; '
+            'border-top:1px solid #ececec; font-weight:700; color:#26262b; font-size:0.9rem;">'
+            f'<span>Saldo</span><span>${fmt_money(saldo)}</span></div>'
+        )
+    else:
+        total_row = (
+            '<div style="display:flex; justify-content:space-between; padding-top:6px; margin-top:4px; '
+            'border-top:1px solid #ececec; font-weight:700; color:#26262b; font-size:0.9rem;">'
+            f'<span>Total</span><span>${fmt_money(total_p)}</span></div>'
+        )
+
     st.markdown(f"""
     <div class="order-card mon-card"{borde}>
       <div style="display:flex; justify-content:space-between; align-items:flex-start;">
         <div>
           <div class="order-id">Pedido #{num_dia}{qr_chip}</div>{mesero_html}
-          <div class="order-items">{items}</div>{nota_html}
-          <div class="order-fecha">{fecha}</div>
         </div>
-        <div style="text-align:right;">{pedidos.badge_html(estado)}<div class="order-total" style="margin-top:8px;">${fmt_money(saldo)}</div>{abono_html}{chip}</div>
+        <div style="text-align:right;">{pedidos.badge_html(estado)}{chip}</div>
       </div>
+      <div style="margin-top:6px;">{items_block}{total_row}</div>
+      {nota_html}
+      <div class="order-fecha" style="margin-top:6px;">{fecha}</div>
     </div>
     """, unsafe_allow_html=True)
 
-    b1, b2, b3, b4, b5, b6, b7 = st.columns(7)
-    with b1:
+    # Jerarquía de acciones: Cobrar es la única acción de dinero y la más ancha (con el
+    # monto en el propio label); Marcar listo la sigue; Precuenta (antes "Ticket", de uso
+    # frecuente) queda visible; Descuento/Comanda/Nota —ocasionales— se agrupan en "⋯"
+    # para no competir por espacio con las acciones que la caja usa en cada pedido.
+    b_cobrar, b_listo, b_prec, b_mas, b_cancelar = st.columns([2.4, 1.6, 1.6, 0.8, 0.8])
+    with b_cobrar:
+        if auth.can("cobrar") and saldo > 0:
+            if st.button(f"💵 Cobrar ${fmt_money(saldo)}", key=f"cobrar_{uid}",
+                         use_container_width=True,
+                         help="Cobrar este pedido (efectivo/transferencia, abono parcial o por plato)"):
+                _pedir_dialogo("cobrar", ids=[int(pid)], titulo=f"Pedido #{num_dia}",
+                               saldo=int(saldo), uid=uid)
+    with b_listo:
         btn_label = pedidos.ESTADO_LABEL_BTN.get(estado)
-        if btn_label and st.button(btn_label, key=f"avanzar_{uid}", type="primary",
-                                   use_container_width=True):
+        if btn_label and st.button(btn_label, key=f"avanzar_{uid}", use_container_width=True):
             pedidos.avanzar_estado(pid, estado)  # flashea toast + st.rerun()
-    with b2:
-        if st.button("🖨 Ticket", key=f"ticket_{uid}", use_container_width=True,
+    with b_prec:
+        if st.button("🧾 Precuenta", key=f"ticket_{uid}", use_container_width=True,
                      help="Imprimir el prerecibo (pre-cuenta) del cliente"):
             pedidos.enqueue_prerecibo(pid)
             pedidos.flash(f"Prerecibo enviado · Pedido #{pid}", "🖨")
             st.rerun()
-    with b3:
-        if auth.can("cobrar") and saldo > 0 and st.button(
-                "💵 Cobrar", key=f"cobrar_{uid}", use_container_width=True,
-                help="Cobrar este pedido (efectivo/transferencia, abono parcial)"):
-            _pedir_dialogo("cobrar", ids=[int(pid)], titulo=f"Pedido #{num_dia}",
-                           saldo=int(saldo), uid=uid)
-    with b4:
-        # Descuento / cortesía: solo cajero/admin y con saldo; el modal exige PIN de admin.
-        if auth.can("cobrar") and saldo > 0 and st.button(
-                "🏷️ Descuento", key=f"descuento_{uid}", use_container_width=True,
-                help="Descuento o cortesía (requiere PIN de administrador)"):
-            _pedir_dialogo("descuento", pid=int(pid), saldo=int(saldo), uid=uid)
-    with b5:
-        # Reimprimir la comanda de cocina (atasco / ticket perdido) sin cambiar de estado.
-        # Solo aplica a pedidos en cocina (ESTADOS_ACTIVOS).
-        if estado in pedidos.ESTADOS_ACTIVOS and st.button(
-                "🍳 Comanda", key=f"comanda_{uid}", use_container_width=True,
-                help="Reimprimir la comanda de cocina"):
-            pedidos.enqueue_comanda(pid)
-            pedidos.flash(f"Comanda reenviada · Pedido #{pid}", "🍳")
-            st.rerun()
-    with b6:
-        # Añadir/editar la nota del pedido ya enviado (sin candado de rol: tarea de salón).
-        if st.button("📝 Nota", key=f"nota_{uid}", use_container_width=True,
-                     help="Añadir o editar la nota del pedido"):
-            _pedir_dialogo("nota", pid=int(pid), num_dia=num_dia, estado=estado, uid=uid)
-    with b7:
+    with b_mas:
+        with st.popover("⋯", key=f"mas_{uid}", use_container_width=True, help="Más acciones"):
+            if auth.can("cobrar") and saldo > 0:
+                if st.button("🏷️ Descuento", key=f"descuento_{uid}", use_container_width=True,
+                             help="Descuento o cortesía (requiere PIN de administrador)"):
+                    _pedir_dialogo("descuento", pid=int(pid), saldo=int(saldo), uid=uid)
+            if estado in pedidos.ESTADOS_ACTIVOS:
+                if st.button("🍳 Comanda", key=f"comanda_{uid}", use_container_width=True,
+                             help="Reimprimir la comanda de cocina"):
+                    pedidos.enqueue_comanda(pid)
+                    pedidos.flash(f"Comanda reenviada · Pedido #{pid}", "🍳")
+                    st.rerun()
+            if st.button("📝 Nota", key=f"nota_{uid}", use_container_width=True,
+                         help="Añadir o editar la nota del pedido"):
+                _pedir_dialogo("nota", pid=int(pid), num_dia=num_dia, estado=estado, uid=uid)
+    with b_cancelar:
         # Anti-skimming: si la cuenta ya tocó caja (cobro iniciado / abono / pago), el
         # botón queda BLOQUEADO. Fase 3: modal centrado compartido con el tablero.
         if pedidos.puede_cancelar(row):
-            if st.button("✕ Cancelar", key=f"cancelar_{uid}", use_container_width=True):
+            if st.button("✕", key=f"cancelar_{uid}", use_container_width=True,
+                         help="Cancelar pedido"):
                 _pedir_dialogo("cancelar", pid=int(pid), uid=uid)
         else:
-            st.button("🔒 En caja", key=f"cancelar_{uid}", use_container_width=True,
+            st.button("🔒", key=f"cancelar_{uid}", use_container_width=True,
                       disabled=True,
                       help="No se puede cancelar: la cuenta ya entró a caja (anti-fraude).")
 
@@ -1181,7 +1249,7 @@ def _web_card(row, idx: int):
 
     mins      = pedidos.minutos_espera(row.get("fecha"))
     color_urg = pedidos.urgencia(mins, estado)
-    chip = (f'<div style="font-size:0.72rem; color:{color_urg}; font-weight:700; margin-top:6px;">⏱ {mins} min</div>'
+    chip = (f'<div style="font-size:0.72rem; color:{color_urg}; font-weight:700; margin-top:6px;">⏱ {pedidos.fmt_espera(mins)}</div>'
             if color_urg else "")
     borde = f' style="border-left:4px solid {color_urg};"' if color_urg else ""
 
@@ -1237,7 +1305,7 @@ def _web_card(row, idx: int):
                                    use_container_width=True):
             pedidos.avanzar_estado(pid, estado)  # flashea toast + st.rerun()
     with b2:
-        if st.button("🖨 Ticket", key=f"ticket_{uid}", use_container_width=True,
+        if st.button("🧾 Precuenta", key=f"ticket_{uid}", use_container_width=True,
                      help="Imprimir el prerecibo (pre-cuenta) del cliente"):
             pedidos.enqueue_prerecibo(pid)
             pedidos.flash(f"Prerecibo enviado · Pedido #{pid}", "🖨")
