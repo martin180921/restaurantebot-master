@@ -1,0 +1,20 @@
+# CI mínimo: chequeo de sintaxis de todos los servicios antes de que algo
+# llegue a staging o main (main despliega a los restaurantes del piloto).
+name: CI
+
+on:
+  push:
+    branches: [main, staging]
+  pull_request:
+    branches: [main, staging]
+
+jobs:
+  sintaxis:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Compilar todos los .py
+        run: python -m compileall -q whatsapp_bot dashboard_admin app_cliente print_agent scripts
