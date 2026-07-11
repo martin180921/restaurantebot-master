@@ -37,3 +37,6 @@ backups/
 # Config del monitor (URLs con credenciales de todos los restaurantes)
 scripts/restaurantes_monitor.json
 scripts/monitor_salud.bat
+# Wrappers generados por instalar_flota.bat (monitor_flota lleva token de Telegram)
+scripts/respaldo_diario.bat
+scripts/monitor_flota.bat

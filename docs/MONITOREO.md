@@ -51,8 +51,12 @@ python scripts/monitor_salud.py --config scripts/restaurantes_monitor.json
 
 ## Dejarlo corriendo cada pocos minutos
 
-Programador de tareas de Windows → *Crear tarea básica* → desencadenador **Repetir cada 5
-minutos** → acción **Iniciar un programa** apuntando directo al
+**1 clic:** doble clic en `scripts/instalar_flota.bat` — crea la tarea `OLO_Monitor` (cada 10
+min) junto con la de respaldo diario, y genera `scripts/monitor_flota.bat` donde pegas el
+token y chat id de Telegram del paso anterior.
+
+A mano: Programador de tareas de Windows → *Crear tarea básica* → desencadenador **Repetir
+cada 5 minutos** → acción **Iniciar un programa** apuntando directo al
 `scripts/monitor_salud.bat` de arriba (así las variables de Telegram viajan con él, sin
 depender del entorno de la tarea). Complementa esto con un **UptimeRobot** gratuito sobre las
 URLs de los paneles para cubrir el caso de que el propio PC del monitor se apague.

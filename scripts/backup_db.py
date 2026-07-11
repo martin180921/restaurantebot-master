@@ -33,6 +33,7 @@ directorio según --retention-days (conservando siempre al menos --keep por grup
 """
 import argparse
 import gzip
+import json
 import os
 import re
 import sys
@@ -177,11 +178,23 @@ def podar(out_dir: str, retention_days: int, keep: int) -> list:
     return borrados
 
 
+def _respaldar_uno(url: str, out_dir: str, nombre: str | None) -> None:
+    destino, ver, total, resumen = respaldar(url, out_dir, nombre)
+    tam = os.path.getsize(destino)
+    print(f"✔ Respaldo creado: {destino}")
+    print(f"  Postgres {ver} · {len(resumen)} tablas · {total} filas · {tam/1024:.1f} KB")
+    for tabla, n in resumen:
+        if n:
+            print(f"    {tabla:<22} {n}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Respaldo lógico (puro Python) de la BD.")
     ap.add_argument("--database-url", default=os.getenv("DATABASE_URL"),
                     help="postgresql://... (o variable DATABASE_URL)")
     ap.add_argument("--nombre", help="Etiqueta del restaurante (va en el nombre del archivo)")
+    ap.add_argument("--config", help="JSON con la flota (mismo formato que el monitor: "
+                    "restaurantes_monitor.json) — respalda TODOS de una pasada")
     ap.add_argument("--out-dir", default="backups", help="Carpeta destino (def: backups)")
     ap.add_argument("--retention-days", type=int, default=14,
                     help="Borra respaldos más viejos que N días (def: 14)")
@@ -189,16 +202,34 @@ def main() -> None:
                     help="Conserva siempre al menos N respaldos por restaurante (def: 7)")
     args = ap.parse_args()
 
-    if not args.database_url:
-        sys.exit("[FATAL] Falta --database-url (o la variable DATABASE_URL)")
+    # Modo flota: mismo JSON que monitor_salud.py, un respaldo por restaurante. Un fallo
+    # no detiene a los demás (que un restaurante caído no deje al resto sin respaldo del
+    # día), pero el código de salida != 0 avisa a la tarea programada.
+    if args.config:
+        with open(args.config, encoding="utf-8") as f:
+            restaurantes = json.load(f).get("restaurantes", [])
+        if not restaurantes:
+            sys.exit(f"[FATAL] {args.config} no tiene 'restaurantes'")
+        fallos = []
+        for r in restaurantes:
+            nombre = r.get("nombre") or "sin_nombre"
+            try:
+                _respaldar_uno(r["database_url"], args.out_dir, nombre)
+            except Exception as e:  # noqa: BLE001 — seguir con el resto de la flota
+                fallos.append(nombre)
+                print(f"✖ {nombre}: {e}")
+        borrados = podar(args.out_dir, args.retention_days, args.keep)
+        if borrados:
+            print(f"  Podados {len(borrados)} respaldo(s) viejos (>{args.retention_days}d, "
+                  f"conservando {args.keep} por restaurante).")
+        if fallos:
+            sys.exit(f"[ALERTA] Falló el respaldo de: {', '.join(fallos)}")
+        return
 
-    destino, ver, total, resumen = respaldar(args.database_url, args.out_dir, args.nombre)
-    tam = os.path.getsize(destino)
-    print(f"✔ Respaldo creado: {destino}")
-    print(f"  Postgres {ver} · {len(resumen)} tablas · {total} filas · {tam/1024:.1f} KB")
-    for tabla, n in resumen:
-        if n:
-            print(f"    {tabla:<22} {n}")
+    if not args.database_url:
+        sys.exit("[FATAL] Falta --database-url o --config (o la variable DATABASE_URL)")
+
+    _respaldar_uno(args.database_url, args.out_dir, args.nombre)
 
     borrados = podar(args.out_dir, args.retention_days, args.keep)
     if borrados:

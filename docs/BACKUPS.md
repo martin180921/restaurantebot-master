@@ -25,6 +25,16 @@ Usa siempre `--nombre` si vas a guardar backups de varios restaurantes en el mis
 todos comparten el mismo nombre de base en Railway ("railway"), así que sin `--nombre` los
 archivos de 5 restaurantes serían indistinguibles.
 
+## Toda la flota de una pasada
+
+Con el mismo JSON que usa el monitor (`scripts/restaurantes_monitor.json`, una entrada por
+restaurante) se respalda todo en un comando; un restaurante caído no detiene a los demás,
+pero el código de salida ≠ 0 avisa:
+
+```bash
+python scripts/backup_db.py --config scripts/restaurantes_monitor.json --out-dir backups
+```
+
 ## Restaurar (destructivo — reemplaza los datos)
 
 ```bash
@@ -40,11 +50,17 @@ python scripts/restore_db.py --file backups/backup_....sql.gz \
 tabla. Nunca apuntes a la base de un restaurante en marcha salvo que restaurar sea justo lo
 que quieres.
 
-## Dejarlo automático (una vez por restaurante)
+## Dejarlo automático
 
-La forma más simple para el piloto: el **mismo PC del restaurante** que corre el
-`print_agent` (siempre encendido) respalda su propia base cada noche. El archivo queda en el
-disco del local, físicamente separado de Railway.
+**Opción A — 1 clic, desde tu PC (recomendada para el piloto):** doble clic en
+`scripts/instalar_flota.bat`. Crea las tareas programadas `OLO_Respaldo` (respaldo diario de
+toda la flota vía `--config`, 09:00 por defecto) y `OLO_Monitor` (monitor cada 10 min), con
+sus wrappers editables en `scripts/`. Tu PC debe estar encendido a esa hora; verifica el
+primer día con `schtasks /Run /TN OLO_Respaldo` y mirando `backups/respaldo.log`.
+
+**Opción B — en el PC del restaurante:** el mismo PC que corre el `print_agent` (siempre
+encendido) respalda su propia base cada noche. El archivo queda en el disco del local,
+físicamente separado de Railway.
 
 Programador de tareas de Windows (una sola vez):
 

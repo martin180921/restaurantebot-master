@@ -14,6 +14,7 @@ su propio módulo dentro de views/ para poder trabajarlas de forma independiente
       Administración (🔐, solo admin, al fondo del menú lateral; ver _render_admin)
 """
 import html as _html
+import os as _os
 import time as _time
 import streamlit as st
 import streamlit.components.v1
@@ -30,6 +31,11 @@ from views import (pedidos, monitor_mesas, nuevo_pedido, menu, mesas, resumen,
 from db import fecha_larga, ahora_bogota, restaurante_nombre
 
 load_dotenv()
+
+# Versión desplegada: con deploy-por-restaurante cada instancia puede ir en una versión
+# distinta; el SHA corto en la navegación permite saber cuál corre este restaurante de un
+# vistazo (Railway inyecta RAILWAY_GIT_COMMIT_SHA en cada deploy; "local" en desarrollo).
+VERSION = (_os.getenv("RAILWAY_GIT_COMMIT_SHA") or "")[:7] or "local"
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 # El nombre del restaurante vive en 'ajustes' (editable en 🍔 Menú → ⚙️ Ajustes);
@@ -941,7 +947,7 @@ def _render_desktop_shell():
             st.markdown(
                 '<span class="nav-box"></span>'
                 f'<div class="nav-brand">{_html.escape(restaurante_nombre())}</div>'
-                f'<div class="nav-brand-sub">{fecha_larga(ahora_bogota())}</div>',
+                f'<div class="nav-brand-sub">{fecha_larga(ahora_bogota())} · {VERSION}</div>',
                 unsafe_allow_html=True,
             )
             st.divider()
