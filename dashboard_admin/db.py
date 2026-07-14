@@ -356,6 +356,37 @@ def _ensure_schema():
                 permite_repetir BOOLEAN NOT NULL DEFAULT FALSE
             )
         """))
+        # Categorías del catálogo (replicabilidad). A DIFERENCIA de plato_dia_grupos, el
+        # panel no solo crea la tabla sino que también SIEMBRA las 4 clásicas: son
+        # universales (todo restaurante necesita al menos estas pestañas) y así el editor
+        # de 🏷️ Categorías y el filtro de horario de la carta digital funcionan aunque el
+        # bot todavía no haya redeployado. La marca 'seed_categorias' en ajustes (la misma
+        # que usa el bot) evita resucitar categorías que el restaurante borró a propósito.
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS categorias (
+                id                SERIAL      PRIMARY KEY,
+                clave             VARCHAR(20) UNIQUE NOT NULL,
+                etiqueta          TEXT        NOT NULL,
+                emoji             VARCHAR(8)  NOT NULL DEFAULT '',
+                orden             INTEGER     NOT NULL DEFAULT 0,
+                activo            BOOLEAN     NOT NULL DEFAULT TRUE,
+                disponible_desde  TIME,
+                disponible_hasta  TIME
+            )
+        """))
+        if not conn.execute(text(
+                "SELECT 1 FROM ajustes WHERE clave = 'seed_categorias'")).first():
+            conn.execute(text("""
+                INSERT INTO categorias (clave, etiqueta, emoji, orden) VALUES
+                    ('especial',   'Especiales',  '⭐', 1),
+                    ('a_la_carta', 'A la carta',  '📋', 2),
+                    ('adicional',  'Adicionales', '🍟', 3),
+                    ('bebida',     'Bebidas',     '🥤', 4)
+                ON CONFLICT (clave) DO NOTHING
+            """))
+            conn.execute(text(
+                "INSERT INTO ajustes (clave, valor) VALUES ('seed_categorias', '1') "
+                "ON CONFLICT (clave) DO NOTHING"))
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS clientes (
                 telefono    VARCHAR(40) PRIMARY KEY,
