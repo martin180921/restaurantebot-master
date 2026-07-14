@@ -14,9 +14,12 @@
      mesa del POS), descuenta inventario en el mismo txn y encola la comanda marcada
      [QR]. El pago lo cobra la caja. Aparece en el Monitor de mesas señalizado como QR.
 
-  Carta común (ambos flujos), 4 secciones idénticas a las del POS:
-     #1 Plato del Día configurable · #2 Especiales · #3 A la carta (+ Adicionales y
-     Bebidas) · #4 Notas generales.
+  Carta común (ambos flujos), misma taxonomía que el POS: #1 Plato del Día
+     configurable · #2.. una sección por categoría ACTIVA del catálogo (tabla
+     categorias — las 4 clásicas más las que agregue el restaurante en el panel,
+     ⚙️ Ajustes → 🏷️ Categorías) · #N Notas generales. Una categoría con horario
+     (disponible_desde/hasta) SOLO se oculta aquí, fuera de su franja — el panel y el
+     POS del mesero siempre la ven, sin importar la hora.
 
 App aislada: su propia conexión; comparte con el panel solo el esquema de la BD.
 """
@@ -57,14 +60,14 @@ RESTAURANTE_ID = int(os.getenv("RESTAURANTE_ID", "1"))
 TIPO_QR = "mesa_qr"
 TIPO_LABEL = {"domicilio": "🛵 Domicilio", "para_llevar": "🛍️ Para Llevar"}
 
-# El recargo de entrega se cobra una vez por CADA plato del pedido: Plato del Día,
-# Especiales y A la carta. Las Bebidas y los Adicionales NO suman recargo.
-FEE_TIPOS = ("plato_dia", "especial", "item")
-
 
 def _n_platos_recargo(items) -> int:
-    """Nº de platos (unidades) que cuentan para el recargo de entrega."""
-    return sum(int(it.get("cantidad", 0)) for it in items if it.get("tipo") in FEE_TIPOS)
+    """Nº de platos (unidades) que cuentan para el recargo de entrega: Plato del Día +
+    lo que traiga cada categoría en su comportamiento (ver tipos_con_recargo más abajo:
+    referencia diferida a propósito, se resuelve cuando esta función se LLAMA, no al
+    importar el módulo)."""
+    fee_tipos = tipos_con_recargo()
+    return sum(int(it.get("cantidad", 0)) for it in items if it.get("tipo") in fee_tipos)
 
 
 def _normalizar_db_url(url):
@@ -148,6 +151,20 @@ def _ensure_schema():
                     min_sel         INTEGER NOT NULL DEFAULT 1,
                     max_sel         INTEGER NOT NULL DEFAULT 1,
                     permite_repetir BOOLEAN NOT NULL DEFAULT FALSE
+                )
+            """))
+            # Categorías dinámicas del catálogo. El bot las siembra (seed_categorias);
+            # aquí solo garantizamos la tabla. Vacía → fallback a las 4 clásicas.
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS categorias (
+                    id                SERIAL      PRIMARY KEY,
+                    clave             VARCHAR(20) UNIQUE NOT NULL,
+                    etiqueta          TEXT        NOT NULL,
+                    emoji             VARCHAR(8)  NOT NULL DEFAULT '',
+                    orden             INTEGER     NOT NULL DEFAULT 0,
+                    activo            BOOLEAN     NOT NULL DEFAULT TRUE,
+                    disponible_desde  TIME,
+                    disponible_hasta  TIME
                 )
             """))
             conn.execute(text("""
@@ -292,6 +309,109 @@ def _etiquetas_grupos() -> dict:
     return d
 
 
+# ── Categorías del catálogo DINÁMICAS (tabla categorias) ────────────────────────
+# Mismo patrón que los grupos del Plato del Día de arriba: cada restaurante agrega las
+# suyas (Desayunos, Postres…) desde el panel, además de las 4 clásicas. El
+# COMPORTAMIENTO (¿lleva descripción?, ¿cobra recargo?, ¿ofrece entrada/bebida del
+# Plato del Día incluidas?) es el mismo código que dashboard_admin/db.py — duplicado a
+# propósito: esta app es un proceso aislado con su propia conexión.
+_CATEGORIAS_CLASICAS = [
+    ("especial",   "Especiales",  "⭐", 1),
+    ("a_la_carta", "A la carta",  "📋", 2),
+    ("adicional",  "Adicionales", "🍟", 3),
+    ("bebida",     "Bebidas",     "🥤", 4),
+]
+
+_COMPORTAMIENTO_CATEGORIA = {
+    "especial":   {"desc": True,  "recargo": True,  "extras": True},
+    "a_la_carta": {"desc": False, "recargo": True,  "extras": True},
+    "adicional":  {"desc": True,  "recargo": False, "extras": False},
+    "bebida":     {"desc": False, "recargo": False, "extras": False},
+}
+_COMPORTAMIENTO_DEFAULT = _COMPORTAMIENTO_CATEGORIA["a_la_carta"]
+_TIPO_CATEGORIA = {"a_la_carta": "item"}
+
+
+def _categorias_clasicas() -> list:
+    return [{"clave": c, "etiqueta": e, "emoji": em, "orden": o}
+            for c, e, em, o in _CATEGORIAS_CLASICAS]
+
+
+def comportamiento_categoria(clave: str) -> dict:
+    """{desc, recargo, extras} de una categoría. Categoría nueva (creada por el
+    restaurante) → igual que 'a_la_carta'."""
+    return _COMPORTAMIENTO_CATEGORIA.get(clave, _COMPORTAMIENTO_DEFAULT)
+
+
+def tipo_de_categoria(clave: str) -> str:
+    """'tipo' que se guarda en pedidos.items para esta categoría (histórico: solo
+    'a_la_carta' se remapea a 'item'; el resto usa su propia clave)."""
+    return _TIPO_CATEGORIA.get(clave, clave)
+
+
+@st.cache_data(ttl=30)
+def _cargar_categorias_raw() -> list:
+    """TODAS las categorías (activas o no, sin filtrar por horario). [] si la tabla
+    está vacía/sin sembrar o si la BD no responde (la carta debe abrir igual)."""
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(text(
+                "SELECT clave, etiqueta, emoji, orden, activo, disponible_desde, "
+                "disponible_hasta FROM categorias ORDER BY orden, id"
+            )).mappings().all()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+def _en_horario(cat: dict, ahora) -> bool:
+    """True si 'ahora' (hora de Bogotá) cae dentro de disponible_desde/hasta. NULL en
+    cualquiera de las dos = sin restricción (visible todo el día). 'desde' > 'hasta' es
+    una ventana nocturna (cruza medianoche, p. ej. 20:00–02:00)."""
+    desde, hasta = cat.get("disponible_desde"), cat.get("disponible_hasta")
+    if desde is None or hasta is None:
+        return True
+    if desde <= hasta:
+        return desde <= ahora <= hasta
+    return ahora >= desde or ahora <= hasta
+
+
+def cargar_categorias() -> list:
+    """Categorías ACTIVAS y dentro de horario AHORA MISMO. Tabla vacía/sin sembrar →
+    las 4 clásicas (sin restricción de horario) — NO confundir con 'ninguna categoría
+    activa ahora mismo por horario', que devuelve [] legítimamente (p. ej. Desayunos
+    fuera de su franja): la tabla vacía se detecta ANTES de aplicar activo/horario.
+
+    El horario se compara contra la hora 'LOCALTIME' de la conexión (zona America/Bogota
+    ya fijada en connect_args, arriba) en vez de datetime.now() de Python: Railway no
+    siempre deja el reloj del PROCESO en hora local (ver la nota de zona horaria de
+    dashboard_admin/db.py) y esta app no tiene ese workaround con zoneinfo. Se pide con
+    una consulta aparte, y SOLO si alguna categoría activa realmente usa horario —así
+    el caso común (nadie configuró horarios) no paga esa consulta extra."""
+    filas = _cargar_categorias_raw()
+    if not filas:
+        return _categorias_clasicas()
+    activas = [c for c in filas if c.get("activo")]
+    if not any(c.get("disponible_desde") or c.get("disponible_hasta") for c in activas):
+        return activas
+    try:
+        with engine.connect() as conn:
+            ahora = conn.execute(text("SELECT LOCALTIME")).scalar()
+    except Exception:
+        return activas   # sin hora confiable → no ocultar nada por horario
+    return [c for c in activas if _en_horario(c, ahora)]
+
+
+def tipos_con_recargo() -> set:
+    """{'plato_dia'} ∪ los tipos de categorías cuyo comportamiento cobra recargo de
+    entrega (Domicilio / Para Llevar)."""
+    tipos = {"plato_dia"}
+    for c in cargar_categorias():
+        if comportamiento_categoria(c["clave"])["recargo"]:
+            tipos.add(tipo_de_categoria(c["clave"]))
+    return tipos
+
+
 @st.cache_data(ttl=30)
 def cargar_componentes_activos() -> dict:
     """{grupo: [{id, nombre, stock}]} de componentes ofrecibles hoy (activo + no agotado).
@@ -324,7 +444,7 @@ def cargar_catalogo() -> dict:
             "AND (stock IS NULL OR stock > 0) "
             "ORDER BY categoria, orden, id"
         )).mappings().all()
-    out = {"especial": [], "a_la_carta": [], "adicional": [], "bebida": []}
+    out = {}
     for r in rows:
         out.setdefault(r["categoria"], []).append({
             "id": int(r["id"]), "nombre": r["nombre"],
@@ -582,7 +702,11 @@ def _descontar_inventario(conn, items) -> None:
 # mesa armado por el mesero. Sin precios ni cajón: la cocina solo ve mesa + ítems.
 _GRUPO_LABEL = {"entrada": "Entrada", "principio": "Principio", "proteina": "Proteína",
                 "acompanamiento": "Acompañamientos", "bebida": "Bebida"}
-_ORDEN_CAT = ["plato_dia", "especial", "item", "adicional", "bebida"]
+# Todas las categorías (activas o no, sin filtrar por horario; clásicas si la tabla
+# aún no está sembrada): un ítem ya en el carrito de una categoría que se desactivó o
+# quedó fuera de horario a mitad del pedido igual debe agruparse bien en la comanda.
+_ORDEN_CAT = ["plato_dia"] + [tipo_de_categoria(c["clave"])
+                              for c in (_cargar_categorias_raw() or _categorias_clasicas())]
 
 
 def _item_tipo(it) -> str:
@@ -1454,32 +1578,36 @@ def _dialog_confirmar():
 
 
 def _render_secciones(comp, cat, ajustes):
-    """Renderiza las 4 secciones de la carta + notas generales (parte COMÚN a los dos
-    flujos: mesa y delivery). Devuelve (items, ok_pd, notas)."""
+    """Renderiza el Plato del Día + una sección por categoría del catálogo (ACTIVA y
+    dentro de horario ahora mismo, ver cargar_categorias) + notas generales (parte
+    COMÚN a los dos flujos: mesa y delivery). Una categoría sin platos disponibles hoy
+    se omite (nunca se muestra una sección vacía al cliente). Devuelve (items, ok_pd,
+    notas)."""
     pd_precio = _int(ajustes, "plato_dia_precio", 0)
 
     # #1 Plato del Día (grupos dinámicos)
     items_pd, ok_pd = _seccion_plato_dia(comp, pd_precio, cargar_grupos_pd())
 
-    # #2 Especiales (con entrada/bebida del Plato del Día incluidas, opcionales; por unidad
-    # cuando se piden 2 o más)
-    st.markdown('<div class="c-section">⭐ Especiales</div>', unsafe_allow_html=True)
-    items_esp = _seccion_con_extras(cat.get("especial", []), "especial", comp, con_desc=True)
+    # #2.. una sección por categoría del catálogo, en su 'orden'. El comportamiento
+    # (con_desc / con_extras) sale de comportamiento_categoria; una categoría nueva
+    # (creada por el restaurante) se comporta como 'A la carta'.
+    items_cat = []
+    for c in cargar_categorias():
+        productos = cat.get(c["clave"], [])
+        if not productos:
+            continue
+        tipo = tipo_de_categoria(c["clave"])
+        comport = comportamiento_categoria(c["clave"])
+        etiqueta = f'{c["emoji"]} {c["etiqueta"]}'.strip()
+        st.markdown(f'<div class="c-section">{html.escape(etiqueta)}</div>', unsafe_allow_html=True)
+        if comport["extras"]:
+            items_cat += _seccion_con_extras(productos, tipo, comp, con_desc=comport["desc"])
+        else:
+            items_cat += _seccion_catalogo(productos, tipo, con_desc=comport["desc"])
 
-    # #3 A la carta (con entrada/bebida incluidas, igual que los especiales) + sub-grupos
-    # Adicionales y Bebidas
-    st.markdown('<div class="c-section">🍽️ A la carta</div>', unsafe_allow_html=True)
-    items_alc = _seccion_con_extras(cat.get("a_la_carta", []), "item", comp)
-    items_adi = []
-    if cat.get("adicional"):
-        st.markdown('<div class="c-sub">🍟 Adicionales</div>', unsafe_allow_html=True)
-        items_adi = _seccion_catalogo(cat.get("adicional", []), "adicional", con_desc=True)
-    st.markdown('<div class="c-sub">🥤 Bebidas</div>', unsafe_allow_html=True)
-    items_beb = _seccion_catalogo(cat.get("bebida", []), "bebida")
+    items = items_pd + items_cat
 
-    items = items_pd + items_esp + items_alc + items_adi + items_beb
-
-    # #4 Notas generales
+    # #N Notas generales
     st.markdown('<div class="c-section">📝 Notas generales</div>', unsafe_allow_html=True)
     notas = st.text_area("Notas generales", key="notas_generales", label_visibility="collapsed",
                          placeholder="Observaciones para todo el pedido (timbre dañado, sin cubiertos…)")

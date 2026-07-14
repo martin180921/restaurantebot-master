@@ -527,13 +527,13 @@ def _dialog_editar(pid, uid):
 
     # ── Agregar productos ───────────────────────────────────────────────────────
     st.markdown('<div class="section-title">Agregar productos</div>', unsafe_allow_html=True)
-    SECCIONES = [("especial", "⭐ Especiales"), ("a_la_carta", "🍽️ A la carta"),
-                 ("adicional", "🍟 Adicionales"), ("bebida", "🥤 Bebidas")]
-    for cat, label in SECCIONES:
+    for cat_row in npos.cargar_categorias():
+        cat = cat_row["clave"]
+        label = f'{cat_row["emoji"]} {cat_row["etiqueta"]}'.strip()
         prods = npos._catalogo_seccion(df_cat, cat)
         if not prods:
             continue
-        tipo_item = "item" if cat == "a_la_carta" else cat
+        tipo_item = npos.tipo_de_categoria(cat)
         with st.expander(label):
             for p in prods:
                 ca, cb = st.columns([4, 1])

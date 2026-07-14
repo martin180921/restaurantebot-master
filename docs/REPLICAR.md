@@ -86,7 +86,8 @@ Notas:
 | Precios planos y recargo de entrega | Panel → ⚙️ Ajustes |
 | Grupos del Plato del Día (pasos, mín/máx, repetir) | Panel → 🍽️ Plato del Día → 🧩 Grupos |
 | Opciones/stock de cada grupo | Panel → 🍽️ Plato del Día / 📦 Inventario |
-| Carta (especiales, a la carta, adicionales, bebidas) | Panel → 🍔 Menú |
+| Categorías de la carta (nombre, emoji, orden, horario) | Panel → 🍔 Menú → ⚙️ Ajustes → 🏷️ Categorías |
+| Carta (las 4 clásicas + las que agregue el restaurante) | Panel → 🍔 Menú |
 | Mesas | Panel → 🪑 Mesas |
 
 Lo que sigue requiriendo deploy/env: credenciales de Twilio, contraseñas del panel, `RESTAURANTE_ID`, URL de la app cliente y zona horaria (hoy fija en America/Bogota).

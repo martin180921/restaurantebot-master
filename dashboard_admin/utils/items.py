@@ -20,14 +20,19 @@ igual que antes ('N x nombre'), sin cabecera de categoría ni desglose.
 import json
 import html
 
-# Cabecera de categoría para los tickets agrupados.
-CAT_LABEL = {
+# Fallback de cabecera de categoría + orden canónico del ticket, SOLO para cuando la
+# BD no responde o el import diferido de db falla (ver _cat_label_y_orden): nunca
+# debería dispararse en un arranque normal, porque db.cargar_categorias ya cae sola a
+# estas 4 clásicas si la tabla 'categorias' aún no está sembrada.
+_CAT_LABEL_FALLBACK = {
     "plato_dia": "PLATO DEL DIA",
     "especial":  "ESPECIALES",
     "item":      "A LA CARTA",
     "adicional": "ADICIONALES",
     "bebida":    "BEBIDAS",
 }
+_ORDEN_CAT_FALLBACK = ["plato_dia", "especial", "item", "adicional", "bebida"]
+
 # Etiqueta de cada paso de configuración del Plato del Día.
 GRUPO_LABEL = {
     "entrada":   "Entrada",
@@ -36,8 +41,27 @@ GRUPO_LABEL = {
     "acompanamiento": "Acompañamientos",
     "bebida":    "Bebida",
 }
-# Orden canónico de las categorías en cualquier ticket.
-ORDEN_CAT = ["plato_dia", "especial", "item", "adicional", "bebida"]
+
+
+def _cat_label_y_orden():
+    """(CAT_LABEL, ORDEN_CAT) dinámicos: 'plato_dia' primero y luego una entrada por
+    categoría del catálogo —activa o no, para poder rotular pedidos viejos de una
+    categoría hoy desactivada— en su 'orden' (tabla 'categorias', ver
+    db.cargar_categorias). Import DIFERIDO a propósito: db.py importa este módulo A
+    NIVEL DE MÓDULO (`from utils.items import parse_items`), así que importar db aquí
+    arriba formaría un ciclo. Si algo falla (BD caída a mitad del render), cae a las 5
+    categorías clásicas de siempre — nunca debe romper el tablero ni la comanda."""
+    try:
+        from db import cargar_categorias, tipo_de_categoria
+        label = {"plato_dia": "PLATO DEL DIA"}
+        orden = ["plato_dia"]
+        for c in cargar_categorias(solo_activas=False):
+            tipo = tipo_de_categoria(c["clave"])
+            label[tipo] = str(c["etiqueta"]).upper()
+            orden.append(tipo)
+        return label, orden
+    except Exception:
+        return dict(_CAT_LABEL_FALLBACK), list(_ORDEN_CAT_FALLBACK)
 
 
 def parse_items(raw):
@@ -53,9 +77,13 @@ def parse_items(raw):
 
 
 def item_tipo(item) -> str:
-    """Tipo del item; los legados sin 'tipo' se consideran 'item' (a la carta)."""
+    """Tipo del item; los legados sin 'tipo' se consideran 'item' (a la carta). Un
+    valor que no coincide con NINGUNA categoría (dato corrupto o de otra instalación)
+    también cae en 'item'; una categoría del restaurante, incluida una recién creada,
+    siempre se reconoce por su propia clave (ver _cat_label_y_orden)."""
+    _label, orden = _cat_label_y_orden()
     t = str(item.get("tipo") or "item").lower()
-    return t if t in ORDEN_CAT else "item"
+    return t if t in orden else "item"
 
 
 def _agrupa_acomp(acomp) -> str:
@@ -138,13 +166,15 @@ def formatear_items_html(raw) -> str:
 
 
 def _agrupar(raw):
-    """[(tipo, [{nombre, cantidad, componentes, precio}, ...]), ...] en ORDEN_CAT. Van
-    individuales (con su desglose) los plato_dia y los especiales que traen entrada/bebida
-    incluidas; el resto (incl. especiales sin extras) se agrega por nombre dentro de su
-    categoría. 'precio' es el precio UNITARIO (no multiplicado por cantidad): lo necesita
-    el ticket impreso para el resumen colapsado del Plato del Día (ver print_agent)."""
+    """[(tipo, [{nombre, cantidad, componentes, precio}, ...]), ...] en el ORDEN_CAT
+    dinámico (ver _cat_label_y_orden). Van individuales (con su desglose) los plato_dia
+    y los especiales que traen entrada/bebida incluidas; el resto (incl. especiales sin
+    extras) se agrega por nombre dentro de su categoría. 'precio' es el precio UNITARIO
+    (no multiplicado por cantidad): lo necesita el ticket impreso para el resumen
+    colapsado del Plato del Día (ver print_agent)."""
     items = parse_items(raw)
-    buckets = {c: [] for c in ORDEN_CAT}
+    _label, orden = _cat_label_y_orden()
+    buckets = {c: [] for c in orden}
     indices = {}
     for it in items:
         tipo = item_tipo(it)
@@ -163,13 +193,14 @@ def _agrupar(raw):
                 d = {"nombre": nombre, "cantidad": qty, "componentes": [], "precio": precio}
                 indices[key] = d
                 buckets[tipo].append(d)
-    return [(c, buckets[c]) for c in ORDEN_CAT if buckets[c]]
+    return [(c, buckets[c]) for c in orden if buckets[c]]
 
 
 def lineas_por_categoria(raw):
-    """[(CAT_LABEL, [{nombre, cantidad, componentes}, ...]), ...] para tickets
+    """[(etiqueta_categoria, [{nombre, cantidad, componentes}, ...]), ...] para tickets
     agrupados (HTML del navegador)."""
-    return [(CAT_LABEL[tipo], items) for tipo, items in _agrupar(raw)]
+    label, _orden = _cat_label_y_orden()
+    return [(label[tipo], items) for tipo, items in _agrupar(raw)]
 
 
 def items_para_ticket(raw):
