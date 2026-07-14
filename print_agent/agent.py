@@ -37,7 +37,10 @@ PULSO_CAJON = b"\x1b\x70\x00\x19\x96"
 
 # Cabeceras de categoría del ticket. Mismo contrato que el panel (utils/items.py);
 # se duplica aquí a propósito: el agente es un proceso aislado que solo comparte la
-# forma del payload de print_jobs, no el código Streamlit.
+# forma del payload de print_jobs, no el código Streamlit. Un 'tipo' que el restaurante
+# creó como categoría nueva (Desayunos, Postres…) no está aquí — CAT_LABEL.get() más
+# abajo cae en el propio 'tipo' (ver _etiqueta_tipo): no hace falta tocar este agente
+# cada vez que alguien agrega una categoría desde el panel.
 CAT_LABEL = {
     "plato_dia": "PLATO DEL DIA",
     "especial":  "ESPECIALES",
@@ -46,14 +49,16 @@ CAT_LABEL = {
     "bebida":    "BEBIDAS",
 }
 
-# Tipos que cuentan en el resumen "PLATOS Y BEBIDAS: N" de la cabecera del ticket.
-# Excluye 'adicional' a propósito (los adicionales son extras, no platos). Mismo criterio
-# que usa el panel para el conteo; se duplica aquí porque el agente es un proceso aislado.
-DISH_TIPOS = ("plato_dia", "especial", "item", "bebida")
+# Tipos que se EXCLUYEN del resumen "PLATOS Y BEBIDAS: N" y del desglose por categoría
+# de la cabecera de la comanda: los adicionales son extras, no platos que cocina
+# prepara aparte. Denylist (no allowlist) a propósito: cualquier categoría nueva del
+# restaurante SÍ cuenta como plato por defecto, igual que 'especial'/'item'/'bebida'.
+TIPOS_NO_PLATO = {"adicional"}
 
-# Etiquetas en formato normal (no ALL-CAPS) de DISH_TIPOS, para el resumen por categoría
-# de la cabecera de la comanda (distinto de CAT_LABEL, que es para las cabeceras de
-# sección en mayúsculas dentro del cuerpo del ticket).
+# Etiquetas en formato normal (no ALL-CAPS) de los tipos clásicos, para el resumen por
+# categoría de la cabecera de la comanda (distinto de CAT_LABEL, que es para las
+# cabeceras de sección en mayúsculas dentro del cuerpo del ticket). Un tipo sin entrada
+# aquí (categoría nueva) se etiqueta a partir de su propio nombre (ver _etiqueta_tipo).
 CAT_LABEL_RESUMEN = {
     "plato_dia": "Plato del día",
     "especial":  "Especiales",
@@ -62,12 +67,19 @@ CAT_LABEL_RESUMEN = {
 }
 
 
+def _etiqueta_tipo(tipo: str) -> str:
+    """Nombre legible de un 'tipo' sin entrada en CAT_LABEL_RESUMEN: 'plato_especial'
+    → 'Plato especial'. Fallback para categorías que el restaurante creó desde el panel
+    después de que este agente se instaló."""
+    return CAT_LABEL_RESUMEN.get(tipo) or (tipo.replace("_", " ").strip().capitalize() or tipo)
+
+
 def _contar_platos(items) -> int:
     """Nº de unidades de platos + bebidas (sin adicionales) de un ticket, para el resumen
     de cantidad. Tolerante: un item sin 'tipo' cae en 'item' (a la carta) y cuenta."""
     total = 0
     for it in (items or []):
-        if str(it.get("tipo") or "item").lower() in DISH_TIPOS:
+        if str(it.get("tipo") or "item").lower() not in TIPOS_NO_PLATO:
             try:
                 total += int(it.get("cantidad", 1) or 1)
             except (TypeError, ValueError):
@@ -77,20 +89,24 @@ def _contar_platos(items) -> int:
 
 def _resumen_por_categoria(items):
     """[(etiqueta, cantidad), ...] de un ticket agrupado por categoría (mismo criterio que
-    _contar_platos: DISH_TIPOS, sin 'adicional'), en ORDEN_CAT y solo las presentes. Para
-    la cabecera de la comanda: en vez de un total único, cuántos hay que preparar de CADA
+    _contar_platos: todo menos TIPOS_NO_PLATO), en el orden en que aparecen en el ticket
+    (ya viene ordenado por categoría desde el panel) y solo las presentes. Para la
+    cabecera de la comanda: en vez de un total único, cuántos hay que preparar de CADA
     categoría (p. ej. 'Plato del día x2', 'Especiales x1') — cocina ve la mezcla del
     pedido de un vistazo sin tener que contar el detalle de abajo."""
-    cuenta = dict.fromkeys(DISH_TIPOS, 0)
+    orden, cuenta = [], {}
     for it in (items or []):
         tipo = str(it.get("tipo") or "item").lower()
-        if tipo not in cuenta:
+        if tipo in TIPOS_NO_PLATO:
             continue
+        if tipo not in cuenta:
+            orden.append(tipo)
+            cuenta[tipo] = 0
         try:
             cuenta[tipo] += int(it.get("cantidad", 1) or 1)
         except (TypeError, ValueError):
             cuenta[tipo] += 1
-    return [(CAT_LABEL_RESUMEN[t], cuenta[t]) for t in DISH_TIPOS if cuenta[t] > 0]
+    return [(_etiqueta_tipo(t), cuenta[t]) for t in orden if cuenta[t] > 0]
 
 
 def _texto_atendio(printer, payload: dict) -> None:
@@ -307,10 +323,13 @@ def _imprimir_items(printer, items, grande: bool = False, detalle: bool = True) 
         cant = int(it.get("cantidad", 1) or 1)
         tipo = it.get("tipo")
         comps = it.get("componentes") or []
-        # Cabecera de categoría al cambiar de tipo (solo si el item lo trae).
+        # Cabecera de categoría al cambiar de tipo (solo si el item lo trae). Una
+        # categoría sin entrada en CAT_LABEL (creada en el panel después de instalar
+        # este agente) se rotula con su propio nombre: 'plato_especial' → 'PLATO ESPECIAL'.
         if tipo and tipo != tipo_actual:
             printer.set(align="left", bold=True, double_height=False, double_width=False)
-            printer.text(f"[{CAT_LABEL.get(str(tipo).lower(), str(tipo).upper())}]\n")
+            etiqueta = CAT_LABEL.get(str(tipo).lower()) or str(tipo).replace("_", " ").upper()
+            printer.text(f"[{etiqueta}]\n")
             tipo_actual = tipo
             items_en_categoria = 0
         # Separador entre items individuales de la MISMA categoría (2º en adelante).

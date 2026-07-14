@@ -1,12 +1,15 @@
 """Vista de Nuevo pedido (POS de meseros): arma un pedido de MESA con la misma
-taxonomía de 4 secciones que la app del cliente.
+taxonomía de secciones que la app del cliente.
 
   #1 Plato del Día — configurable por plato según los GRUPOS DINÁMICOS de
      plato_dia_grupos (radio si max_sel==1, contadores si max_sel>1). Si pides
      más de uno, se repite la config.
-  #2 Especiales — precio plano + descripción.
-  #3 A la carta — con sub-grupo de Bebidas.
-  #4 Nota general del pedido.
+  #2.. una sección por CATEGORÍA activa (tabla categorias, ver db.cargar_categorias),
+     en su 'orden': las 4 clásicas (Especiales, A la carta, Adicionales, Bebidas)
+     vienen sembradas y el restaurante agrega las suyas desde 🍔 Menú → ⚙️ Ajustes →
+     🏷️ Categorías. El comportamiento de cada una (¿lleva descripción?, ¿cuenta para el
+     recargo?, ¿ofrece entrada/bebida incluidas?) sale de db.comportamiento_categoria.
+  #N Nota general del pedido.
 
 Produce el MISMO JSON de items por secciones que la app del cliente (utils.items lo
 sabe pintar/imprimir). Es un pedido de mesa: tipo_entrega='mesa', sin recargo; el
@@ -24,19 +27,18 @@ from db import (engine, titulo_seccion, cargar_mesas_activas, componentes_activo
                 cargar_grupos_pd, etiquetas_grupos_pd, fmt_money, flash, drain_toasts,
                 fee_entrega, upsert_cliente, aplicar_inventario, SinStock,
                 siguiente_num_dia, resumen_disponibilidad_componentes, agotado_por_stock,
-                stock_int, STOCK_BAJO)
+                stock_int, STOCK_BAJO,
+                cargar_categorias, comportamiento_categoria, tipo_de_categoria,
+                tipos_con_recargo)
 from utils.items import componentes_lineas
 from utils.print_jobs import enqueue_comanda, badge_agente_html, badge_fallos_html, estado_agente
 
 
-# El recargo de entrega se cobra una vez por CADA plato del pedido: Plato del Día,
-# Especiales y A la carta. Las Bebidas y los Adicionales NO suman recargo.
-FEE_TIPOS = ("plato_dia", "especial", "item")
-
-
 def _n_platos_recargo(items) -> int:
-    """Nº de platos (unidades) que cuentan para el recargo de entrega."""
-    return sum(int(it.get("cantidad", 0)) for it in items if it.get("tipo") in FEE_TIPOS)
+    """Nº de platos (unidades) que cuentan para el recargo de entrega: Plato del Día +
+    lo que traiga cada categoría en su comportamiento (ver db.tipos_con_recargo)."""
+    fee_tipos = tipos_con_recargo()
+    return sum(int(it.get("cantidad", 0)) for it in items if it.get("tipo") in fee_tipos)
 
 
 # ── DB: crear pedido de mesa ────────────────────────────────────────────────────
@@ -867,26 +869,28 @@ def _form_fragment():
             resumen = f"{n_sel} en el pedido" if n_sel else ""
             return _acc_header_pos(tipo, titulo, resumen), False
 
-        cat_esp = _catalogo_seccion(df_cat, "especial")
-        mostrar, header = _estado_seccion("especial", "⭐ Especiales", cat_esp)
-        items_esp = _seccion_con_extras(cat_esp, "especial", "⭐ Especiales", comp,
-                                        con_desc=True, mostrar=mostrar, header=header)
+        # Una sección por categoría ACTIVA (tabla categorias), en su 'orden': las 4
+        # clásicas vienen sembradas y el restaurante agrega las suyas desde 🍔 Menú →
+        # ⚙️ Ajustes → 🏷️ Categorías. El comportamiento (con_desc / con_extras) sale de
+        # comportamiento_categoria; una categoría nueva se comporta como 'A la carta'.
+        items_cat = []
+        for cat_row in cargar_categorias():
+            clave = cat_row["clave"]
+            tipo = tipo_de_categoria(clave)
+            comport = comportamiento_categoria(clave)
+            etiqueta = f'{cat_row["emoji"]} {cat_row["etiqueta"]}'.strip()
+            productos = _catalogo_seccion(df_cat, clave)
+            mostrar, header = _estado_seccion(tipo, etiqueta, productos)
+            if comport["extras"]:
+                items_cat += _seccion_con_extras(productos, tipo, etiqueta, comp,
+                                                 con_desc=comport["desc"],
+                                                 mostrar=mostrar, header=header)
+            else:
+                items_cat += _seccion_catalogo(productos, tipo, etiqueta,
+                                               con_desc=comport["desc"],
+                                               mostrar=mostrar, header=header)
 
-        cat_alc = _catalogo_seccion(df_cat, "a_la_carta")
-        mostrar, header = _estado_seccion("item", "🍽️ A la carta", cat_alc)
-        items_alc = _seccion_con_extras(cat_alc, "item", "🍽️ A la carta", comp,
-                                        mostrar=mostrar, header=header)
-
-        cat_adi = _catalogo_seccion(df_cat, "adicional")
-        mostrar, header = _estado_seccion("adicional", "🍟 Adicionales", cat_adi)
-        items_adi = _seccion_catalogo(cat_adi, "adicional", "🍟 Adicionales", con_desc=True,
-                                      mostrar=mostrar, header=header)
-
-        cat_beb = _catalogo_seccion(df_cat, "bebida")
-        mostrar, header = _estado_seccion("bebida", "🥤 Bebidas", cat_beb)
-        items_beb = _seccion_catalogo(cat_beb, "bebida", "🥤 Bebidas", mostrar=mostrar, header=header)
-
-        items = plates + items_esp + items_alc + items_adi + items_beb
+        items = plates + items_cat
 
     with col_resumen:
         st.markdown('<div class="section-title">Resumen</div>', unsafe_allow_html=True)

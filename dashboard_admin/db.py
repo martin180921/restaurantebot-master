@@ -1201,6 +1201,156 @@ def componentes_activos_por_grupo() -> dict:
     return out
 
 
+# ── Categorías del catálogo DINÁMICAS (tabla categorias) ────────────────────────
+# Cada restaurante puede agregar las suyas (Desayunos, Postres…) además de las 4
+# clásicas. 'clave' = menu.categoria (sin FK dura, mismo patrón que plato_dia_grupos).
+# El COMPORTAMIENTO (¿lleva descripción? ¿cobra recargo de entrega? ¿ofrece entrada/
+# bebida del Plato del Día incluidas?) no es editable desde el panel a propósito (MVP):
+# las 4 clásicas conservan el suyo de siempre y cualquier categoría nueva se comporta
+# como 'a_la_carta' — así la pantalla de alta se queda en nombre, emoji y orden.
+
+_CATEGORIAS_CLASICAS = [
+    ("especial",   "Especiales",  "⭐", 1),
+    ("a_la_carta", "A la carta",  "📋", 2),
+    ("adicional",  "Adicionales", "🍟", 3),
+    ("bebida",     "Bebidas",     "🥤", 4),
+]
+
+_COMPORTAMIENTO_CATEGORIA = {
+    "especial":   {"desc": True,  "recargo": True,  "extras": True},
+    "a_la_carta": {"desc": False, "recargo": True,  "extras": True},
+    "adicional":  {"desc": True,  "recargo": False, "extras": False},
+    "bebida":     {"desc": False, "recargo": False, "extras": False},
+}
+_COMPORTAMIENTO_DEFAULT = _COMPORTAMIENTO_CATEGORIA["a_la_carta"]
+
+# Solo 'a_la_carta' se remapea al tipo histórico 'item' que ya traen los pedidos
+# guardados; cualquier categoría nueva usa su propia clave como tipo del item.
+_TIPO_CATEGORIA = {"a_la_carta": "item"}
+
+
+def comportamiento_categoria(clave: str) -> dict:
+    """{desc, recargo, extras} de una categoría: si lleva descripción, si cuenta para
+    el recargo de entrega y si ofrece entrada/bebida del Plato del Día incluidas.
+    Categoría desconocida (nueva, creada por el restaurante) → igual que 'a_la_carta'."""
+    return _COMPORTAMIENTO_CATEGORIA.get(clave, _COMPORTAMIENTO_DEFAULT)
+
+
+def tipo_de_categoria(clave: str) -> str:
+    """'tipo' que se guarda en pedidos.items para esta categoría (histórico: solo
+    'a_la_carta' se remapea a 'item'; cualquier categoría nueva usa su propia clave)."""
+    return _TIPO_CATEGORIA.get(clave, clave)
+
+
+@st.cache_data(ttl=60)
+def _cargar_categorias_raw():
+    """TODAS las filas de categorias en orden (activas o no). Las escrituras llaman
+    invalidar_categorias() para reflejar cambios al vuelo."""
+    with engine.connect() as conn:
+        rows = conn.execute(text(
+            "SELECT id, clave, etiqueta, emoji, orden, activo, disponible_desde, disponible_hasta "
+            "FROM categorias ORDER BY orden, id"
+        )).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def cargar_categorias(solo_activas: bool = True) -> list:
+    """Categorías del catálogo como list[dict]. Si la tabla está VACÍA (aún sin
+    sembrar) cae a las 4 clásicas. El horario (disponible_desde/hasta) NO se filtra
+    aquí: el panel y el POS siempre ven todas las categorías activas sin importar la
+    hora — el horario solo se aplica en la carta digital (app_cliente, consulta aparte
+    porque es una app aislada con su propia conexión)."""
+    filas = [dict(c) for c in _cargar_categorias_raw()]
+    if not filas:
+        filas = [
+            {"id": 0, "clave": c, "etiqueta": e, "emoji": em, "orden": o,
+             "activo": True, "disponible_desde": None, "disponible_hasta": None}
+            for c, e, em, o in _CATEGORIAS_CLASICAS
+        ]
+    if solo_activas:
+        filas = [c for c in filas if c.get("activo")]
+    return filas
+
+
+def etiquetas_categorias() -> dict:
+    """{clave: etiqueta} de TODAS las categorías (incluye inactivas: rotula pedidos
+    viejos de una categoría hoy desactivada). Completa con las clásicas."""
+    d = {c: e for c, e, _em, _o in _CATEGORIAS_CLASICAS}
+    for c in cargar_categorias(solo_activas=False):
+        d[c["clave"]] = c["etiqueta"]
+    return d
+
+
+def invalidar_categorias():
+    _cargar_categorias_raw.clear()
+
+
+def tipos_con_recargo() -> set:
+    """{'plato_dia'} ∪ los tipos de categorías cuyo comportamiento cobra recargo de
+    entrega (Domicilio / Para Llevar). Reemplaza el FEE_TIPOS fijo de antes."""
+    tipos = {"plato_dia"}
+    for c in cargar_categorias(solo_activas=False):
+        if comportamiento_categoria(c["clave"])["recargo"]:
+            tipos.add(tipo_de_categoria(c["clave"]))
+    return tipos
+
+
+def crear_categoria(clave: str, etiqueta: str, emoji: str = ""):
+    """Crea una categoría nueva. Devuelve None si ok o un mensaje de error. La clave se
+    normaliza a [a-z0-9_] y máx. 20 chars: debe caber en menu.categoria."""
+    etiqueta = (etiqueta or "").strip()
+    clave = re.sub(r"[^a-z0-9_]", "", (clave or etiqueta).strip().lower()
+                   .replace(" ", "_").replace("ñ", "n"))[:20]
+    if not clave or not etiqueta:
+        return "La categoría necesita clave y nombre."
+    with engine.begin() as conn:
+        dup = conn.execute(text(
+            "SELECT 1 FROM categorias WHERE clave = :c"), {"c": clave}).first()
+        if dup:
+            return f"Ya existe una categoría con la clave '{clave}'."
+        sig = conn.execute(text(
+            "SELECT COALESCE(MAX(orden), 0) + 1 FROM categorias")).scalar()
+        conn.execute(text(
+            "INSERT INTO categorias (clave, etiqueta, emoji, orden) "
+            "VALUES (:c, :e, :em, :o)"
+        ), {"c": clave, "e": etiqueta, "em": (emoji or "").strip()[:8], "o": int(sig)})
+    invalidar_categorias()
+    return None
+
+
+def guardar_categoria(cid: int, *, etiqueta: str, emoji: str, orden: int, activo: bool,
+                      disponible_desde=None, disponible_hasta=None) -> None:
+    """Actualiza una categoría existente (la clave NO se edita: ancla los platos ya
+    cargados). disponible_desde/hasta en None = visible todo el día (sin restricción)."""
+    with engine.begin() as conn:
+        conn.execute(text(
+            "UPDATE categorias SET etiqueta = :e, emoji = :em, orden = :o, activo = :a, "
+            "disponible_desde = :dd, disponible_hasta = :dh WHERE id = :id"
+        ), {"e": (etiqueta or "").strip() or "?", "em": (emoji or "").strip()[:8],
+            "o": int(orden), "a": bool(activo),
+            "dd": disponible_desde, "dh": disponible_hasta, "id": int(cid)})
+    invalidar_categorias()
+
+
+def eliminar_categoria(cid: int):
+    """Borra una categoría SOLO si no tiene platos (activos o no) colgando de su clave;
+    si los tiene, el camino es desactivarla o mover esos platos primero. Devuelve None
+    o un mensaje de error."""
+    with engine.begin() as conn:
+        clave = conn.execute(text(
+            "SELECT clave FROM categorias WHERE id = :id"), {"id": int(cid)}).scalar()
+        if clave is None:
+            return None
+        n = conn.execute(text(
+            "SELECT COUNT(*) FROM menu WHERE categoria = :c"), {"c": clave}).scalar()
+        if int(n or 0) > 0:
+            return (f"La categoría '{clave}' tiene {n} plato(s) cargado(s). "
+                    "Muévelos a otra categoría o elimínalos primero, o simplemente desactívala.")
+        conn.execute(text("DELETE FROM categorias WHERE id = :id"), {"id": int(cid)})
+    invalidar_categorias()
+    return None
+
+
 @st.cache_data(ttl=60)
 def cargar_catalogo():
     """Catálogo 'menu' con categoría y descripción (especiales / a la carta /

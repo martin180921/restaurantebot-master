@@ -16,12 +16,12 @@ Cómo se conectan las piezas de OLO dentro de **un** restaurante (recuerda: un d
 
 ## La base de datos es el punto de encuentro
 
-No hay APIs entre servicios: **todos leen y escriben la misma base PostgreSQL** (esquema en `db/schema.sql`, ~20 tablas). Las centrales:
+No hay APIs entre servicios: **todos leen y escriben la misma base PostgreSQL** (esquema en `db/schema.sql`, ~23 tablas). Las centrales:
 
 | Tabla | Quién escribe | Quién lee |
 |---|---|---|
 | `pedidos` (+ items en JSON) | bot, app_cliente, panel (nuevo_pedido) | panel (cocina/monitor), caja |
-| `menu`, `menu_componentes`, `plato_dia_grupos` | panel (🍔 Menú) | bot, app_cliente, panel |
+| `menu`, `menu_componentes`, `plato_dia_grupos`, `categorias` | panel (🍔 Menú → ⚙️ Ajustes → 🏷️ Categorías) | bot, app_cliente, panel |
 | `ajustes` (identidad, saludo, precios, pagos) | provision + panel (⚙️ Ajustes) | todos |
 | `print_jobs` (cola de impresión) | panel y app_cliente (al confirmar pedido) | print_agent |
 | `agentes_estado` (latido del agente) | print_agent | monitor_salud.py |

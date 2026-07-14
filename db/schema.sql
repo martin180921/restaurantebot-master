@@ -10,9 +10,10 @@
 --
 -- Es idempotente: seguro de correr en una base nueva o ya existente (todo es
 -- CREATE/ALTER ... IF NOT EXISTS y los seeds están guardados). Crea exactamente
--- las mismas 21 tablas, columnas e índices que el código, y siembra los 12
--- componentes del Plato del Día, los ajustes de precios/recargo/branding y los
--- 5 grupos clásicos del Plato del Día (plato_dia_grupos).
+-- las mismas 23 tablas, columnas e índices que el código, y siembra los 12
+-- componentes del Plato del Día, los ajustes de precios/recargo/branding, los
+-- 5 grupos clásicos del Plato del Día (plato_dia_grupos) y las 4 categorías
+-- clásicas del catálogo (categorias).
 --
 -- NOTA: a diferencia del bot, NO inserta los 3 platos de ejemplo del menú; arranca
 -- con la carta vacía para que cargues tus platos reales en 🍔 Menú.
@@ -74,6 +75,24 @@ CREATE TABLE IF NOT EXISTS plato_dia_grupos (
     min_sel         INTEGER NOT NULL DEFAULT 1,
     max_sel         INTEGER NOT NULL DEFAULT 1,
     permite_repetir BOOLEAN NOT NULL DEFAULT FALSE
+);
+
+-- Categorías del catálogo como datos (replicabilidad): 'clave' = valor de
+-- menu.categoria (sin FK dura), igual patrón que plato_dia_grupos. Cada restaurante
+-- agrega las suyas (Desayunos, Postres…) además de las 4 clásicas sembradas abajo.
+-- disponible_desde/hasta acotan una categoría a un horario (p. ej. Desayunos hasta
+-- las 11:00); NULL en cualquiera de las dos = visible todo el día. Ese horario SOLO
+-- se aplica en la carta digital del cliente (app_cliente); el panel y el POS del
+-- mesero siempre ven todas las categorías activas, sin importar la hora.
+CREATE TABLE IF NOT EXISTS categorias (
+    id                SERIAL      PRIMARY KEY,
+    clave             VARCHAR(20) UNIQUE NOT NULL,
+    etiqueta          TEXT        NOT NULL,
+    emoji             VARCHAR(8)  NOT NULL DEFAULT '',
+    orden             INTEGER     NOT NULL DEFAULT 0,
+    activo            BOOLEAN     NOT NULL DEFAULT TRUE,
+    disponible_desde  TIME,
+    disponible_hasta  TIME
 );
 
 -- Ajustes clave/valor: precios planos, recargo de entrega, nº de acompañamientos
@@ -424,6 +443,19 @@ CROSS JOIN (
     )) AS n
 ) AS n
 WHERE NOT EXISTS (SELECT 1 FROM plato_dia_grupos)
+ON CONFLICT (clave) DO NOTHING;
+
+-- Las 4 categorías clásicas del catálogo. Solo siembra si la tabla está vacía (no
+-- resucita categorías borradas). Cualquier categoría que el restaurante agregue
+-- después se comporta como 'a_la_carta' (ver comportamiento_categoria en db.py).
+INSERT INTO categorias (clave, etiqueta, emoji, orden)
+SELECT v.clave, v.etiqueta, v.emoji, v.orden FROM (VALUES
+    ('especial',   'Especiales',  '⭐', 1),
+    ('a_la_carta', 'A la carta',  '📋', 2),
+    ('adicional',  'Adicionales', '🍟', 3),
+    ('bebida',     'Bebidas',     '🥤', 4)
+) AS v(clave, etiqueta, emoji, orden)
+WHERE NOT EXISTS (SELECT 1 FROM categorias)
 ON CONFLICT (clave) DO NOTHING;
 
 -- Solo siembra si la tabla está vacía (no resucita opciones borradas en re-runs).

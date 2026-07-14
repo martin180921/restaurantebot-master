@@ -1,21 +1,26 @@
-"""Vista de Menú: administración de las 4 secciones de la carta + ajustes.
+"""Vista de Menú: administración de las secciones de la carta + ajustes.
 
 Pestañas (la misma taxonomía que ven el POS y la app del cliente):
   🍽️ Plato del Día  → componentes por grupo (entrada / principio / proteína /
                        acompañamientos). Cada opción se activa, se marca "86" (agotado
                        hoy), se renombra o se elimina. Precio plano editable en Ajustes.
-  ⭐ Especiales     → platos con su propio precio + descripción de lo que incluyen
-                       (cada especial puede costar distinto).
-  📋 A la carta     → platos sueltos con su propio precio.
-  🥤 Bebidas        → bebidas con su propio precio.
+  (categorías)      → una pestaña por cada fila ACTIVA de la tabla 'categorias' (tabla
+                       de datos, ver db.cargar_categorias), en su 'orden'. Las 4
+                       clásicas (⭐ Especiales, 📋 A la carta, 🍟 Adicionales, 🥤 Bebidas)
+                       vienen sembradas; el restaurante agrega las suyas (Desayunos,
+                       Postres…) desde ⚙️ Ajustes → 🏷️ Categorías. Cada una es un
+                       catálogo con su propio precio; solo Especiales/Adicionales
+                       llevan descripción (ver db.comportamiento_categoria).
   ⚙️ Ajustes        → precio plano del Plato del Día, recargo de entrega
-                       (Domicilio / Para Llevar) y nº de acompañamientos a elegir.
+                       (Domicilio / Para Llevar), nº de acompañamientos y el editor de
+                       categorías.
 
 Reusa los patrones del panel: tarjetas (.menu-card), modales @st.dialog, toasts
 db.flash() y la invalidación de caché (cargar_*.clear()) tras cada escritura.
 """
 import streamlit as st
 from sqlalchemy import text
+from datetime import time as dtime
 import html
 import io
 import csv
@@ -31,6 +36,8 @@ from db import (engine, titulo_seccion, cargar_menu, cargar_componentes, cargar_
                 componentes_activos_por_grupo, precio_plato_dia,
                 cargar_grupos_pd, etiquetas_grupos_pd, crear_grupo_pd,
                 guardar_grupo_pd, eliminar_grupo_pd,
+                cargar_categorias, etiquetas_categorias, comportamiento_categoria,
+                crear_categoria, guardar_categoria, eliminar_categoria,
                 guardar_inventario, stock_int, STOCK_BAJO, agotado_por_stock, hoy_bogota)
 
 
@@ -633,6 +640,104 @@ def _render_grupos_editor(grupos):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Editor de CATEGORÍAS del catálogo (pestañas del catálogo, tabla categorias)
+# ══════════════════════════════════════════════════════════════════════════════
+def _render_categorias_editor():
+    """Gestión de las categorías del catálogo: nombre, emoji, orden, activa/inactiva,
+    horario opcional (SOLO oculta en la carta digital del cliente) y borrado (solo si
+    la categoría no tiene platos cargados). Alta de categorías nuevas al final. El
+    comportamiento (descripción / recargo / extras incluidos) NO se edita aquí a
+    propósito: una categoría nueva se comporta como 'A la carta'."""
+    st.markdown("<div style='height:10px;'></div>", unsafe_allow_html=True)
+    if not _acc_header("categorias_editor", "🏷️ Categorías (pestañas del catálogo)",
+                       default_open=False):
+        return
+    categorias = cargar_categorias(solo_activas=False)
+    # id=0 = fallback en memoria (tabla sin sembrar): nada que editar todavía.
+    if any(int(c.get("id") or 0) == 0 for c in categorias):
+        st.info("Las categorías aún no están sembradas en la base de datos; se usan las "
+                "4 clásicas por defecto. Arranca el bot (o corre el script de "
+                "aprovisionamiento) y vuelve aquí para editarlas.")
+        return
+    st.caption("Cada categoría es una pestaña del catálogo (aquí, en el POS del mesero y "
+               "en la carta digital). Una categoría nueva se agrega con el mismo "
+               "comportamiento de 'A la carta'. El horario es opcional y SOLO oculta la "
+               "categoría en la carta digital del cliente fuera de rango — el panel y el "
+               "POS siempre la ven. La clave (entre paréntesis) no se edita: ancla los "
+               "platos ya cargados de la categoría.")
+    h = st.columns([0.8, 2.2, 0.8, 0.9, 0.7])
+    for col, t in zip(h, ["Emoji", "Nombre", "Orden", "Activa", ""]):
+        col.markdown(f"<span style='font-size:0.72rem; color:#a3a39b;'>{t}</span>",
+                     unsafe_allow_html=True)
+    vals = {}
+    for c in categorias:
+        cid = int(c["id"])
+        c1, c2, c3, c4, c5 = st.columns([0.8, 2.2, 0.8, 0.9, 0.7])
+        with c1:
+            emoji = st.text_input("Emoji", value=c.get("emoji") or "", key=f"cat_em_{cid}",
+                                  label_visibility="collapsed", max_chars=8)
+        with c2:
+            et = st.text_input("Nombre", value=c["etiqueta"], key=f"cat_et_{cid}",
+                               label_visibility="collapsed")
+            st.caption(f"({c['clave']})")
+        with c3:
+            orden = st.number_input("Orden", min_value=0, step=1, value=int(c["orden"]),
+                                    key=f"cat_or_{cid}", label_visibility="collapsed")
+        with c4:
+            act = st.checkbox("Activa", value=bool(c["activo"]), key=f"cat_act_{cid}")
+        with c5:
+            if st.button("🗑", key=f"cat_del_{cid}",
+                         help="Eliminar categoría (solo si no tiene platos cargados)"):
+                err = eliminar_categoria(cid)
+                flash(err, "⚠️") if err else flash("Categoría eliminada", "🗑")
+                st.rerun()
+
+        con_horario = st.checkbox(
+            "🕐 Restringir horario (se oculta en la carta digital fuera de rango)",
+            value=(c.get("disponible_desde") is not None
+                   or c.get("disponible_hasta") is not None),
+            key=f"cat_hor_on_{cid}",
+        )
+        desde = hasta = None
+        if con_horario:
+            hc1, hc2 = st.columns(2)
+            with hc1:
+                desde = st.time_input("Desde", value=c.get("disponible_desde") or dtime(6, 0),
+                                      key=f"cat_desde_{cid}")
+            with hc2:
+                hasta = st.time_input("Hasta", value=c.get("disponible_hasta") or dtime(11, 0),
+                                      key=f"cat_hasta_{cid}")
+        st.markdown("<div style='height:6px;'></div>", unsafe_allow_html=True)
+        vals[cid] = (et, emoji, orden, act, desde, hasta)
+
+    if st.button("💾 Guardar categorías", type="primary", key="cat_guardar"):
+        for cid, (et, emoji, orden, act, desde, hasta) in vals.items():
+            guardar_categoria(cid, etiqueta=et, emoji=emoji, orden=int(orden), activo=bool(act),
+                              disponible_desde=desde, disponible_hasta=hasta)
+        flash("Categorías guardadas", "🏷️")
+        st.rerun()
+
+    # Alta de una categoría nueva (p. ej. Desayunos, Postres…).
+    st.markdown(titulo_seccion("➕ Nueva categoría", style="margin-top:0.8rem;"),
+                unsafe_allow_html=True)
+    nonce = st.session_state.get("cat_new_nonce", 0)
+    c1, c2 = st.columns([0.8, 2.2])
+    with c1:
+        nem = st.text_input("Emoji", key=f"cat_new_em_{nonce}", placeholder="🍳", max_chars=8)
+    with c2:
+        net = st.text_input("Nombre de la categoría", key=f"cat_new_et_{nonce}",
+                            placeholder="P. ej. Desayunos, Postres…")
+    if st.button("➕ Crear categoría", key="cat_new_btn"):
+        err = crear_categoria(net, net, emoji=nem)
+        if err:
+            st.error(err)
+        else:
+            st.session_state["cat_new_nonce"] = nonce + 1
+            flash("Categoría creada", "🏷️")
+            st.rerun()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Pestañas 2–4 · Catálogo (Especiales / A la carta / Bebidas)
 # ══════════════════════════════════════════════════════════════════════════════
 def _enter_edit(categoria: str, row, con_precio: bool, con_desc: bool = False):
@@ -894,6 +999,8 @@ def _render_ajustes():
         unsafe_allow_html=True,
     )
 
+    _render_categorias_editor()
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Pestaña 6 · Inventario del día (stock por componente y por plato)
@@ -1017,24 +1124,47 @@ def _render_inventario():
 # el inventario), no duplica filas (identidad por nombre dentro de su sección) y no rompe
 # el seguimiento en curso. Acceso: admin + caja (capacidad edit_menu).
 
-# seccion (normalizada) → (clase, destino). 'comp' = menu_componentes.grupo;
-# 'menu' = menu.categoria.
-SECCION_MAP = {
-    "entrada": ("comp", "entrada"), "entradas": ("comp", "entrada"),
-    "principio": ("comp", "principio"), "principios": ("comp", "principio"),
-    "proteina": ("comp", "proteina"), "proteinas": ("comp", "proteina"),
-    "carne": ("comp", "proteina"), "carnes": ("comp", "proteina"),
-    "acompanamiento": ("comp", "acompanamiento"), "acompanamientos": ("comp", "acompanamiento"),
-    "acomp": ("comp", "acompanamiento"), "guarnicion": ("comp", "acompanamiento"),
-    "especial": ("menu", "especial"), "especiales": ("menu", "especial"),
-    "a la carta": ("menu", "a_la_carta"), "a_la_carta": ("menu", "a_la_carta"),
-    "carta": ("menu", "a_la_carta"), "plato": ("menu", "a_la_carta"),
-    "plato a la carta": ("menu", "a_la_carta"), "fuerte": ("menu", "a_la_carta"),
-    "adicional": ("menu", "adicional"), "adicionales": ("menu", "adicional"),
-    "extra": ("menu", "adicional"), "extras": ("menu", "adicional"),
-    "bebida": ("menu", "bebida"), "bebidas": ("menu", "bebida"),
-    "jugo": ("menu", "bebida"), "gaseosa": ("menu", "bebida"), "drink": ("menu", "bebida"),
+# seccion (normalizada) → grupo del Plato del Día. Fijo: el importador solo reconoce
+# los 4 grupos clásicos (los grupos dinámicos de plato_dia_grupos son otra pestaña y
+# quedan fuera del alcance de este importador).
+_SECCION_COMP = {
+    "entrada": "entrada", "entradas": "entrada",
+    "principio": "principio", "principios": "principio",
+    "proteina": "proteina", "proteinas": "proteina",
+    "carne": "proteina", "carnes": "proteina",
+    "acompanamiento": "acompanamiento", "acompanamientos": "acompanamiento",
+    "acomp": "acompanamiento", "guarnicion": "acompanamiento",
 }
+# Alias EXTRA (además de su propia etiqueta/clave) de las 4 categorías clásicas del
+# catálogo, para no romper plantillas que los restaurantes ya vienen usando ('carta',
+# 'fuerte', 'jugo'…). Cualquier categoría —clásica o creada por el restaurante en
+# ⚙️ Ajustes → 🏷️ Categorías— SIEMPRE se reconoce además por su propia etiqueta y clave
+# normalizadas (ver _seccion_map): un restaurante que crea 'Desayunos' puede escribir
+# "desayunos" en la columna 'seccion' sin configurar nada aparte.
+_ALIAS_MENU_CLASICOS = {
+    "especial": "especial", "especiales": "especial",
+    "a la carta": "a_la_carta", "a_la_carta": "a_la_carta",
+    "carta": "a_la_carta", "plato": "a_la_carta",
+    "plato a la carta": "a_la_carta", "fuerte": "a_la_carta",
+    "adicional": "adicional", "adicionales": "adicional",
+    "extra": "adicional", "extras": "adicional",
+    "bebida": "bebida", "bebidas": "bebida",
+    "jugo": "bebida", "gaseosa": "bebida", "drink": "bebida",
+}
+
+
+def _seccion_map() -> dict:
+    """seccion normalizada → (clase, destino) para el importador. 'comp' =
+    menu_componentes.grupo (los 4 clásicos); 'menu' = menu.categoria (cualquier
+    categoría viva, clásica o nueva)."""
+    m = {sec: ("comp", destino) for sec, destino in _SECCION_COMP.items()}
+    m.update({sec: ("menu", destino) for sec, destino in _ALIAS_MENU_CLASICOS.items()})
+    for c in cargar_categorias(solo_activas=False):
+        m[_norm(c["clave"])] = ("menu", c["clave"])
+        m[_norm(c["etiqueta"])] = ("menu", c["clave"])
+    return m
+
+
 # Alias aceptados por columna (normalizados: sin acentos, en minúscula).
 COL_ALIAS = {
     "seccion":     ("seccion", "categoria", "tipo", "grupo", "seccion/categoria"),
@@ -1045,11 +1175,20 @@ COL_ALIAS = {
                     "cantidad disponible"),
     "activo":      ("activo", "active", "disponible", "habilitado"),
 }
-DEST_LABEL = {
+# Etiquetas fijas de los 4 grupos del Plato del Día que entiende el importador; el
+# resto de destinos ('menu') se rotulan con etiquetas_categorias() (ver _dest_label).
+_DEST_LABEL_COMP = {
     "entrada": "Entrada", "principio": "Principio", "proteina": "Proteína",
-    "acompanamiento": "Acompañamientos", "especial": "Especiales",
-    "a_la_carta": "A la carta", "adicional": "Adicionales", "bebida": "Bebidas",
+    "acompanamiento": "Acompañamientos",
 }
+
+
+def _dest_label(destino: str) -> str:
+    """Etiqueta legible de un destino del importador: uno de los 4 grupos del Plato
+    del Día, o la etiqueta actual de una categoría del catálogo (clásica o nueva)."""
+    if destino in _DEST_LABEL_COMP:
+        return _DEST_LABEL_COMP[destino]
+    return etiquetas_categorias().get(destino, destino)
 
 
 def _norm(s) -> str:
@@ -1132,6 +1271,7 @@ def _parse_filas(df):
     if "seccion" not in cols or "nombre" not in cols:
         return [], ["Faltan columnas obligatorias: 'seccion' y 'nombre'. "
                     "Descarga la plantilla para ver el formato."]
+    seccion_map = _seccion_map()
     filas, errores = [], []
     for i, row in df.iterrows():
         nfila = int(i) + 2  # +2: fila de encabezado + base 1
@@ -1140,11 +1280,11 @@ def _parse_filas(df):
             continue  # fila vacía → se ignora en silencio
         sec_raw = row[cols["seccion"]]
         sec = _norm(sec_raw)
-        if sec not in SECCION_MAP:
+        if sec not in seccion_map:
             errores.append(f"Fila {nfila}: sección desconocida «{_celda_texto(sec_raw) or ''}» "
                            f"(ítem «{nombre}»).")
             continue
-        kind, destino = SECCION_MAP[sec]
+        kind, destino = seccion_map[sec]
         filas.append({
             "kind": kind, "destino": destino, "nombre": nombre,
             "descripcion": _celda_texto(row[cols["descripcion"]]) if "descripcion" in cols else None,
@@ -1273,10 +1413,18 @@ def _plantilla_csv() -> bytes:
     return buf.getvalue().encode("utf-8-sig")
 
 
-# Opciones del desplegable de 'seccion' (texto amigable; el parser las normaliza a las
-# claves de SECCION_MAP: «Proteína»→proteina, «A la carta»→a la carta, etc.).
-PLANTILLA_SECCIONES = ["Entrada", "Principio", "Proteína", "Acompañamiento",
-                       "Especiales", "A la carta", "Bebidas"]
+def _plantilla_secciones() -> list:
+    """Opciones del desplegable de 'seccion' en la plantilla Excel (texto amigable; el
+    parser las normaliza vía _seccion_map): los 4 grupos clásicos del Plato del Día +
+    la etiqueta de cada categoría ACTIVA del catálogo (clásicas y las que el
+    restaurante haya agregado en ⚙️ Ajustes → 🏷️ Categorías). El formula1 de Excel
+    tiene un límite práctico de ~255 caracteres: con muchas categorías de nombre largo
+    el desplegable puede quedar incompleto (el importador igual las reconoce si se
+    escriben a mano)."""
+    return (["Entrada", "Principio", "Proteína", "Acompañamiento"]
+            + [c["etiqueta"] for c in cargar_categorias()])
+
+
 # Ejemplos (uno por sección) que se precargan en la hoja, en estilo tenue para que el
 # cliente los reemplace. [Sección, Nombre, Descripción, Precio, Stock, Activo].
 PLANTILLA_EJEMPLOS = [
@@ -1359,7 +1507,7 @@ def _plantilla_xlsx() -> bytes:
 
     # Desplegables (validación de datos) en Sección y Activo.
     dv_sec = DataValidation(type="list",
-                            formula1='"' + ",".join(PLANTILLA_SECCIONES) + '"',
+                            formula1='"' + ",".join(_plantilla_secciones()) + '"',
                             allow_blank=True)
     dv_sec.errorTitle, dv_sec.error = "Sección inválida", "Elige una sección de la lista."
     dv_sec.promptTitle, dv_sec.prompt = "Sección", "Elige a qué panel va este ítem."
@@ -1501,7 +1649,7 @@ def _render_importar():
     for f in filas:
         conteo[f["destino"]] = conteo.get(f["destino"], 0) + 1
     chips = " ".join(
-        f'<span class="badge badge-activo">{DEST_LABEL.get(d, d)}: {n}</span>'
+        f'<span class="badge badge-activo">{_dest_label(d)}: {n}</span>'
         for d, n in sorted(conteo.items()))
     st.markdown(f'<div style="margin:6px 0 10px;">{chips}</div>', unsafe_allow_html=True)
 
@@ -1609,10 +1757,8 @@ def _render_readonly():
             st.markdown('<p style="color:#a3a39b; font-size:0.85rem;">Sin platos activos.</p>',
                         unsafe_allow_html=True)
 
-    _seccion("⭐ Especiales", "especial")
-    _seccion("📋 A la carta", "a_la_carta")
-    _seccion("🍟 Adicionales", "adicional")
-    _seccion("🥤 Bebidas", "bebida")
+    for c in cargar_categorias():
+        _seccion(f'{c["emoji"]} {c["etiqueta"]}'.strip(), c["clave"])
 
 
 def _filtrar_seccion(sub, key: str, placeholder: str):
@@ -1641,24 +1787,24 @@ def render():
         _render_readonly()
         return
 
-    # Las CATEGORÍAS siguen siendo las pestañas de arriba. Lo que se pliega/despliega son
-    # los PLATOS dentro de cada categoría: cada catálogo los agrupa en dos acordeones
-    # Disponibles / No disponibles (ver _render_catalogo_tab). Inventario e Importar se
-    # movieron a 💰 Caja; aquí el Menú se enfoca en la carta y los ajustes.
+    # Las CATEGORÍAS siguen siendo las pestañas de arriba, ahora leídas de la tabla
+    # categorias (cada restaurante agrega las suyas en ⚙️ Ajustes → 🏷️ Categorías) en vez
+    # de una lista fija. Lo que se pliega/despliega son los PLATOS dentro de cada
+    # categoría: cada catálogo los agrupa en dos acordeones Disponibles / No disponibles
+    # (ver _render_catalogo_tab). Inventario e Importar se movieron a 💰 Caja; aquí el
+    # Menú se enfoca en la carta y los ajustes.
     _inject_accordion_css()
-    t1, t2, t3, t4, t5, t6 = st.tabs([
-        "🍽️ Plato del Día", "⭐ Especiales", "📋 A la carta", "🍟 Adicionales",
-        "🥤 Bebidas", "⚙️ Ajustes",
-    ])
-    with t1:
+    categorias = cargar_categorias()
+    labels = (["🍽️ Plato del Día"]
+              + [f'{c["emoji"]} {c["etiqueta"]}'.strip() for c in categorias]
+              + ["⚙️ Ajustes"])
+    tabs = st.tabs(labels)
+    with tabs[0]:
         _render_plato_dia()
-    with t2:
-        _render_catalogo_tab("especial", "Especiales", con_precio=True, con_desc=True)
-    with t3:
-        _render_catalogo_tab("a_la_carta", "A la carta", con_precio=True)
-    with t4:
-        _render_catalogo_tab("adicional", "Adicionales", con_precio=True)
-    with t5:
-        _render_catalogo_tab("bebida", "Bebidas", con_precio=True)
-    with t6:
+    for tab, c in zip(tabs[1:-1], categorias):
+        with tab:
+            comport = comportamiento_categoria(c["clave"])
+            _render_catalogo_tab(c["clave"], c["etiqueta"], con_precio=True,
+                                 con_desc=comport["desc"])
+    with tabs[-1]:
         _render_ajustes()
