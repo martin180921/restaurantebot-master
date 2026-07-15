@@ -38,7 +38,15 @@ from db import (engine, titulo_seccion, cargar_menu, cargar_componentes, cargar_
                 guardar_grupo_pd, eliminar_grupo_pd,
                 cargar_categorias, etiquetas_categorias, comportamiento_categoria,
                 crear_categoria, guardar_categoria, eliminar_categoria,
+                en_horario_categoria, ahora_bogota,
                 guardar_inventario, stock_int, STOCK_BAJO, agotado_por_stock, hoy_bogota)
+
+
+# Techo de INTEGER en Postgres. Un precio/stock por encima (celda gigante del Excel o
+# fat-finger en un number_input) revienta el UPDATE con NumericValueOutOfRange: abortaba
+# TODA la importación con un stacktrace, y en los editores del panel tumbaba la pantalla.
+# Acotamos al rango válido en los dos caminos (ver _parse_int y los max_value de abajo).
+_INT32_MAX = 2_147_483_647
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────────
@@ -379,8 +387,8 @@ def _dialog_stock(scope: str, oid: int, nombre: str, stock_actual):
     st.markdown(f"Existencias de **{html.escape(str(nombre))}**")
     ilimitado = st.checkbox("Ilimitado (sin control de stock)", value=(s is None),
                             key=f"dlgstk_unl_{scope}_{oid}")
-    cantidad = st.number_input("Porciones disponibles hoy", min_value=0, step=1,
-                               value=int(s) if s is not None else 0,
+    cantidad = st.number_input("Porciones disponibles hoy", min_value=0, max_value=_INT32_MAX,
+                               step=1, value=int(s) if s is not None else 0,
                                key=f"dlgstk_qty_{scope}_{oid}", disabled=ilimitado)
     st.caption("0 = agotado. Se descuenta al crear el pedido y se reintegra al cancelar "
                "antes de 'listo'. El montaje masivo de la mañana está en 📦 Inventario.")
@@ -663,12 +671,16 @@ def _render_categorias_editor():
                "en la carta digital). Una categoría nueva se agrega con el mismo "
                "comportamiento de 'A la carta'. El horario es opcional y SOLO oculta la "
                "categoría en la carta digital del cliente fuera de rango — el panel y el "
-               "POS siempre la ven. La clave (entre paréntesis) no se edita: ancla los "
-               "platos ya cargados de la categoría.")
+               "POS siempre la ven, sin importar la hora, y el cambio tarda hasta un "
+               "minuto en verse en la carta ya abierta (se refresca sola). La clave "
+               "(entre paréntesis) no se edita: ancla los platos ya cargados.")
     h = st.columns([0.8, 2.2, 0.8, 0.9, 0.7])
     for col, t in zip(h, ["Emoji", "Nombre", "Orden", "Activa", ""]):
         col.markdown(f"<span style='font-size:0.72rem; color:#a3a39b;'>{t}</span>",
                      unsafe_allow_html=True)
+    # Hora del negocio para el aviso 'visible/oculta ahora' de cada horario. Una sola vez
+    # para todas las filas: así el editor entero razona contra el mismo instante.
+    ahora = ahora_bogota().time()
     vals = {}
     for c in categorias:
         cid = int(c["id"])
@@ -707,6 +719,20 @@ def _render_categorias_editor():
             with hc2:
                 hasta = st.time_input("Hasta", value=c.get("disponible_hasta") or dtime(11, 0),
                                       key=f"cat_hasta_{cid}")
+            # Efecto del horario AHORA MISMO, con los valores tecleados (aún sin guardar).
+            # Responde de una a "puse el horario y no pasa nada": aquí se ve si la carta
+            # del cliente la está mostrando, sin tener que abrirla en el celular. 'Desde'
+            # mayor que 'Hasta' es una franja nocturna válida (p. ej. 20:00–02:00).
+            if not act:
+                chip = '<span class="badge badge-inactivo">○ Oculta · categoría desactivada</span>'
+            elif en_horario_categoria({"disponible_desde": desde,
+                                       "disponible_hasta": hasta}, ahora):
+                chip = '<span class="badge badge-activo">● Visible ahora en la carta</span>'
+            else:
+                chip = '<span class="badge badge-inactivo">○ Oculta ahora en la carta</span>'
+            st.markdown(f'{chip} <span style="font-size:0.72rem; color:#a3a39b;">'
+                        f'son las {ahora.strftime("%H:%M")} en Bogotá</span>',
+                        unsafe_allow_html=True)
         st.markdown("<div style='height:6px;'></div>", unsafe_allow_html=True)
         vals[cid] = (et, emoji, orden, act, desde, hasta)
 
@@ -734,6 +760,15 @@ def _render_categorias_editor():
         else:
             st.session_state["cat_new_nonce"] = nonce + 1
             flash("Categoría creada", "🏷️")
+            # El importador reconoce cada categoría por su etiqueta (ver _seccion_map), así
+            # que un nombre que YA era alias de una clásica ('Extras' → Adicionales, 'Carta'
+            # → A la carta) pasa a enrutar a la nueva. Es lo correcto —lo explícito del
+            # restaurante gana— pero cambia en silencio el destino de hojas de Excel que ya
+            # venía usando: se avisa en vez de dejarlo pasar.
+            alias = _ALIAS_MENU_CLASICOS.get(_norm(net))
+            if alias:
+                flash(f"Ojo: al importar, «{net.strip()}» ahora entra a esta categoría "
+                      f"y ya no a «{_dest_label(alias)}».", "⚠️")
             st.rerun()
 
 
@@ -869,7 +904,7 @@ def _item_form(categoria: str, label: str, con_precio: bool, con_desc: bool = Fa
 
     precio_val = 0
     if con_precio:
-        precio_val = st.number_input("Precio", min_value=0, step=1000,
+        precio_val = st.number_input("Precio", min_value=0, max_value=_INT32_MAX, step=1000,
                                      key=f"in_{categoria}_precio")
 
     desc = None
@@ -1032,7 +1067,7 @@ def _fila_inventario(scope: str, oid: int, nombre, stock_actual):
         ilimitado = st.checkbox("Ilimitado", value=(s is None),
                                 key=f"inv_{scope}_unl_{oid}")
     with c_q:
-        cantidad = st.number_input("Cantidad", min_value=0, step=1,
+        cantidad = st.number_input("Cantidad", min_value=0, max_value=_INT32_MAX, step=1,
                                    value=int(s) if s is not None else 0,
                                    key=f"inv_{scope}_qty_{oid}", label_visibility="collapsed")
     return ilimitado, int(cantidad or 0)
@@ -1088,15 +1123,23 @@ def _render_inventario():
 
         st.markdown(titulo_seccion('🍽️ Platos a la carta · por unidad', style="margin-top:1rem;"),
                     unsafe_allow_html=True)
+        # Un acordeón por categoría VIVA del catálogo (las clásicas y las que el
+        # restaurante creó en ⚙️ Ajustes → 🏷️ Categorías), más las categorías huérfanas
+        # que aún tengan platos: el montaje de la mañana no puede dejar ítems fuera. Antes
+        # esta lista estaba quemada a especial/a_la_carta/bebida y se tragaba en silencio
+        # los Adicionales y TODA categoría nueva. Mismo criterio que los grupos de arriba.
+        cats = cargar_categorias(solo_activas=False)
+        etiquetas_cat = {c["clave"]: f'{c["emoji"]} {c["etiqueta"]}'.strip() for c in cats}
         hay_cat = False
-        for categoria, label in [("especial", "⭐ Especiales"),
-                                 ("a_la_carta", "📋 A la carta"),
-                                 ("bebida", "🥤 Bebidas")]:
+        for categoria in dict.fromkeys(
+                [c["clave"] for c in cats]
+                + (df_cat["categoria"].tolist() if not df_cat.empty else [])):
             sub = df_cat[df_cat["categoria"] == categoria] if not df_cat.empty else df_cat
             if sub is None or sub.empty:
                 continue
             hay_cat = True
-            with st.expander(f"{label} · {_resumen_inv(sub)}", expanded=False):
+            with st.expander(f"{etiquetas_cat.get(categoria, categoria)} · {_resumen_inv(sub)}",
+                             expanded=False):
                 for _, row in sub.iterrows():
                     mid = int(row["id"])
                     menu_vals[mid] = _fila_inventario("menu", mid, row["nombre"], row.get("stock"))
@@ -1195,12 +1238,6 @@ def _norm(s) -> str:
     """minúsculas + sin acentos + sin espacios extremos, para casar encabezados/secciones."""
     s = str("" if s is None else s).strip().lower()
     return "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
-
-
-# Techo de INTEGER en Postgres. Un precio/stock por encima (celda gigante o fat-finger)
-# reventaba el UPDATE con NumericValueOutOfRange y abortaba TODA la importación con un
-# stacktrace. Acotamos al rango válido para que una celda absurda nunca tumbe la hoja.
-_INT32_MAX = 2_147_483_647
 
 
 def _parse_int(v):
@@ -1576,6 +1613,11 @@ def _render_importar():
                 for o in prev["omitidos"]:
                     st.markdown(f"- {html.escape(o)}")
 
+    # Las secciones válidas se listan desde las categorías VIVAS (no una lista quemada, que
+    # se quedaba corta: omitía Adicionales y toda categoría creada por el restaurante).
+    secciones_txt = " · ".join(
+        ["entrada", "principio", "proteina", "acompanamiento"]
+        + [c["etiqueta"] for c in cargar_categorias(solo_activas=False)])
     st.markdown(
         '<div style="background:#fafaf8; border:1px solid #ececec; border-radius:10px; '
         'padding:0.8rem 1rem; font-size:0.85rem; color:#45443e; margin-bottom:1rem;">'
@@ -1583,8 +1625,8 @@ def _render_importar():
         '<b>seccion</b> enruta cada fila a su panel y se cargan nombre, descripción, precio '
         'y stock de una vez. Si una fila ya existe (mismo nombre en su sección) se '
         '<b>actualiza</b> sin duplicar; una celda de <b>stock en blanco no cambia</b> el '
-        'inventario en curso.<br><span style="color:#6b6b64;">Secciones válidas: entrada · '
-        'principio · proteina · acompanamiento · especial · a_la_carta · bebida.</span></div>',
+        'inventario en curso.<br><span style="color:#6b6b64;">Secciones válidas: '
+        f'{html.escape(secciones_txt)}.</span></div>',
         unsafe_allow_html=True,
     )
 

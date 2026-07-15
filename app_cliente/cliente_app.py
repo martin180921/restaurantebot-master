@@ -191,6 +191,11 @@ def _ensure_schema():
                     disponible_hasta  TIME
                 )
             """))
+            # ALTER aparte: una base con 'categorias' de una build anterior no re-ejecuta
+            # el CREATE y se quedaría sin las columnas de horario → el SELECT de
+            # _cargar_categorias_raw fallaría y la carta caería al fallback clásico.
+            conn.execute(text("ALTER TABLE categorias ADD COLUMN IF NOT EXISTS disponible_desde TIME"))
+            conn.execute(text("ALTER TABLE categorias ADD COLUMN IF NOT EXISTS disponible_hasta TIME"))
             conn.execute(text("""
                 CREATE TABLE IF NOT EXISTS clientes (
                     telefono    VARCHAR(40) PRIMARY KEY,
@@ -406,12 +411,18 @@ def cargar_categorias() -> list:
     activa ahora mismo por horario', que devuelve [] legítimamente (p. ej. Desayunos
     fuera de su franja): la tabla vacía se detecta ANTES de aplicar activo/horario.
 
-    El horario se compara contra la hora 'LOCALTIME' de la conexión (zona America/Bogota
-    ya fijada en connect_args, arriba) en vez de datetime.now() de Python: Railway no
-    siempre deja el reloj del PROCESO en hora local (ver la nota de zona horaria de
-    dashboard_admin/db.py) y esta app no tiene ese workaround con zoneinfo. Se pide con
-    una consulta aparte, y SOLO si alguna categoría activa realmente usa horario —así
-    el caso común (nadie configuró horarios) no paga esa consulta extra."""
+    El horario se compara contra la hora que calcula la BD (Postgres trae su propio
+    catálogo de zonas) en vez de datetime.now() de Python: Railway no siempre deja el
+    reloj del PROCESO en hora local (ver la nota de zona horaria de dashboard_admin/db.py)
+    y esta app no tiene ese workaround con zoneinfo. Se pide con una consulta aparte, y
+    SOLO si alguna categoría activa realmente usa horario —así el caso común (nadie
+    configuró horarios) no paga esa consulta extra.
+
+    La zona se nombra EXPLÍCITAMENTE en el SELECT en vez de confiar en LOCALTIME + la
+    zona de sesión de connect_args: un pooler o proxy entre la app y Postgres puede no
+    propagar ese '-c timezone', y entonces LOCALTIME devuelve UTC en silencio — 5 horas
+    de corrimiento que ocultan la categoría en pleno servicio (Desayunos 6:00–11:00 se
+    apagaría a las 6 a.m. de Bogotá). Con 'AT TIME ZONE' la hora es correcta siempre."""
     filas = _cargar_categorias_raw()
     if not filas:
         return _categorias_clasicas()
@@ -420,7 +431,8 @@ def cargar_categorias() -> list:
         return activas
     try:
         with engine.connect() as conn:
-            ahora = conn.execute(text("SELECT LOCALTIME")).scalar()
+            ahora = conn.execute(
+                text("SELECT (NOW() AT TIME ZONE 'America/Bogota')::time")).scalar()
     except Exception:
         return activas   # sin hora confiable → no ocultar nada por horario
     return [c for c in activas if _en_horario(c, ahora)]
