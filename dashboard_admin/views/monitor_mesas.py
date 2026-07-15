@@ -921,7 +921,7 @@ def _detalle_mesa(mid: int, nombre: str, sub: pd.DataFrame, color: str,
     # cambio y abonos parciales). Cobra contra los ids visibles de 'sub' (así también
     # entran los pedidos heredados con mesa_id NULL); un abono parcial deja la mesa
     # abierta, un pago completo la libera.
-    a1, a2, a3 = st.columns([2, 2, 1])
+    a1, a2, a3, a4 = st.columns([2, 1.6, 1.6, 1])
     with a1:
         # Cobrar es capacidad bloqueada para el mesero (monitor de solo visualización).
         if not sub.empty and auth.can("cobrar"):
@@ -930,6 +930,18 @@ def _detalle_mesa(mid: int, nombre: str, sub: pd.DataFrame, color: str,
                 _pedir_dialogo("cobrar", ids=[int(i) for i in sub["id"].tolist()],
                                titulo=nombre, saldo=int(saldo_activo), uid=f"mesa_{mid}")
     with a2:
+        # Precuenta de TODA la mesa: junta los ítems de todos los pedidos activos en un
+        # solo prerecibo, en vez de imprimir uno por pedido y sumarlos a mano. Disponible
+        # para todo el personal (llevar la cuenta es tarea de salón, no de caja).
+        if not sub.empty:
+            if st.button("🧾 Precuenta mesa", key=f"mon_precuenta_mesa_{mid}",
+                         use_container_width=True,
+                         help="Imprimir la cuenta previa con todos los pedidos activos de la mesa"):
+                ids_mesa = [int(i) for i in sub["id"].tolist()]
+                pedidos.enqueue_prerecibo(ids_mesa, titulo=nombre)
+                pedidos.flash(f"Precuenta enviada · {nombre} · {len(ids_mesa)} pedido(s)", "🖨")
+                st.rerun()
+    with a3:
         # Cambio de mesa: mueve la cuenta a una mesa libre. Disponible para todo el
         # personal (reubicar comensales es tarea de salón). Solo si la mesa tiene
         # pedidos activos que mover.
@@ -939,7 +951,7 @@ def _detalle_mesa(mid: int, nombre: str, sub: pd.DataFrame, color: str,
                 _pedir_dialogo("cambiar_mesa", origen_id=int(mid), nombre=nombre,
                                ids=[int(i) for i in sub["id"].tolist()],
                                mesas_libres=(mesas_libres or []), uid=f"mesa_{mid}")
-    with a3:
+    with a4:
         if st.button("✕ Deseleccionar", key=f"mon_deselect_{mid}",
                      use_container_width=True):
             st.session_state.pop("mesa_activa", None)

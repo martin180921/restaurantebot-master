@@ -374,45 +374,57 @@ def enqueue_hoja_ruta(base_id: int, repartidor: str, base_monto: int, ids) -> No
         _log_fallo_impresion("hoja_ruta", exc, {"base_id": int(base_id)})
 
 
-def enqueue_prerecibo(pedido_id: int) -> None:
-    """Encola el PRERECIBO (pre-cuenta) de un pedido — botón "🖨 Ticket".
+def enqueue_prerecibo(pedido_ids, titulo: str | None = None) -> None:
+    """Encola el PRERECIBO (pre-cuenta) de uno o varios pedidos — botón "🖨 Ticket" (por
+    pedido) y "🧾 Precuenta mesa" (todos los pedidos activos de la mesa).
 
     Es la cuenta que se entrega al cliente ANTES de pagar: mismos ítems que el recibo
     + total, encabezado PRERECIBO y la MESA de la que proviene. Sin pago ni cajón. El
-    'pagado' lleva lo ya abonado (total_pagado) para mostrar el saldo si la cuenta es
-    parcial. H4: si es domicilio/para_llevar, incluye tipo + teléfono + dirección (ver
-    _entrega_de) — igual que ya hace el recibo final, para que el cliente/repartidor
-    puedan revisar la dirección en la cuenta previa, no solo al cobrar.
+    'pagado' lleva lo ya abonado (Σ total_pagado) para mostrar el saldo si la cuenta es
+    parcial. Con varios pedidos, los ítems se agregan entre sí (items_para_ticket ya
+    junta los platos simples repetidos), igual que hace enqueue_recibo al cobrar la
+    mesa completa. H4: si es domicilio/para_llevar (un único pedido), incluye tipo +
+    teléfono + dirección (ver _entrega_de) — igual que ya hace el recibo final, para
+    que el cliente/repartidor puedan revisar la dirección en la cuenta previa, no solo
+    al cobrar; con varios pedidos (cuenta de mesa) ese bloque se omite.
+    'titulo' (opcional) fuerza el encabezado "Mesa: X"; si no viene, se deriva del
+    pedido único como antes.
     Tolera fallos: imprimir la pre-cuenta no debe romper el panel.
     """
+    ids = [int(pedido_ids)] if isinstance(pedido_ids, int) else [int(i) for i in pedido_ids]
     try:
         sql = text("""
-            SELECT p.numero_cliente, p.mesa_id, p.items, p.total, p.total_pagado,
+            SELECT p.id, p.numero_cliente, p.mesa_id, p.items, p.total, p.total_pagado,
                    m.nombre AS mesa_nombre
             FROM pedidos p LEFT JOIN mesas m ON m.id = p.mesa_id
-            WHERE p.id = :id
+            WHERE p.id = ANY(:ids)
+            ORDER BY p.id
         """)
         with engine.connect() as conn:
-            row = conn.execute(sql, {"id": int(pedido_id)}).mappings().first()
-        if not row:
+            rows = conn.execute(sql, {"ids": ids}).mappings().all()
+        if not rows:
             return
-        tipo_ent, tel, direccion = _entrega_de([pedido_id])
-        _items = items_para_ticket(parse_items(row["items"]))
-        _total = int(row["total"] or 0)
+        tipo_ent, tel, direccion = _entrega_de(ids)
+        _items = items_para_ticket(sum((parse_items(r["items"]) for r in rows), []))
+        _total = sum(int(r["total"] or 0) for r in rows)
+        primero = rows[0]
+        nombre_mesa = (titulo or primero["mesa_nombre"] or primero["numero_cliente"]
+                       or (f"Pedido #{primero['id']}" if len(rows) == 1 else f"{len(rows)} pedidos"))
         payload = {
-            "pedido_id": int(pedido_id),
-            "mesa": row["mesa_nombre"] or row["numero_cliente"] or f"Pedido #{pedido_id}",
+            "pedido_id": int(primero["id"]) if len(ids) == 1 else None,
+            "pedido_ids": [int(r["id"]) for r in rows],
+            "mesa": nombre_mesa,
             "items": _items,
             "tipo_entrega": tipo_ent,
             "telefono": tel,
             "direccion": direccion,
             "recargo_entrega": _recargo_entrega(_items, tipo_ent, _total),
             "total": _total,
-            "pagado": int(row["total_pagado"] or 0),
+            "pagado": sum(int(r["total_pagado"] or 0) for r in rows),
             "abrir_cajon": False,
         }
         payload.update(_branding_payload())
         enqueue_job(RESTAURANTE_ID, "prerecibo", payload)
     except Exception as exc:
         # H5: prerecibo (pre-cuenta) que no llegó a la cola → queda auditado, no silenciado.
-        _log_fallo_impresion("prerecibo", exc, {"pedido_id": int(pedido_id)})
+        _log_fallo_impresion("prerecibo", exc, {"pedido_ids": ids})
