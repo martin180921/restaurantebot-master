@@ -13,6 +13,7 @@ su propio módulo dentro de views/ para poder trabajarlas de forma independiente
     - views/resumen.py, cancelaciones.py, reporte_personal.py → pestañas del entorno de
       Administración (🔐, solo admin, al fondo del menú lateral; ver _render_admin)
 """
+import base64 as _b64
 import html as _html
 import os as _os
 import time as _time
@@ -37,12 +38,31 @@ load_dotenv()
 # vistazo (Railway inyecta RAILWAY_GIT_COMMIT_SHA en cada deploy; "local" en desarrollo).
 VERSION = (_os.getenv("RAILWAY_GIT_COMMIT_SHA") or "")[:7] or "local"
 
+# Marca OKU. Ruta absoluta: Streamlit resuelve las rutas relativas contra el CWD del
+# proceso, que en Railway no es esta carpeta.
+_ASSETS = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "assets")
+OKU_ISOTIPO = _os.path.join(_ASSETS, "oku_isotipo.png")
+OKU_LOGO = _os.path.join(_ASSETS, "oku_logo.png")
+
+# Naranja y morado del logo: acentos de plataforma, no del restaurante.
+OKU_NARANJA = "#FE7809"
+OKU_MORADO = "#582196"
+
+
+@st.cache_data
+def _oku_data_uri(ruta: str) -> str:
+    """Logo como data URI para incrustarlo en HTML propio (st.image no permite
+    centrarlo ni dimensionarlo con la precisión que pide el login)."""
+    with open(ruta, "rb") as fh:
+        return "data:image/png;base64," + _b64.b64encode(fh.read()).decode()
+
 # ── Config ─────────────────────────────────────────────────────────────────────
 # El nombre del restaurante vive en 'ajustes' (editable en 🍔 Menú → ⚙️ Ajustes);
-# el fallback "Restaurante" cubre la BD sin sembrar.
+# el fallback "Restaurante" cubre la BD sin sembrar. El favicon es el isotipo de OKU:
+# la pestaña es de la plataforma, el título sigue siendo del restaurante.
 st.set_page_config(
     page_title=f"{restaurante_nombre()} · Panel",
-    page_icon="🍽️",
+    page_icon=OKU_ISOTIPO,
     layout="wide",
     initial_sidebar_state="collapsed"
 )
@@ -269,21 +289,31 @@ if not st.session_state["autenticado"]:
         text-align: center; font-size: 1.1rem; letter-spacing: 4px;
     }
     .stButton > button {
-        width: 100%; background: #4b43b0 !important; color: #ffffff !important;
+        width: 100%; background: """ + OKU_MORADO + """ !important; color: #ffffff !important;
         border: none !important; border-radius: 8px !important;
         font-family: 'DM Sans', sans-serif !important;
         font-weight: 600 !important; font-size: 0.9rem !important;
         padding: 10px !important; margin-top: 8px !important;
     }
-    .stButton > button:hover { background: #3f389c !important; }
+    .stButton > button:hover { background: #481a7d !important; }
+    /* El foco del campo toma el naranja de marca: el único acento cálido del login. */
+    .stTextInput > div > div:focus-within {
+        border-color: """ + OKU_NARANJA + """ !important;
+        box-shadow: 0 0 0 2px rgba(254,120,9,0.18) !important;
+    }
     </style>
     """, unsafe_allow_html=True)
 
     st.markdown("<div style='height: 8vh'></div>", unsafe_allow_html=True)
     col_c, col_i, col_c2 = st.columns([1, 2, 1])
     with col_i:
+        # El logo de OKU va ARRIBA y chico: el login es la única pantalla del panel que
+        # no es trabajo, así que es donde la marca de plataforma no estorba. El nombre
+        # del restaurante sigue siendo el elemento dominante.
         st.markdown(f"""
         <div style='text-align:center; margin-bottom: 2rem;'>
+          <img src='{_oku_data_uri(OKU_LOGO)}' alt='OKU'
+               style='height:34px; width:auto; margin-bottom:1.4rem; opacity:0.95;'>
           <div style='font-family:"DM Sans",sans-serif; font-size:1.4rem; font-weight:300; letter-spacing:0.16em; text-transform:uppercase; color:#26262b;'>{_html.escape(restaurante_nombre())}</div>
           <div style='font-size:0.82rem; color:#a3a39b; margin-top:6px;'>Panel de operaciones · Acceso restringido</div>
         </div>

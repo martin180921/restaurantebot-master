@@ -361,6 +361,40 @@ def init_db():
             """), {"n": _n_acomp})
             _marcar_sembrado('seed_pd_grupos')
 
+        # ── Categorías del catálogo como DATOS (replicabilidad) ────────────────
+        # Antes las categorías (especial/a_la_carta/adicional/bebida) estaban quemadas
+        # en el código; ahora cada restaurante puede agregar las suyas (Desayunos,
+        # Postres…) desde el panel. 'clave' es el mismo valor de menu.categoria (sin FK
+        # dura). disponible_desde/hasta acotan una categoría a un horario, solo aplicado
+        # en la carta digital del cliente (el panel/POS siempre ven todo lo activo).
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS categorias (
+                id                SERIAL      PRIMARY KEY,
+                clave             VARCHAR(20) UNIQUE NOT NULL,
+                etiqueta          TEXT        NOT NULL,
+                emoji             VARCHAR(8)  NOT NULL DEFAULT '',
+                orden             INTEGER     NOT NULL DEFAULT 0,
+                activo            BOOLEAN     NOT NULL DEFAULT TRUE,
+                disponible_desde  TIME,
+                disponible_hasta  TIME
+            )
+        """))
+        # El horario va además en ALTER aparte: una base que ya tenga la tabla de una build
+        # anterior NO re-ejecuta el CREATE y se quedaría sin estas columnas.
+        conn.execute(text("ALTER TABLE categorias ADD COLUMN IF NOT EXISTS disponible_desde TIME"))
+        conn.execute(text("ALTER TABLE categorias ADD COLUMN IF NOT EXISTS disponible_hasta TIME"))
+        # Seed one-time con las 4 categorías clásicas del código anterior.
+        if not _ya_sembrado('seed_categorias'):
+            conn.execute(text("""
+                INSERT INTO categorias (clave, etiqueta, emoji, orden) VALUES
+                    ('especial',   'Especiales',  '⭐', 1),
+                    ('a_la_carta', 'A la carta',  '📋', 2),
+                    ('adicional',  'Adicionales', '🍟', 3),
+                    ('bebida',     'Bebidas',     '🥤', 4)
+                ON CONFLICT (clave) DO NOTHING
+            """))
+            _marcar_sembrado('seed_categorias')
+
         # Base de clientes: la alimenta la app pública (tel como identidad).
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS clientes (
