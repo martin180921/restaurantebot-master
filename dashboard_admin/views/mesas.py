@@ -6,6 +6,7 @@ from sqlalchemy.exc import IntegrityError
 import html
 import io
 import os
+import re
 
 # segno genera el PNG del QR en Python puro (sin Pillow). Import defensivo: si aún no
 # está instalado (deploy en curso), la pestaña de Mesas sigue funcionando sin los QR.
@@ -77,6 +78,12 @@ def toggle_mesa(mesa_id: int, activa_actual: bool):
     cargar_mesas.clear()  # P1
     flash("Mesa activada" if not activa_actual else "Mesa desactivada",
           "▶️" if not activa_actual else "⏸️")
+    if activa_actual:
+        # Se está DESACTIVANDO: su QR (si lo imprimieron) deja de resolver — un
+        # comensal que lo escanee cae en la pantalla de rescate de la app cliente en
+        # vez de entrar directo. Aviso, no bloqueo: desactivar temporalmente (mesa en
+        # reparación, cerrada por evento…) es un caso legítimo.
+        flash("Si esta mesa tiene un QR impreso, dejará de abrir la carta mientras esté inactiva", "🔳")
 
 def eliminar_mesa(mesa_id: int, nombre: str = "") -> str:
     """Borra la mesa; si tiene pedidos asociados (historial) la archiva en su lugar.
@@ -107,7 +114,8 @@ def eliminar_mesa(mesa_id: int, nombre: str = "") -> str:
 def _dialog_eliminar_mesa(mid: int, nombre: str):
     st.markdown(
         f"¿Eliminar **{html.escape(str(nombre))}**?  \n"
-        "Si tiene pedidos en su historial, se archivará (inactiva) para conservarlo."
+        "Si tiene pedidos en su historial, se archivará (inactiva) para conservarlo.  \n"
+        "Si tiene un QR impreso, retíralo: dejará de abrir la carta."
     )
     c1, c2 = st.columns(2)
     with c1:
@@ -124,10 +132,24 @@ def _dialog_eliminar_mesa(mid: int, nombre: str):
 # Cada mesa tiene un QR que abre la app de clientes con su mesa ya fijada
 # (?table=<id>). La URL pública de la app se guarda en ajustes['app_cliente_url']
 # (o se hereda del env APP_CLIENTE_URL) para construir los enlaces.
+def _normalizar_url_publica(url: str) -> str:
+    """Antepone 'https://' si falta esquema y quita la barra final. Un QR que codifica
+    solo el dominio ('tu-app.up.railway.app/?table=3') es TEXTO plano para varios
+    lectores de cámara en vez de un enlace abrible con un toque — hay que tocar
+    'copiar' y pegarlo a mano en el navegador. Aplicada tanto al guardar como al leer,
+    para que una URL ya guardada sin esquema (de antes de este fix) se autocorrija sin
+    que nadie tenga que volver a escribirla."""
+    url = (url or "").strip().rstrip("/")
+    if url and not re.match(r"^https?://", url, re.IGNORECASE):
+        url = "https://" + url
+    return url
+
+
 def _base_url() -> str:
-    """URL pública de la app de clientes (sin barra final). Ajuste guardado o env."""
+    """URL pública de la app de clientes (sin barra final, con esquema). Ajuste
+    guardado o env."""
     url = (cargar_ajustes().get("app_cliente_url") or os.getenv("APP_CLIENTE_URL") or "")
-    return url.strip().rstrip("/")
+    return _normalizar_url_publica(url)
 
 
 def _guardar_base_url(url: str) -> None:
@@ -135,7 +157,7 @@ def _guardar_base_url(url: str) -> None:
         conn.execute(text(
             "INSERT INTO ajustes (clave, valor) VALUES ('app_cliente_url', :v) "
             "ON CONFLICT (clave) DO UPDATE SET valor = EXCLUDED.valor"
-        ), {"v": (url or "").strip().rstrip("/")})
+        ), {"v": _normalizar_url_publica(url)})
     cargar_ajustes.clear()
     flash("URL pública guardada", "✅")
 
@@ -146,9 +168,12 @@ def _link_mesa(base: str, mesa_id: int) -> str:
 
 @st.cache_data(ttl=3600)
 def _qr_png(url: str) -> bytes:
-    """PNG del QR para 'url' (cacheado: el QR de una mesa no cambia)."""
+    """PNG del QR para 'url' (cacheado: el QR de una mesa no cambia). Corrección de
+    error 'q' (25%, no la 'm' de 15% por defecto): estos códigos se imprimen y quedan
+    pegados en la mesa expuestos a grasa, líquidos y roces — más margen para seguir
+    escaneando aunque se ensucien o rayen, a cambio de un patrón algo más denso."""
     buf = io.BytesIO()
-    segno.make(url, error="m").save(buf, kind="png", scale=8, border=2)
+    segno.make(url, error="q").save(buf, kind="png", scale=8, border=2)
     return buf.getvalue()
 
 
