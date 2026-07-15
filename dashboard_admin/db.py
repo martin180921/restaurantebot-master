@@ -8,6 +8,7 @@ import pandas as pd
 import json
 import os
 import re
+import unicodedata
 
 from utils.items import parse_items
 
@@ -374,6 +375,12 @@ def _ensure_schema():
                 disponible_hasta  TIME
             )
         """))
+        # El horario va además en ALTER aparte: una base que ya tenga 'categorias' de una
+        # build anterior NO re-ejecuta el CREATE y se quedaría sin estas columnas — el
+        # editor de 🏷️ Categorías reventaría al guardar y la carta digital no podría
+        # filtrar. Mismo criterio que las columnas de 'menu'.
+        conn.execute(text("ALTER TABLE categorias ADD COLUMN IF NOT EXISTS disponible_desde TIME"))
+        conn.execute(text("ALTER TABLE categorias ADD COLUMN IF NOT EXISTS disponible_hasta TIME"))
         if not conn.execute(text(
                 "SELECT 1 FROM ajustes WHERE clave = 'seed_categorias'")).first():
             conn.execute(text("""
@@ -1326,12 +1333,41 @@ def tipos_con_recargo() -> set:
     return tipos
 
 
+def slug_categoria(texto: str, max_len: int = 20) -> str:
+    """'Café y Té' → 'cafe_y_te'. Los acentos se TRANSLITERAN (descomponer en NFKD y
+    soltar las marcas), no se borran: un re.sub a secas dejaba 'caf_y_t' — claves feas y
+    con más riesgo de chocar entre sí ('Té'/'Te' caían ambas en 't'). La ñ la resuelve el
+    mismo NFKD (ñ → n + tilde combinante → n). Acotada a max_len: debe caber en
+    menu.categoria VARCHAR(20)."""
+    s = unicodedata.normalize("NFKD", (texto or "").strip().lower())
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    return re.sub(r"[^a-z0-9_]", "", s.replace(" ", "_"))[:max_len]
+
+
+def en_horario_categoria(cat: dict, ahora=None) -> bool:
+    """True si la categoría se ofrece en la carta digital a la hora dada (por defecto,
+    AHORA en Bogotá). NULL en desde u hasta = sin restricción. 'desde' > 'hasta' es una
+    ventana nocturna que cruza medianoche (p. ej. 20:00–02:00).
+
+    Misma regla que app_cliente._en_horario (duplicada a propósito: es un proceso
+    aislado). Aquí NO filtra nada — el panel y el POS siempre ven todas las categorías
+    activas —; solo alimenta el aviso 'visible/oculta ahora' del editor de Categorías,
+    para que el restaurante vea el efecto de su horario sin abrir la carta."""
+    desde, hasta = cat.get("disponible_desde"), cat.get("disponible_hasta")
+    if desde is None or hasta is None:
+        return True
+    if ahora is None:
+        ahora = ahora_bogota().time()
+    if desde <= hasta:
+        return desde <= ahora <= hasta
+    return ahora >= desde or ahora <= hasta
+
+
 def crear_categoria(clave: str, etiqueta: str, emoji: str = ""):
     """Crea una categoría nueva. Devuelve None si ok o un mensaje de error. La clave se
     normaliza a [a-z0-9_] y máx. 20 chars: debe caber en menu.categoria."""
     etiqueta = (etiqueta or "").strip()
-    clave = re.sub(r"[^a-z0-9_]", "", (clave or etiqueta).strip().lower()
-                   .replace(" ", "_").replace("ñ", "n"))[:20]
+    clave = slug_categoria(clave or etiqueta)
     if not clave or not etiqueta:
         return "La categoría necesita clave y nombre."
     with engine.begin() as conn:
@@ -1339,6 +1375,13 @@ def crear_categoria(clave: str, etiqueta: str, emoji: str = ""):
             "SELECT 1 FROM categorias WHERE clave = :c"), {"c": clave}).first()
         if dup:
             return f"Ya existe una categoría con la clave '{clave}'."
+        # La etiqueta también debe ser única: dos pestañas con el mismo nombre son
+        # indistinguibles en el panel/POS/carta y vuelven ambiguo el importador de Excel
+        # (mapea la columna 'seccion' por etiqueta, ver _seccion_map → ganaría una al azar).
+        dup_et = conn.execute(text(
+            "SELECT 1 FROM categorias WHERE lower(etiqueta) = lower(:e)"), {"e": etiqueta}).first()
+        if dup_et:
+            return f"Ya existe una categoría llamada '{etiqueta}'."
         sig = conn.execute(text(
             "SELECT COALESCE(MAX(orden), 0) + 1 FROM categorias")).scalar()
         conn.execute(text(
