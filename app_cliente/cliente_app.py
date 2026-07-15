@@ -288,6 +288,18 @@ def _clean_tel(valor) -> str:
     return "".join(c for c in str(valor) if c not in "<>\"'`").strip()[:40]
 
 
+def _mask_direccion(direccion: str) -> str:
+    """Vista previa de una dirección guardada sin exponerla completa en pantalla:
+    primeros ~10 caracteres + '…'. El enlace de delivery acepta ?tel=<num> para
+    precargar los datos del cliente (comodidad del enlace que manda el bot); pero
+    quien abra esa URL conociendo el teléfono de otra persona no debería ver dónde
+    vive con solo eso — ver _pantalla_gate."""
+    d = (direccion or "").strip()
+    if len(d) <= 10:
+        return d
+    return d[:10].rstrip() + "…"
+
+
 # ── Lecturas (cacheadas; la carta cambia poco) ─────────────────────────────────
 def _stock_val(v):
     """int del stock o None (ilimitado). El None distingue 'sin control' de '0'."""
@@ -440,9 +452,13 @@ def cargar_categorias() -> list:
 
 def tipos_con_recargo() -> set:
     """{'plato_dia'} ∪ los tipos de categorías cuyo comportamiento cobra recargo de
-    entrega (Domicilio / Para Llevar)."""
+    entrega (Domicilio / Para Llevar). TODAS las categorías (activas o no, sin filtrar
+    por horario) — igual que dashboard_admin/db.py:tipos_con_recargo. Usar
+    cargar_categorias() aquí (activas + EN HORARIO) haría que un ítem ya elegido de una
+    categoría con recargo dejara de cobrarlo en cuanto esa categoría saliera de su
+    franja horaria a mitad del pedido, aunque el ítem siga en el carrito."""
     tipos = {"plato_dia"}
-    for c in cargar_categorias():
+    for c in (_cargar_categorias_raw() or _categorias_clasicas()):
         if comportamiento_categoria(c["clave"])["recargo"]:
             tipos.add(tipo_de_categoria(c["clave"]))
     return tipos
@@ -526,15 +542,26 @@ def _metodos_pago() -> dict:
 
 # ── Mesas (auto-servicio por QR) ────────────────────────────────────────────────
 @st.cache_data(ttl=30)
+def _cargar_mesas_activas_db() -> list:
+    """Consulta real, cacheada 30s. Deja escapar la excepción a propósito: NO debe
+    cachearse un fallo transitorio de conexión (ver cargar_mesas_activas)."""
+    with engine.connect() as conn:
+        rows = conn.execute(text(
+            "SELECT id, nombre FROM mesas WHERE activa = TRUE ORDER BY id"
+        )).mappings().all()
+    return [{"id": int(r["id"]), "nombre": r["nombre"]} for r in rows]
+
+
 def cargar_mesas_activas() -> list:
     """[{id, nombre}] de las mesas ACTIVAS, para el selector manual y el resolver del
-    parámetro ?table=. Tolerante a fallos (devuelve [] si la tabla aún no existe)."""
+    parámetro ?table=. Tolerante a fallos (devuelve [] si la tabla aún no existe o la BD
+    no respondió) SIN cachear ese []: el try/except vive FUERA de la función cacheada
+    a propósito. Antes el [] del except quedaba cacheado 30s — un hipo transitorio de
+    conexión justo al escanear un QR dejaba 'ninguna mesa activa' envenenado ese medio
+    minuto, y como la mesa se fija una sola vez por sesión, ese comensal quedaba
+    atrapado en el flujo de rescate/domicilio aunque la BD ya hubiera vuelto."""
     try:
-        with engine.connect() as conn:
-            rows = conn.execute(text(
-                "SELECT id, nombre FROM mesas WHERE activa = TRUE ORDER BY id"
-            )).mappings().all()
-        return [{"id": int(r["id"]), "nombre": r["nombre"]} for r in rows]
+        return _cargar_mesas_activas_db()
     except Exception:
         return []
 
@@ -857,8 +884,17 @@ def guardar_pedido(numero_cliente, items, total, *, tipo_entrega, cliente_nombre
 
     H3: 'idem_key' evita pedidos duplicados si el comensal toca "Enviar" dos veces o el
     móvil reintenta tras un corte de red. ON CONFLICT DO NOTHING → si ya existe, no se
-    descuenta inventario otra vez y se devuelve el id existente."""
+    descuenta inventario otra vez y se devuelve el id existente. El SELECT temprano evita
+    además que un reintento consuma un num_dia: _siguiente_num_dia() incrementa el
+    contador SIEMPRE que se llama, así que pedirlo antes de saber si el pedido ya existe
+    dejaba un hueco en la numeración del día por cada reintento (cosmético para el
+    restaurante, pero confunde: "¿por qué falta el pedido #7?")."""
     with engine.begin() as conn:
+        if idem_key:
+            existente = conn.execute(text(
+                "SELECT id FROM pedidos WHERE idem_key = :k"), {"k": idem_key}).scalar()
+            if existente is not None:
+                return int(existente)
         num = _siguiente_num_dia(conn)
         nuevo_id = conn.execute(text("""
             INSERT INTO pedidos
@@ -876,7 +912,8 @@ def guardar_pedido(numero_cliente, items, total, *, tipo_entrega, cliente_nombre
             "idem": idem_key,
         }).scalar()
         if nuevo_id is None:
-            # H3: reintento con la misma clave → el pedido ya existe; no re-descuenta.
+            # Carrera con otra conexión entre el SELECT de arriba y este INSERT (el
+            # caso común, mismo idem_key sin carrera, ya salió por el return temprano).
             return int(conn.execute(text(
                 "SELECT id FROM pedidos WHERE idem_key = :k"), {"k": idem_key}).scalar() or 0)
         # Descuento inmediato del inventario (mismo txn): evita revender lo ya pedido. Si no
@@ -894,10 +931,16 @@ def guardar_pedido_mesa(mesa_id, mesa_nombre, items, total, *, para_llevar, fee,
     llevar; el cobro se hace luego en caja (no se captura pago aquí).
 
     H3: 'idem_key' evita duplicar el pedido si el comensal reenvía. Solo se descuenta
-    inventario y se encola la comanda cuando el pedido se crea de verdad (no en reintentos)."""
+    inventario y se encola la comanda cuando el pedido se crea de verdad (no en reintentos).
+    El SELECT temprano evita que un reintento consuma un num_dia (ver guardar_pedido)."""
     label = f"[QR] {mesa_nombre}" + (" · Para llevar" if para_llevar else "")
     creado = False
     with engine.begin() as conn:
+        if idem_key:
+            existente = conn.execute(text(
+                "SELECT id FROM pedidos WHERE idem_key = :k"), {"k": idem_key}).scalar()
+            if existente is not None:
+                return int(existente)
         num = _siguiente_num_dia(conn)
         nuevo_id = conn.execute(text("""
             INSERT INTO pedidos
@@ -912,7 +955,7 @@ def guardar_pedido_mesa(mesa_id, mesa_nombre, items, total, *, para_llevar, fee,
             "fee": int(fee or 0), "ng": (nota_general or None), "idem": idem_key,
         }).scalar()
         if nuevo_id is None:
-            # H3: reintento → recupera el id existente, sin re-descontar ni reimprimir.
+            # Carrera con otra conexión (el caso común ya salió por el return temprano).
             nuevo_id = conn.execute(text(
                 "SELECT id FROM pedidos WHERE idem_key = :k"), {"k": idem_key}).scalar()
         else:
@@ -1082,6 +1125,9 @@ st.session_state.setdefault("cart", {})            # {f"{tipo}:{id}": qty}
 st.session_state.setdefault("gate", None)          # datos de la puerta delivery
 st.session_state.setdefault("mesa_id", None)       # mesa bloqueada (auto-servicio QR)
 st.session_state.setdefault("mesa_nombre", None)
+st.session_state.setdefault("mesa_auto", False)
+st.session_state.setdefault("qr_invalido", False)  # ?table= presente pero no resolvió a una mesa activa
+st.session_state.setdefault("qr_omitir", False)    # el comensal eligió domicilio pese al QR fallido
 st.session_state.setdefault("pedido_enviado", None)
 st.session_state.setdefault("pedido_pendiente", None)  # snapshot en revisión (pre-envío)
 st.session_state.setdefault("pd_qty", 0)
@@ -1092,13 +1138,23 @@ qp = st.query_params
 # El QR de cada mesa abre la app con ?table=<id|nombre> (o ?mesa=). Extraemos la mesa
 # una sola vez y la FIJAMOS en la sesión: a partir de ahí queda inmutable durante todo
 # el journey (carta → carrito → envío), sin volver a pedir nada al comensal (req #1, #3).
-if st.session_state["mesa_id"] is None:
+#
+# Un ?table= que NO resuelve (mesa borrada/desactivada, QR impreso desactualizado, o un
+# hipo transitorio de la BD) ANTES caía en silencio al flujo de Domicilio: el comensal
+# sentado en la mesa terminaba tecleando una dirección de entrega sin darse cuenta. Ahora
+# se marca 'qr_invalido' y el enrutado de abajo muestra una pantalla de rescate en vez
+# de asumir delivery. 'qr_omitir' es la salida explícita: el comensal, ya avisado, puede
+# decidir que sí quiere pedir a domicilio.
+if st.session_state["mesa_id"] is None and not st.session_state["qr_omitir"]:
     _raw_table = qp.get("table") or qp.get("mesa")
-    _mesa = resolver_mesa(_raw_table) if _raw_table else None
-    if _mesa:
-        st.session_state["mesa_id"]     = _mesa["id"]
-        st.session_state["mesa_nombre"] = _mesa["nombre"]
-        st.session_state["mesa_auto"]   = True   # detectada por QR (vs. selección manual)
+    if _raw_table:
+        _mesa = resolver_mesa(_raw_table)
+        if _mesa:
+            st.session_state["mesa_id"]     = _mesa["id"]
+            st.session_state["mesa_nombre"] = _mesa["nombre"]
+            st.session_state["mesa_auto"]   = True   # detectada por QR (vs. selección manual)
+        else:
+            st.session_state["qr_invalido"] = True
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1158,6 +1214,43 @@ def _pantalla_seguimiento():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Rescate de un QR de mesa que no resolvió
+# ══════════════════════════════════════════════════════════════════════════════
+# Se muestra cuando la URL trae ?table=/?mesa= pero no corresponde a una mesa ACTIVA
+# (mesa borrada/desactivada, QR impreso desactualizado, o la BD no respondió al
+# resolver — cargar_mesas_activas no cachea ese fallo, ver su docstring). Ofrece elegir
+# la mesa a mano o, si el comensal de verdad quiere, seguir al flujo de domicilio.
+def _pantalla_qr_invalido():
+    st.markdown("""
+    <div class="c-header">
+      <div class="c-title">🔎 No reconocimos tu mesa</div>
+      <div class="c-subtitle">El código QR puede estar desactualizado</div>
+    </div>
+    """, unsafe_allow_html=True)
+    st.warning("Elige tu mesa de la lista, o avísale a alguien del restaurante.")
+
+    mesas = cargar_mesas_activas()
+    if mesas:
+        nombres = [m["nombre"] for m in mesas]
+        elegida = st.selectbox("Tu mesa", nombres, key="qr_rescate_mesa", index=None,
+                               label_visibility="collapsed", placeholder="Selecciona tu mesa…")
+        if st.button("Confirmar mesa →", type="primary", use_container_width=True,
+                     disabled=(elegida is None)):
+            m = next(x for x in mesas if x["nombre"] == elegida)
+            st.session_state["mesa_id"]     = m["id"]
+            st.session_state["mesa_nombre"] = m["nombre"]
+            st.session_state["mesa_auto"]   = False  # elegida a mano, no por el QR
+            st.session_state["qr_invalido"] = False
+            st.rerun()
+        st.markdown("<div style='height:10px;'></div>", unsafe_allow_html=True)
+
+    if st.button("🛵 Prefiero pedir a domicilio o para llevar", use_container_width=True):
+        st.session_state["qr_omitir"] = True
+        st.rerun()
+    st.stop()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Puerta de entrada DELIVERY (WhatsApp / acceso directo): tipo + datos del cliente
 # ══════════════════════════════════════════════════════════════════════════════
 # Es el flujo "de antes": quien llega SIN QR de mesa (enlace de WhatsApp o acceso
@@ -1186,9 +1279,24 @@ def _pantalla_gate():
                              value=tel_param or (cli or {}).get("telefono") or "", key="g_tel")
     direccion = ""
     if es_domicilio:
-        direccion = st.text_area("Dirección de entrega",
-                                 value=(cli or {}).get("direccion") or "", key="g_dir",
-                                 placeholder="Calle, número, barrio, referencias…")
+        # La dirección GUARDADA no se pinta completa en pantalla: el enlace trae
+        # ?tel=<num> para comodidad (lo manda el bot), pero cualquiera que conozca ese
+        # teléfono podría abrir el mismo enlace y ver dónde vive el cliente. Se ofrece
+        # una vista previa enmascarada + la opción de usarla tal cual (sin mostrarla) o
+        # escribir una dirección nueva.
+        direccion_guardada = ((cli or {}).get("direccion") or "").strip()
+        usar_guardada = False
+        if direccion_guardada:
+            usar_guardada = st.checkbox(
+                f"Usar mi dirección guardada ({_mask_direccion(direccion_guardada)})",
+                value=True, key="g_usar_dir_guardada",
+                help="Por privacidad no se muestra completa aquí; se usa tal como la "
+                     "guardaste la última vez. Desmarca para escribir una nueva.")
+        if usar_guardada:
+            direccion = direccion_guardada
+        else:
+            direccion = st.text_area("Dirección de entrega", value="", key="g_dir",
+                                     placeholder="Calle, número, barrio, referencias…")
 
     if st.button("Ver la carta →", type="primary", use_container_width=True):
         errores = []
@@ -1851,9 +1959,14 @@ if st.session_state["pedido_enviado"]:
 
 # Enrutado por origen:
 #   • Vino por el QR de una mesa (?table=) → flujo de MESA (auto-servicio, dine-in).
-#   • Cualquier otro acceso (enlace de WhatsApp / directo) → flujo DELIVERY de antes
-#     (Domicilio / Para Llevar), con su puerta de entrada de datos del cliente.
+#   • El QR trajo ?table= pero NO resolvió → pantalla de rescate (elegir mesa a mano
+#     o seguir a domicilio), NUNCA se asume delivery en silencio.
+#   • Cualquier otro acceso (enlace de WhatsApp / directo, o domicilio elegido tras un
+#     QR fallido) → flujo DELIVERY de antes, con su puerta de entrada de datos.
 es_mesa = st.session_state["mesa_id"] is not None
+
+if not es_mesa and st.session_state["qr_invalido"] and not st.session_state["qr_omitir"]:
+    _pantalla_qr_invalido()
 
 if not es_mesa and st.session_state["gate"] is None:
     _pantalla_gate()   # puerta delivery (bloquea la carta hasta tener los datos)
