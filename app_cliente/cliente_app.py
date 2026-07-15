@@ -28,6 +28,7 @@ import streamlit.components.v1
 from streamlit_autorefresh import st_autorefresh
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
+import base64
 import json
 import html
 import time
@@ -52,6 +53,29 @@ MAX_ACTIVAS_POR_MESA  = 8    # tope de pedidos en curso por mesa (auto-servicio 
 # Identidad del restaurante para la cola de impresión multi-tenant (mismo env que el
 # panel). La comanda de cocina de cada pedido QR se encola con este id.
 RESTAURANTE_ID = int(os.getenv("RESTAURANTE_ID", "1"))
+
+# Marca OKU. Ruta absoluta: Streamlit resuelve las relativas contra el CWD del proceso,
+# que en Railway no es esta carpeta.
+_ASSETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+OKU_ISOTIPO = os.path.join(_ASSETS, "oku_isotipo.png")
+OKU_LOGO = os.path.join(_ASSETS, "oku_logo.png")
+
+
+@st.cache_data
+def _oku_data_uri(ruta: str) -> str:
+    """Logo como data URI para incrustarlo en el HTML propio de la carta."""
+    with open(ruta, "rb") as fh:
+        return "data:image/png;base64," + base64.b64encode(fh.read()).decode()
+
+
+def _pie_marca() -> None:
+    """Firma discreta al final del scroll. El header de la carta es del restaurante;
+    la marca de plataforma solo aparece cuando el comensal ya terminó de mirar."""
+    st.markdown(
+        f'<div class="c-oku"><span>Pedidos con</span>'
+        f'<img src="{_oku_data_uri(OKU_LOGO)}" alt="OKU"></div>',
+        unsafe_allow_html=True,
+    )
 
 # Canal de origen del pedido. Las mesas por QR (auto-servicio del comensal) se marcan
 # 'mesa_qr': son pedidos de MESA (llevan mesa_id, ocupan el salón y no pagan recargo)
@@ -919,7 +943,8 @@ def pedidos_activos_telefono(tel: str) -> int:
 # ── Config + estilos (móvil) ───────────────────────────────────────────────────
 # El título lleva el nombre del restaurante (ajuste 'restaurante_nombre').
 st.set_page_config(page_title=f"{_restaurante_nombre()} · Carta",
-                   page_icon="🍽️", layout="centered", initial_sidebar_state="collapsed")
+                   page_icon=OKU_ISOTIPO, layout="centered",
+                   initial_sidebar_state="collapsed")
 
 # Blindaje contra el traductor del navegador (mismo fix que el panel): Streamlit sirve
 # lang="en" y Chrome móvil puede auto-traducir la página; Google Translate envuelve los
@@ -961,6 +986,13 @@ html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
 .c-qty   { text-align: center; font-weight: 700; font-size: 1.05rem;
            padding-top: 10px; color: #1a1a1a; }
 .c-empty { text-align: center; color: #aaa; font-size: 0.88rem; padding: 0.8rem 0; }
+
+/* Firma de plataforma al pie: debe leerse como un crédito, no como un anuncio. */
+.c-oku { display: flex; align-items: center; justify-content: center; gap: 6px;
+         margin: 2rem 0 0.5rem 0; padding-top: 1rem;
+         border-top: 1px solid #ececec; opacity: 0.55; }
+.c-oku span { font-size: 0.7rem; color: #999; letter-spacing: 0.04em; }
+.c-oku img  { height: 15px; width: auto; }
 
 .plate-card { background: #fff; border: 1px solid #ececec; border-left: 4px solid #1a1a1a;
               border-radius: 12px; padding: 0.8rem 0.9rem; margin: 0.6rem 0; }
@@ -1833,3 +1865,7 @@ if es_mesa:
         _carta_mesa(_comp, _cat, _ajustes)
 else:
     _carta_delivery(_comp, _cat, _ajustes)
+
+# Firma de OKU al final del scroll, FUERA de los fragments: así no se repinta en cada
+# interacción con la carta.
+_pie_marca()
