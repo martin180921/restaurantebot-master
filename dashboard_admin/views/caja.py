@@ -1074,6 +1074,82 @@ def _abrir_dialogo_simple_pendiente() -> None:
                                  d["diferencia"], d["total_esperado"])
 
 
+@st.dialog("🟢 Abrir caja")
+def _dialog_abrir_caja():
+    """Apertura de turno EN DOS PASOS, compartida por admin y caja simple: (1) define la
+    base de efectivo, (2) si el cierre anterior dejó meseros bloqueados (cerrar_caja los
+    bloquea en bloque), los activa aquí mismo — así el cajero no tiene que ir aparte a
+    Administración cada mañana solo para que los meseros puedan volver a entrar.
+
+    Se mantiene abierto entre reruns con el mismo mecanismo de flag persistente en
+    session_state que usa el resto de la caja simple: mientras '_dlg_abrir_caja_open' siga
+    en True, render() vuelve a llamar esta función en cada run (ver abajo)."""
+    if not st.session_state.get("_dlg_abrir_caja_id"):
+        monto_apertura = int(st.number_input(
+            "Monto de Apertura (Base en Efectivo)", min_value=0, value=0, step=1000,
+            format="%d", key="dlg_monto_apertura",
+            help="Efectivo con el que arranca la caja al inicio del turno.",
+        ) or 0)
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("🟢 Abrir Caja / Iniciar Turno", key="dlg_btn_abrir_caja",
+                         type="primary", use_container_width=True):
+                if abrir_caja(monto_apertura):
+                    flash(f"Caja abierta · base ${fmt_money(monto_apertura)}", "🟢")
+                    st.session_state["_dlg_abrir_caja_id"] = True
+                    st.rerun()
+                else:
+                    st.error("Ya hay un turno abierto.")
+        with c2:
+            if st.button("Cancelar", key="dlg_btn_abrir_caja_cancelar",
+                         use_container_width=True):
+                st.session_state["_dlg_abrir_caja_open"] = False
+                st.rerun()
+        return
+
+    # Paso 2: el turno ya abrió. Meseros que quedaron bloqueados por el cierre anterior.
+    bloqueados = [e for e in empleados.listar_empleados(incluir_inactivos=False)
+                  if e["rol"] == "mesero" and e["bloqueado"]]
+    if not bloqueados:
+        st.session_state["_dlg_abrir_caja_open"] = False
+        st.session_state.pop("_dlg_abrir_caja_id", None)
+        st.rerun()
+        return
+
+    st.success("Turno iniciado.")
+    st.caption("Estos meseros quedaron bloqueados por el cierre anterior. Actívalos para "
+               "que su PIN vuelva a servir.")
+    for e in bloqueados:
+        eid = int(e["id"])
+        col_a, col_b = st.columns([3, 1])
+        with col_a:
+            st.markdown(
+                f'<div style="font-size:0.9rem; color:#45443e; padding:6px 0;">'
+                f'🧑‍🍳 {html.escape(str(e["nombre"]))}</div>', unsafe_allow_html=True)
+        with col_b:
+            if st.button("Activar", key=f"dlg_activar_mesero_{eid}",
+                         use_container_width=True):
+                if empleados.reactivar_acceso(eid):
+                    audit.registrar("mesero_reactivado", "empleado", eid,
+                                    {"via": "apertura_caja"})
+                    flash(f"{e['nombre']} activado", "🟢")
+                st.rerun()
+    if len(bloqueados) > 1:
+        if st.button("Activar todos", key="dlg_activar_todos", use_container_width=True):
+            for e in bloqueados:
+                eid = int(e["id"])
+                if empleados.reactivar_acceso(eid):
+                    audit.registrar("mesero_reactivado", "empleado", eid,
+                                    {"via": "apertura_caja"})
+            flash("Todos los meseros activados", "🟢")
+            st.rerun()
+    if st.button("Listo, empezar turno", key="dlg_abrir_caja_listo", type="primary",
+                 use_container_width=True):
+        st.session_state["_dlg_abrir_caja_open"] = False
+        st.session_state.pop("_dlg_abrir_caja_id", None)
+        st.rerun()
+
+
 @st.dialog("💵 Cobrar")
 def _dialog_cobrar_mesas():
     cuentas = _cuentas_por_cobrar_hoy()
@@ -1307,17 +1383,9 @@ def _render_caja_simple():
             unsafe_allow_html=True,
         )
         st.markdown("<br>", unsafe_allow_html=True)
-        monto_apertura = int(st.number_input(
-            "Monto de Apertura (Base en Efectivo)", min_value=0, value=0, step=1000,
-            format="%d", key="simple_monto_apertura_nuevo",
-            help="Efectivo con el que arranca la caja al inicio del turno.",
-        ) or 0)
         if st.button("🟢 Abrir Caja / Iniciar Turno", key="simple_btn_abrir_caja",
                      type="primary", use_container_width=True):
-            if abrir_caja(monto_apertura):
-                flash(f"Caja abierta · base ${fmt_money(monto_apertura)}", "🟢")
-            else:
-                flash("Ya hay un turno abierto", "⚠️")
+            st.session_state["_dlg_abrir_caja_open"] = True
             st.rerun()
         return
 
@@ -1368,6 +1436,11 @@ def render():
     if not auth.can("manage_caja"):
         st.error("🔒 Acceso denegado")
         st.stop()
+    # Apertura de turno: diálogo compartido por admin y caja simple (ver _dialog_abrir_caja).
+    # Se re-invoca en CADA run mientras el flag siga activo — así Streamlit mantiene el
+    # mismo diálogo abierto a través de sus dos pasos (base → activar meseros).
+    if st.session_state.get("_dlg_abrir_caja_open"):
+        _dialog_abrir_caja()
     # El admin (ve_revenue) usa el entorno completo: cierre + Inventario e Importar
     # (movidos desde 🍔 Menú, reutilizados tal cual sin duplicar su lógica). El cajero usa
     # una home simplificada de botones grandes (_render_caja_simple): sin pestañas, sin
@@ -1427,17 +1500,9 @@ def _render_cierre():
         )
         st.markdown("<br>", unsafe_allow_html=True)
 
-        monto_apertura = int(st.number_input(
-            "Monto de Apertura (Base en Efectivo)", min_value=0, value=0, step=1000,
-            format="%d", key="monto_apertura_nuevo",
-            help="Efectivo con el que arranca la caja al inicio del turno.",
-        ) or 0)
         if st.button("🟢 Abrir Caja / Iniciar Turno", key="btn_abrir_caja",
                      type="primary", use_container_width=True):
-            if abrir_caja(monto_apertura):
-                flash(f"Caja abierta · base ${fmt_money(monto_apertura)}", "🟢")
-            else:
-                flash("Ya hay un turno abierto", "⚠️")
+            st.session_state["_dlg_abrir_caja_open"] = True
             st.rerun()
 
     # ── ESTADO B: caja abierta (turno activo) ───────────────────────────────────
