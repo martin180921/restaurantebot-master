@@ -1062,6 +1062,47 @@ def saldo_actual(ids) -> int:
         return -1
 
 
+def _expander_corregir_cobro(ids, uid) -> None:
+    """Expander '⚠️ Corregir un cobro' dentro del modal de cobro. Ofrece un renglón (con
+    botón + PIN de admin) por cada pedido de 'ids' que tenga algún pago que anular. Un
+    cobro de MESA agrupa varios pedidos: 'el último pago' es por PEDIDO, no por mesa.
+
+    Se usa en las DOS ramas de dialog_cobrar: la de saldo pendiente (corregir el último
+    abono antes de terminar de cobrar) Y la de cuenta ya saldada (el caso más común de
+    error: cobré todo el saldo con el método equivocado; la cuenta quedó pagada y sin
+    esto no habría dónde corregirla, porque ya no aparece en ningún listado cobrable)."""
+    ultimos = [(pid, _ultimo_pago(pid)) for pid in ids]
+    ultimos = [(pid, u) for pid, u in ultimos if u]
+    if not ultimos:
+        return
+    with st.expander("⚠️ Corregir un cobro"):
+        if len(ultimos) > 1:
+            st.caption("Esta cuenta agrupa varios pedidos: elige cuál corregir.")
+        st.caption("🔐 Requiere PIN de administrador. Queda registrado en la "
+                  "auditoría a su nombre.")
+        admin_pin = st.text_input("PIN de administrador", type="password",
+                                  key=f"anular_pin_{uid}")
+        for pid, ultimo in ultimos:
+            hora = (ultimo["fecha"].strftime("%H:%M")
+                   if hasattr(ultimo["fecha"], "strftime") else "")
+            etiqueta = f"#{pid} · ${fmt_money(ultimo['monto'])} · {ultimo['metodo']}"
+            if hora:
+                etiqueta += f" · {hora}"
+            if _es_tramo_mixto(pid, ultimo):
+                st.caption(f"⚠️ {etiqueta}: es UN tramo de un cobro mixto (efectivo + "
+                          "transferencia). Esto solo anula este tramo; si el otro "
+                          "también estaba mal, anúlalo aparte tras esto.")
+            if st.button(f"Anular {etiqueta}", key=f"anular_btn_{uid}_{pid}",
+                         use_container_width=True):
+                ok, msg = anular_ultimo_pago(pid, admin_pin)
+                if ok:
+                    st.session_state.pop(f"_cobro_lock_{uid}", None)
+                    flash(msg, "⚠️")
+                    st.rerun()
+                else:
+                    st.error(msg)
+
+
 # ── Modal de cobro: efectivo/transferencia y abonos parciales (Fase: pagos) ──────
 # Pop-up centrado compartido entre el tablero y el monitor de mesas
 # (pedidos.dialog_cobrar). 'ids' = pedidos a cobrar (uno o varios); 'titulo' = mesa
@@ -1116,6 +1157,11 @@ def dialog_cobrar(ids, titulo, total, uid):
             st.rerun()
         if st.button("Cerrar", key=f"volver_cobrar_{uid}", use_container_width=True):
             st.rerun()
+        # Corregir aquí también (no solo con saldo pendiente): el error típico es cobrar
+        # TODO el saldo con el método equivocado → la cuenta queda pagada y sin este
+        # expander no habría dónde corregirla (ya no aparece en ningún listado cobrable).
+        # anular_ultimo_pago la reabre (pagado=FALSE) para volver a cobrarla bien.
+        _expander_corregir_cobro(ids, uid)
         return
 
     st.markdown("<br>", unsafe_allow_html=True)
@@ -1497,39 +1543,7 @@ def dialog_cobrar(ids, titulo, total, uid):
         if st.button("Cancelar", key=f"volver_cobrar_{uid}", use_container_width=True):
             st.rerun()
 
-    # Corrección de un cobro mal registrado (monto o método equivocado). Un cobro de
-    # MESA agrupa varios pedidos (uno por comensal ya tocado): "el último pago" es por
-    # PEDIDO, no por mesa, así que se ofrece un renglón (con su propio botón) por cada
-    # pedido de 'ids' que tenga algún pago — no solo cuando la cuenta es un único pedido.
-    ultimos = [(pid, _ultimo_pago(pid)) for pid in ids]
-    ultimos = [(pid, u) for pid, u in ultimos if u]
-    if ultimos:
-        with st.expander("⚠️ Corregir un cobro"):
-            if len(ultimos) > 1:
-                st.caption("Esta cuenta agrupa varios pedidos: elige cuál corregir.")
-            st.caption("🔐 Requiere PIN de administrador. Queda registrado en la "
-                      "auditoría a su nombre.")
-            admin_pin = st.text_input("PIN de administrador", type="password",
-                                      key=f"anular_pin_{uid}")
-            for pid, ultimo in ultimos:
-                hora = (ultimo["fecha"].strftime("%H:%M")
-                       if hasattr(ultimo["fecha"], "strftime") else "")
-                etiqueta = f"#{pid} · ${fmt_money(ultimo['monto'])} · {ultimo['metodo']}"
-                if hora:
-                    etiqueta += f" · {hora}"
-                if _es_tramo_mixto(pid, ultimo):
-                    st.caption(f"⚠️ {etiqueta}: es UN tramo de un cobro mixto (efectivo + "
-                              "transferencia). Esto solo anula este tramo; si el otro "
-                              "también estaba mal, anúlalo aparte tras esto.")
-                if st.button(f"Anular {etiqueta}", key=f"anular_btn_{uid}_{pid}",
-                             use_container_width=True):
-                    ok, msg = anular_ultimo_pago(pid, admin_pin)
-                    if ok:
-                        st.session_state.pop(f"_cobro_lock_{uid}", None)
-                        flash(msg, "⚠️")
-                        st.rerun()
-                    else:
-                        st.error(msg)
+    _expander_corregir_cobro(ids, uid)
 
 
 # ── Modal de descuento / cortesía (gated por PIN de admin) ──────────────────────

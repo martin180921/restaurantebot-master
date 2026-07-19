@@ -419,32 +419,45 @@ def _cuentas_por_cobrar_hoy():
 
 
 def _cuentas_cobradas_hoy():
-    """[{tipo, nombre, ids, total}] de las cuentas que ya se cobraron por completo y se
-    PAGARON hoy (fecha de 'pagos', no de creación del pedido: un domicilio armado ayer y
-    cobrado hoy en la puerta debe listarse igual). Sin esto, 'Reimprimir recibo' —que
-    solo vive en la rama total<=0 de pedidos.dialog_cobrar— era prácticamente
-    inalcanzable: ninguna otra pantalla ofrece una cuenta ya saldada. Agrupa por mesa
-    igual que _cuentas_por_cobrar_hoy. Tolerante a fallos → None."""
+    """[{tipo, nombre, ids, total}] de las cuentas cobradas por completo y PAGADAS hoy
+    (fecha de 'pagos', no de creación: un domicilio armado ayer y cobrado hoy en la
+    puerta debe listarse igual), para reimprimir su recibo. Sin esto 'Reimprimir recibo'
+    —que solo vive en la rama total<=0 de pedidos.dialog_cobrar— era inalcanzable:
+    ninguna otra pantalla ofrece una cuenta ya saldada.
+
+    Agrupa por (mesa, MOMENTO del cobro), no solo por mesa: si la misma mesa rotó dos
+    veces en el día (almuerzo y cena, ambas cobradas hoy), son dos recibos distintos y
+    no deben fusionarse en un ticket con los ítems de ambas sentadas mezclados. Los
+    pedidos cobrados en la MISMA transacción comparten MAX(pg.fecha) exacto (registrar_pago
+    inserta todas sus filas con un solo NOW()), así que ese timestamp separa las sentadas.
+    Tolerante a fallos → None."""
     try:
         with engine.connect() as conn:
             rows = conn.execute(text("""
-                SELECT DISTINCT p.id, p.mesa_id, m.nombre AS mesa_nombre, p.numero_cliente,
-                       p.cliente_nombre, p.total
+                SELECT p.id, p.mesa_id, m.nombre AS mesa_nombre, p.numero_cliente,
+                       p.cliente_nombre, p.total, MAX(pg.fecha) AS cobrado_at
                 FROM pedidos p
                 JOIN pagos pg ON pg.pedido_id = p.id
                 LEFT JOIN mesas m ON m.id = p.mesa_id
-                WHERE p.pagado = TRUE AND pg.fecha::date = CURRENT_DATE
-                ORDER BY p.id DESC
+                WHERE p.pagado = TRUE
+                GROUP BY p.id, p.mesa_id, m.nombre, p.numero_cliente, p.cliente_nombre, p.total
+                HAVING MAX(pg.fecha)::date = CURRENT_DATE
+                ORDER BY MAX(pg.fecha) DESC
             """)).mappings().all()
     except Exception:
         return None
-    mesas_map, sueltos = {}, []
+    grupos, sueltos = {}, []
     for r in rows:
         d = dict(r)
+        hora = d["cobrado_at"].strftime("%H:%M") if hasattr(d["cobrado_at"], "strftime") else ""
         if d.get("mesa_id") is not None:
             mid = int(d["mesa_id"])
-            g = mesas_map.setdefault(mid, {
-                "tipo": "mesa", "nombre": d.get("mesa_nombre") or f"Mesa {mid}",
+            # Clave = mesa + momento exacto del cobro: separa sentadas distintas de la
+            # misma mesa; los pedidos de una misma transacción comparten cobrado_at.
+            clave = (mid, d["cobrado_at"])
+            nombre = d.get("mesa_nombre") or f"Mesa {mid}"
+            g = grupos.setdefault(clave, {
+                "tipo": "mesa", "nombre": f"{nombre} · {hora}" if hora else nombre,
                 "ids": [], "total": 0,
             })
             g["ids"].append(int(d["id"]))
@@ -455,7 +468,7 @@ def _cuentas_cobradas_hoy():
                 "nombre": d.get("cliente_nombre") or d.get("numero_cliente") or f"#{d['id']}",
                 "ids": [int(d["id"])], "total": int(d["total"] or 0),
             })
-    return list(mesas_map.values()) + sueltos
+    return list(grupos.values()) + sueltos
 
 
 def pedidos_de_base(base_id: int):
