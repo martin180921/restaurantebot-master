@@ -631,6 +631,38 @@ def anular_ultimo_pago(pedido_id: int, admin_pin: str) -> tuple:
     return True, f"Cobro anulado · ${fmt_money(monto)} ({pago['metodo']})"
 
 
+def _resumen_pagos(ids) -> dict:
+    """{total, abono_total, metodo, submetodo, comprobante, desglose} de los pedidos
+    'ids', reconstruido desde el libro 'pagos' (no se guarda el ticket original) para
+    poder REIMPRIMIR el recibo de una cuenta ya saldada. Si hubo más de un método
+    (tramos distintos en 'pagos'), arma un 'desglose' igual que un cobro mixto — mismo
+    formato que enqueue_recibo ya espera. Tolerante a fallos → abono_total=0."""
+    ids = [int(i) for i in ids]
+    try:
+        with engine.connect() as conn:
+            total = int(conn.execute(text(
+                "SELECT COALESCE(SUM(total), 0) FROM pedidos WHERE id = ANY(:ids)"
+            ), {"ids": ids}).scalar() or 0)
+            tramos = [dict(r) for r in conn.execute(text(
+                "SELECT metodo, submetodo, comprobante, SUM(monto) AS monto FROM pagos "
+                "WHERE pedido_id = ANY(:ids) GROUP BY metodo, submetodo, comprobante"
+            ), {"ids": ids}).mappings().all()]
+    except Exception:
+        return {"total": 0, "abono_total": 0, "metodo": "efectivo", "submetodo": None,
+                "comprobante": None, "desglose": None}
+    abono_total = sum(int(t["monto"]) for t in tramos)
+    if len(tramos) <= 1:
+        t = tramos[0] if tramos else {}
+        return {"total": total, "abono_total": abono_total,
+                "metodo": t.get("metodo") or "efectivo", "submetodo": t.get("submetodo"),
+                "comprobante": t.get("comprobante"), "desglose": None}
+    desglose = [{"metodo": t["metodo"], "monto": int(t["monto"]),
+                "submetodo": t.get("submetodo"), "comprobante": t.get("comprobante")}
+               for t in tramos]
+    return {"total": total, "abono_total": abono_total, "metodo": "mixto",
+            "submetodo": None, "comprobante": None, "desglose": desglose}
+
+
 # ── DB: cambio de mesa (transferir cuenta a otra mesa) ──────────────────────────
 # Mueve TODOS los pedidos activos de una mesa a otra reescribiendo su FK mesa_id en
 # UNA sola transacción (atómico: o se mueven todos, o ninguno). La ocupación de las
@@ -1031,6 +1063,19 @@ def dialog_cobrar(ids, titulo, total, uid):
 
     if total <= 0:
         st.info("Esta cuenta ya está saldada (puede haberla cobrado otra caja).")
+        if st.button("🖨️ Reimprimir recibo", key=f"reimprimir_{uid}",
+                     use_container_width=True):
+            resumen = _resumen_pagos(ids)
+            # forzar_abrir_cajon=False: el efectivo de esta venta ya se guardó cuando se
+            # cobró; una copia no debe volver a abrir el cajón. copia=True rotula el
+            # ticket para que no se confunda con un cobro nuevo.
+            enqueue_recibo(ids, titulo, resumen["total"], resumen["abono_total"],
+                           resumen["metodo"], submetodo=resumen.get("submetodo"),
+                           comprobante=resumen.get("comprobante"),
+                           desglose=resumen.get("desglose"), imprimir=True,
+                           forzar_abrir_cajon=False, copia=True)
+            audit.registrar("recibo_reimpreso", "pedido", ids[0], {"ids": ids})
+            flash("Recibo reimpreso (copia)", "🖨️")
         if st.button("Cerrar", key=f"volver_cobrar_{uid}", use_container_width=True):
             st.rerun()
         return

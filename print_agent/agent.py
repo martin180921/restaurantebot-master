@@ -366,6 +366,13 @@ def imprimir_recibo(printer, payload: dict) -> None:
     printer.set(font="a", align="center", bold=True, double_height=True, double_width=True)
     printer.text("RECIBO\n")
     printer.set(align="center", bold=False, double_height=False, double_width=False)
+    # Reimpresión (dashboard_admin.enqueue_recibo(..., copia=True)): el original ya se
+    # imprimió y su cajón ya se abrió, así que el ticket se rotula para que no se
+    # confunda con un cobro nuevo.
+    if payload.get("copia"):
+        printer.set(bold=True)
+        printer.text("*** COPIA ***\n")
+        printer.set(bold=False)
     _imprimir_encabezado_restaurante(printer, payload)   # nombre/dir/tel del restaurante
     mesa = payload.get("mesa") or "—"
     printer.text(f"{mesa}\n")
