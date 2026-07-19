@@ -1110,6 +1110,10 @@ def dialog_cobrar(ids, titulo, total, uid):
                      use_container_width=True):
             reimprimir_recibo(ids, titulo)
             flash("Recibo reimpreso (copia)", "🖨️")
+            # Sin este rerun el toast no se drena y el clic solo re-ejecuta el cuerpo del
+            # diálogo sin confirmación visible: el cajero no sabe si ya se encoló y es
+            # fácil que pulse otra vez (una copia de más por cada clic).
+            st.rerun()
         if st.button("Cerrar", key=f"volver_cobrar_{uid}", use_container_width=True):
             st.rerun()
         return

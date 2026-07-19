@@ -1182,8 +1182,10 @@ def _dialog_abrir_caja():
             if st.button("Activar", key=f"dlg_activar_mesero_{eid}",
                          use_container_width=True):
                 if empleados.reactivar_acceso(eid):
-                    audit.registrar("mesero_reactivado", "empleado", eid,
-                                    {"via": "apertura_caja"})
+                    # Mismo nombre de evento que usaba la vista Meseros (Reactivar),
+                    # para no fragmentar el libro mayor en dos taxonomías distintas.
+                    audit.registrar("acceso_reactivado", "empleado", eid,
+                                    {"nombre": e["nombre"], "via": "apertura_caja"})
                     flash(f"{e['nombre']} activado", "🟢")
                 st.rerun()
     if len(bloqueados) > 1:
@@ -1191,8 +1193,8 @@ def _dialog_abrir_caja():
             for e in bloqueados:
                 eid = int(e["id"])
                 if empleados.reactivar_acceso(eid):
-                    audit.registrar("mesero_reactivado", "empleado", eid,
-                                    {"via": "apertura_caja"})
+                    audit.registrar("acceso_reactivado", "empleado", eid,
+                                    {"nombre": e["nombre"], "via": "apertura_caja"})
             flash("Todos los meseros activados", "🟢")
             st.rerun()
     if st.button("Listo, empezar turno", key="dlg_abrir_caja_listo", type="primary",
@@ -1220,6 +1222,49 @@ def _dialog_abrir_cajon_simple(cierre_id: int):
     with c2:
         if st.button("Cancelar", key="dlg_cajon_cancelar", use_container_width=True):
             st.rerun()
+
+
+@st.dialog("👥 Equipo del turno")
+def _dialog_equipo_turno():
+    """Salida (bloquear acceso) / Reactivar de un MESERO a media jornada — no solo al
+    abrir caja (_dialog_abrir_caja ya cubre los que quedaron bloqueados del cierre
+    anterior, pero no a alguien que llega tarde o hay que sacar a medio turno). Antes
+    esto vivía en la vista Meseros, que ahora es solo-admin (P3); esto reabre SOLO ese
+    gesto puntual para el cajero, sin la gestión de perfiles/PIN (crear, regenerar PIN,
+    dar de baja siguen siendo manage_empleados → solo admin, ver views/meseros.py)."""
+    lista = [e for e in empleados.listar_empleados(incluir_inactivos=False)
+             if e["rol"] == "mesero"]
+    if not lista:
+        st.caption("No hay meseros con perfil activo.")
+    for e in lista:
+        eid = int(e["id"])
+        nombre = str(e["nombre"])
+        col_a, col_b = st.columns([3, 1.2])
+        with col_a:
+            estado = "🔒 Bloqueado" if e["bloqueado"] else "🟢 Activo"
+            st.markdown(
+                f'<div style="font-size:0.9rem; color:#45443e; padding:6px 0;">'
+                f'{html.escape(nombre)} · {estado}</div>', unsafe_allow_html=True)
+        with col_b:
+            if e["bloqueado"]:
+                if st.button("▶ Reactivar", key=f"equipo_reactivar_{eid}",
+                             use_container_width=True):
+                    if empleados.reactivar_acceso(eid):
+                        audit.registrar("acceso_reactivado", "empleado", eid,
+                                        {"nombre": nombre, "via": "equipo_turno"})
+                        flash(f"Acceso reactivado · {nombre}", "▶")
+                    st.rerun()
+            else:
+                if st.button("⏹ Salida", key=f"equipo_salida_{eid}",
+                             use_container_width=True,
+                             help="Cerrar turno: bloquea el PIN y cierra su sesión ahora"):
+                    if empleados.bloquear_acceso(eid):
+                        audit.registrar("acceso_bloqueado", "empleado", eid,
+                                        {"nombre": nombre, "via": "equipo_turno"})
+                        flash(f"Turno cerrado · {nombre} (su acceso queda bloqueado)", "🔒")
+                    st.rerun()
+    if st.button("Cerrar", key="equipo_turno_cerrar", use_container_width=True):
+        st.rerun()
 
 
 @st.dialog("💵 Cobrar")
@@ -1519,9 +1564,16 @@ def _render_caja_simple():
                     "simple_tile_cerrar", lambda: _dialog_cerrar_turno_simple(cierre))
 
     st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
-    if st.button("🗄️ Abrir cajón (cambio)", key="simple_btn_abrir_cajon",
-                 use_container_width=True):
-        _dialog_abrir_cajon_simple(cid)
+    s1, s2 = st.columns(2)
+    with s1:
+        if st.button("🗄️ Abrir cajón (cambio)", key="simple_btn_abrir_cajon",
+                     use_container_width=True):
+            _dialog_abrir_cajon_simple(cid)
+    with s2:
+        if st.button("👥 Equipo del turno", key="simple_btn_equipo_turno",
+                     use_container_width=True,
+                     help="Da salida o reactiva a un mesero a media jornada"):
+            _dialog_equipo_turno()
 
     st.markdown("<div style='height:12px;'></div>", unsafe_allow_html=True)
     _bloque_historial_movimientos(cid)
