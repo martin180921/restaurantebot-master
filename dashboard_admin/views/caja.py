@@ -418,6 +418,46 @@ def _cuentas_por_cobrar_hoy():
     return list(mesas_map.values()) + sueltos
 
 
+def _cuentas_cobradas_hoy():
+    """[{tipo, nombre, ids, total}] de las cuentas que ya se cobraron por completo y se
+    PAGARON hoy (fecha de 'pagos', no de creación del pedido: un domicilio armado ayer y
+    cobrado hoy en la puerta debe listarse igual). Sin esto, 'Reimprimir recibo' —que
+    solo vive en la rama total<=0 de pedidos.dialog_cobrar— era prácticamente
+    inalcanzable: ninguna otra pantalla ofrece una cuenta ya saldada. Agrupa por mesa
+    igual que _cuentas_por_cobrar_hoy. Tolerante a fallos → None."""
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(text("""
+                SELECT DISTINCT p.id, p.mesa_id, m.nombre AS mesa_nombre, p.numero_cliente,
+                       p.cliente_nombre, p.total
+                FROM pedidos p
+                JOIN pagos pg ON pg.pedido_id = p.id
+                LEFT JOIN mesas m ON m.id = p.mesa_id
+                WHERE p.pagado = TRUE AND pg.fecha::date = CURRENT_DATE
+                ORDER BY p.id DESC
+            """)).mappings().all()
+    except Exception:
+        return None
+    mesas_map, sueltos = {}, []
+    for r in rows:
+        d = dict(r)
+        if d.get("mesa_id") is not None:
+            mid = int(d["mesa_id"])
+            g = mesas_map.setdefault(mid, {
+                "tipo": "mesa", "nombre": d.get("mesa_nombre") or f"Mesa {mid}",
+                "ids": [], "total": 0,
+            })
+            g["ids"].append(int(d["id"]))
+            g["total"] += int(d["total"] or 0)
+        else:
+            sueltos.append({
+                "tipo": "pedido",
+                "nombre": d.get("cliente_nombre") or d.get("numero_cliente") or f"#{d['id']}",
+                "ids": [int(d["id"])], "total": int(d["total"] or 0),
+            })
+    return list(mesas_map.values()) + sueltos
+
+
 def pedidos_de_base(base_id: int):
     """[{id, nombre, total, cobrado, saldo, pagado, metodo_pago, paga_con, vueltas}] de los
     pedidos ENLAZADOS a una base de repartidor por pedidos.base_id (H1) — la fuente de
@@ -1075,7 +1115,18 @@ def _abrir_dialogo_simple_pendiente() -> None:
                                  d["diferencia"], d["total_esperado"])
 
 
-@st.dialog("🟢 Abrir caja")
+def _on_abrir_caja_dismiss() -> None:
+    """El usuario cerró el modal con la ✕/Esc. Como el despacho es PERSISTENTE (bandera
+    '_dlg_abrir_caja_open': render() reabre el diálogo en cada run mientras siga en
+    True), hay que limpiar el estado aquí o el diálogo se reabriría de inmediato en el
+    siguiente rerun — quedaría atrapado sin poder cerrarse. Streamlit re-ejecuta solo
+    tras el callback, así que NO llamamos st.rerun() (mismo patrón que
+    monitor_mesas._on_edit_dismiss)."""
+    st.session_state["_dlg_abrir_caja_open"] = False
+    st.session_state.pop("_dlg_abrir_caja_id", None)
+
+
+@st.dialog("🟢 Abrir caja", on_dismiss=_on_abrir_caja_dismiss)
 def _dialog_abrir_caja():
     """Apertura de turno EN DOS PASOS, compartida por admin y caja simple: (1) define la
     base de efectivo, (2) si el cierre anterior dejó meseros bloqueados (cerrar_caja los
@@ -1180,25 +1231,48 @@ def _dialog_cobrar_mesas():
         if st.button("Volver", key="simple_cobrarmesas_err", use_container_width=True):
             st.rerun()
         return
-    if not cuentas:
+    if cuentas:
+        st.caption("Elige la cuenta a cobrar.")
+        for c in cuentas:
+            col_a, col_b = st.columns([3, 1])
+            with col_a:
+                icono = "🍽️" if c["tipo"] == "mesa" else "🛍️"
+                st.markdown(
+                    f'<div style="font-size:0.9rem; color:#45443e; padding:6px 0;">{icono} '
+                    f'<b>{html.escape(str(c["nombre"]))}</b> · restan ${fmt_money(c["saldo"])}'
+                    f'</div>', unsafe_allow_html=True)
+            with col_b:
+                key = f"simple_cobrarmesa_{c['tipo']}_{'_'.join(map(str, c['ids']))}"
+                if st.button("Cobrar", key=key, use_container_width=True):
+                    _pedir_dialogo_simple("cobrar", ids=c["ids"], titulo=c["nombre"],
+                                          saldo=c["saldo"], uid=key)
+    else:
         st.info("No hay cuentas pendientes de cobro por ahora.")
-        if st.button("Cerrar", key="simple_cobrarmesas_vacio", use_container_width=True):
-            st.rerun()
-        return
-    st.caption("Elige la cuenta a cobrar.")
-    for c in cuentas:
-        col_a, col_b = st.columns([3, 1])
-        with col_a:
-            icono = "🍽️" if c["tipo"] == "mesa" else "🛍️"
-            st.markdown(
-                f'<div style="font-size:0.9rem; color:#45443e; padding:6px 0;">{icono} '
-                f'<b>{html.escape(str(c["nombre"]))}</b> · restan ${fmt_money(c["saldo"])}</div>',
-                unsafe_allow_html=True)
-        with col_b:
-            key = f"simple_cobrarmesa_{c['tipo']}_{'_'.join(map(str, c['ids']))}"
-            if st.button("Cobrar", key=key, use_container_width=True):
-                _pedir_dialogo_simple("cobrar", ids=c["ids"], titulo=c["nombre"],
-                                      saldo=c["saldo"], uid=key)
+
+    # Cobradas hoy: sin esto, reimprimir un recibo era casi inalcanzable (esa opción
+    # solo vive dentro del checkout de una cuenta, y una cuenta ya saldada no aparece en
+    # ningún otro listado). 'Reimprimir' es una acción directa (no abre otro diálogo),
+    # así que se llama sin pasar por el despacho pedir/abrir.
+    cobradas = _cuentas_cobradas_hoy()
+    if cobradas:
+        st.divider()
+        with st.expander(f"Cobradas hoy ({len(cobradas)})"):
+            for c in cobradas:
+                col_a, col_b = st.columns([3, 1])
+                with col_a:
+                    icono = "🍽️" if c["tipo"] == "mesa" else "🛍️"
+                    st.markdown(
+                        f'<div style="font-size:0.85rem; color:#6b6b64; padding:6px 0;">'
+                        f'{icono} {html.escape(str(c["nombre"]))} · '
+                        f'${fmt_money(c["total"])}</div>', unsafe_allow_html=True)
+                with col_b:
+                    key = f"simple_reimprimir_{c['tipo']}_{'_'.join(map(str, c['ids']))}"
+                    if st.button("🖨️", key=key, use_container_width=True,
+                                help="Reimprimir recibo"):
+                        pedidos.reimprimir_recibo(c["ids"], c["nombre"])
+                        flash(f"Recibo reimpreso · {c['nombre']}", "🖨️")
+                        st.rerun()
+
     if st.button("Cerrar", key="simple_cobrarmesas_cerrar", use_container_width=True):
         st.rerun()
 

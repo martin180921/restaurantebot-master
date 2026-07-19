@@ -579,14 +579,37 @@ def _ultimo_pago(pedido_id: int):
         return None
 
 
+def _es_tramo_mixto(pedido_id: int, pago: dict) -> bool:
+    """True si 'pago' fue uno de los DOS tramos de un cobro MIXTO (registrar_pago_mixto
+    inserta ambos en la MISMA transacción de BD → mismo 'fecha' exacto, ya que NOW() es
+    constante dentro de una transacción en Postgres). Solo para AVISAR en la UI antes de
+    anular: anular_ultimo_pago revierte un tramo a la vez, así que si el otro también
+    estaba mal, hay que anularlo aparte (quedará como 'último pago' del pedido en el
+    siguiente run). Tolerante a fallos → False (no bloquea, solo deja de avisar)."""
+    try:
+        with engine.connect() as conn:
+            hermano = conn.execute(text(
+                "SELECT 1 FROM pagos WHERE pedido_id = :pid AND fecha = :f AND id <> :pid_pago "
+                "LIMIT 1"
+            ), {"pid": int(pedido_id), "f": pago["fecha"], "pid_pago": int(pago["id"])}).first()
+        return hermano is not None
+    except Exception:
+        return False
+
+
 def anular_ultimo_pago(pedido_id: int, admin_pin: str) -> tuple:
     """Anula el ÚLTIMO pago de UN pedido, autorizado con PIN de administrador. Devuelve
     (ok, mensaje).
 
+    Solo corrige un cobro de HOY: un pago de un turno/día ya cerrado no se toca (evita
+    alterar retroactivamente el arqueo/resumen histórico de un cierre ya congelado).
+
     No revierte 'cobro_iniciado' (anti-skimming: la cuenta ya tocó caja) ni el estado de
     cocina/entrega (si el pago disparó 'domicilio → entregado', eso NO se deshace: el
-    pedido físicamente ya salió). Alcance deliberadamente mínimo: nada de editar pagos
-    libremente, un ajuste a la vez.
+    pedido físicamente ya salió). Si el pago era uno de los DOS tramos de un cobro MIXTO,
+    esto solo revierte ESE tramo (ver _es_tramo_mixto); el otro se anula aparte si hace
+    falta. Alcance deliberadamente mínimo: nada de editar pagos libremente, un ajuste a
+    la vez.
 
     Candado 'por plato': 'pagos' no guarda QUÉ líneas cubrió cada abono (solo el monto),
     así que si revertir este pago dejaría pago_lineas (Σ cantidad_pagada × precio) por
@@ -603,6 +626,8 @@ def anular_ultimo_pago(pedido_id: int, admin_pin: str) -> tuple:
         ), {"pid": pedido_id}).mappings().first()
         if not pago:
             return False, "Este pedido no tiene pagos registrados."
+        if pago["fecha"].date() != hoy_bogota():
+            return False, "Solo se puede corregir un cobro del día de hoy."
         ped = conn.execute(text(
             "SELECT total, COALESCE(total_pagado, 0) AS total_pagado, estado "
             "FROM pedidos WHERE id = :id FOR UPDATE"
@@ -661,6 +686,24 @@ def _resumen_pagos(ids) -> dict:
                for t in tramos]
     return {"total": total, "abono_total": abono_total, "metodo": "mixto",
             "submetodo": None, "comprobante": None, "desglose": desglose}
+
+
+def reimprimir_recibo(ids, titulo: str) -> None:
+    """Reimprime el recibo de una cuenta YA cobrada, reconstruido desde 'pagos'
+    (_resumen_pagos). Nunca reabre el cajón (forzar_abrir_cajon=False: el efectivo de
+    esa venta ya se guardó la primera vez) y marca el ticket como copia. Compartida por
+    dialog_cobrar (cuando detecta que la cuenta ya está saldada) y la lista 'Cobradas
+    hoy' de la caja simple (ver caja._dialog_cobrar_mesas) — sin este segundo punto de
+    entrada, la reimpresión solo era alcanzable por una carrera improbable, nunca a
+    propósito."""
+    ids = [int(i) for i in ids]
+    resumen = _resumen_pagos(ids)
+    enqueue_recibo(ids, titulo, resumen["total"], resumen["abono_total"],
+                   resumen["metodo"], submetodo=resumen.get("submetodo"),
+                   comprobante=resumen.get("comprobante"),
+                   desglose=resumen.get("desglose"), imprimir=True,
+                   forzar_abrir_cajon=False, copia=True)
+    audit.registrar("recibo_reimpreso", "pedido", ids[0], {"ids": ids})
 
 
 # ── DB: cambio de mesa (transferir cuenta a otra mesa) ──────────────────────────
@@ -1065,16 +1108,7 @@ def dialog_cobrar(ids, titulo, total, uid):
         st.info("Esta cuenta ya está saldada (puede haberla cobrado otra caja).")
         if st.button("🖨️ Reimprimir recibo", key=f"reimprimir_{uid}",
                      use_container_width=True):
-            resumen = _resumen_pagos(ids)
-            # forzar_abrir_cajon=False: el efectivo de esta venta ya se guardó cuando se
-            # cobró; una copia no debe volver a abrir el cajón. copia=True rotula el
-            # ticket para que no se confunda con un cobro nuevo.
-            enqueue_recibo(ids, titulo, resumen["total"], resumen["abono_total"],
-                           resumen["metodo"], submetodo=resumen.get("submetodo"),
-                           comprobante=resumen.get("comprobante"),
-                           desglose=resumen.get("desglose"), imprimir=True,
-                           forzar_abrir_cajon=False, copia=True)
-            audit.registrar("recibo_reimpreso", "pedido", ids[0], {"ids": ids})
+            reimprimir_recibo(ids, titulo)
             flash("Recibo reimpreso (copia)", "🖨️")
         if st.button("Cerrar", key=f"volver_cobrar_{uid}", use_container_width=True):
             st.rerun()
@@ -1459,24 +1493,33 @@ def dialog_cobrar(ids, titulo, total, uid):
         if st.button("Cancelar", key=f"volver_cobrar_{uid}", use_container_width=True):
             st.rerun()
 
-    # Corrección de un cobro mal registrado (monto o método equivocado): solo si esta
-    # cuenta es UN pedido (con varios a la vez, "el último pago" sería ambiguo — igual
-    # que el candado de 'Por plato' arriba) y solo si ya tiene algún pago que corregir.
-    if len(ids) == 1:
-        ultimo = _ultimo_pago(ids[0])
-        if ultimo:
-            hora = (ultimo["fecha"].strftime("%H:%M")
-                   if hasattr(ultimo["fecha"], "strftime") else "")
-            with st.expander("⚠️ Corregir último cobro"):
-                st.caption(f"Último pago: ${fmt_money(ultimo['monto'])} · "
-                          f"{ultimo['metodo']}" + (f" · {hora}" if hora else ""))
-                st.caption("🔐 Requiere PIN de administrador. Queda registrado en la "
-                          "auditoría a su nombre.")
-                admin_pin = st.text_input("PIN de administrador", type="password",
-                                          key=f"anular_pin_{uid}")
-                if st.button("Anular este cobro", key=f"anular_btn_{uid}",
+    # Corrección de un cobro mal registrado (monto o método equivocado). Un cobro de
+    # MESA agrupa varios pedidos (uno por comensal ya tocado): "el último pago" es por
+    # PEDIDO, no por mesa, así que se ofrece un renglón (con su propio botón) por cada
+    # pedido de 'ids' que tenga algún pago — no solo cuando la cuenta es un único pedido.
+    ultimos = [(pid, _ultimo_pago(pid)) for pid in ids]
+    ultimos = [(pid, u) for pid, u in ultimos if u]
+    if ultimos:
+        with st.expander("⚠️ Corregir un cobro"):
+            if len(ultimos) > 1:
+                st.caption("Esta cuenta agrupa varios pedidos: elige cuál corregir.")
+            st.caption("🔐 Requiere PIN de administrador. Queda registrado en la "
+                      "auditoría a su nombre.")
+            admin_pin = st.text_input("PIN de administrador", type="password",
+                                      key=f"anular_pin_{uid}")
+            for pid, ultimo in ultimos:
+                hora = (ultimo["fecha"].strftime("%H:%M")
+                       if hasattr(ultimo["fecha"], "strftime") else "")
+                etiqueta = f"#{pid} · ${fmt_money(ultimo['monto'])} · {ultimo['metodo']}"
+                if hora:
+                    etiqueta += f" · {hora}"
+                if _es_tramo_mixto(pid, ultimo):
+                    st.caption(f"⚠️ {etiqueta}: es UN tramo de un cobro mixto (efectivo + "
+                              "transferencia). Esto solo anula este tramo; si el otro "
+                              "también estaba mal, anúlalo aparte tras esto.")
+                if st.button(f"Anular {etiqueta}", key=f"anular_btn_{uid}_{pid}",
                              use_container_width=True):
-                    ok, msg = anular_ultimo_pago(ids[0], admin_pin)
+                    ok, msg = anular_ultimo_pago(pid, admin_pin)
                     if ok:
                         st.session_state.pop(f"_cobro_lock_{uid}", None)
                         flash(msg, "⚠️")
