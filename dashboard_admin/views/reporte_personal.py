@@ -40,6 +40,11 @@ _ACCION_LABEL = {
     "retorno_base":      "🟢 Float devuelto",
     "caja_apertura":     "🟢 Apertura de caja",
     "caja_cierre":       "🔒 Cierre de caja",
+    "acceso_bloqueado":  "🔒 Salida de turno (mesero)",
+    "acceso_reactivado": "▶ Acceso reactivado (mesero)",
+    "pago_anulado":      "⚠️ Cobro corregido",
+    "recibo_reimpreso":  "🖨️ Recibo reimpreso",
+    "cajon_abierto":     "🗄️ Cajón abierto (sin venta)",
 }
 
 
