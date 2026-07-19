@@ -18,7 +18,8 @@ import audit
 import empleados
 import mesero_keys
 from db import engine, fmt_money, flash, saldo_pedido, titulo_seccion
-from utils.print_jobs import badge_agente_html, enqueue_hoja_ruta, enqueue_recibo
+from utils.print_jobs import (badge_agente_html, enqueue_hoja_ruta, enqueue_recibo,
+                              enqueue_abrir_cajon)
 from views import pedidos, menu
 
 
@@ -1150,6 +1151,26 @@ def _dialog_abrir_caja():
         st.rerun()
 
 
+@st.dialog("🗄️ Abrir cajón")
+def _dialog_abrir_cajon_simple(cierre_id: int):
+    st.caption("Abre el cajón sin que haya una venta detrás (p. ej. cambiar un billete). "
+               "Queda registrado en la auditoría.")
+    motivo = st.text_input("Motivo (opcional)", key="dlg_cajon_motivo",
+                           placeholder="Ej: cambio de billete de $50.000")
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("🗄️ Abrir cajón", key="dlg_cajon_confirmar", type="primary",
+                     use_container_width=True):
+            enqueue_abrir_cajon(motivo)
+            audit.registrar("cajon_abierto", "caja", int(cierre_id),
+                            {"motivo": (motivo or "").strip() or None})
+            flash("Cajón abierto", "🗄️")
+            st.rerun()
+    with c2:
+        if st.button("Cancelar", key="dlg_cajon_cancelar", use_container_width=True):
+            st.rerun()
+
+
 @st.dialog("💵 Cobrar")
 def _dialog_cobrar_mesas():
     cuentas = _cuentas_por_cobrar_hoy()
@@ -1422,6 +1443,11 @@ def _render_caja_simple():
                     "simple_tile_gasto", lambda: _dialog_gastos_simple(cid))
     _tarjeta_simple(r2c2, "🔒", "Cerrar turno", "Contar y finalizar",
                     "simple_tile_cerrar", lambda: _dialog_cerrar_turno_simple(cierre))
+
+    st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
+    if st.button("🗄️ Abrir cajón (cambio)", key="simple_btn_abrir_cajon",
+                 use_container_width=True):
+        _dialog_abrir_cajon_simple(cid)
 
     st.markdown("<div style='height:12px;'></div>", unsafe_allow_html=True)
     _bloque_historial_movimientos(cid)

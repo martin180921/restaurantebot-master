@@ -232,6 +232,24 @@ def enqueue_recibo(ids, titulo: str, total: int, abono: int, metodo: str,
         _log_fallo_impresion("recibo", exc, {"pedido_ids": ids})
 
 
+def enqueue_abrir_cajon(motivo: str = "") -> None:
+    """Abre el cajón SIN que haya una venta detrás (p. ej. cambiar un billete). Mismo
+    trabajo 'cajon' que ya usa enqueue_recibo(imprimir=False) para dar el cambio de un
+    cobro sin ticket, pero sin pedido de por medio — el print_agent solo lee
+    'abrir_cajon'. 'motivo' viaja en el payload solo como rastro (el agente no lo
+    imprime); auditar la apertura es responsabilidad de quien llama. Tolera cualquier
+    fallo: no debe tumbar el flujo de caja."""
+    try:
+        enqueue_job(RESTAURANTE_ID, "cajon", {
+            "mesa": "Apertura sin venta",
+            "abrir_cajon": True,
+            "pedido_ids": [],
+            "motivo": (motivo or "").strip() or None,
+        })
+    except Exception as exc:
+        _log_fallo_impresion("cajon", exc, {"motivo": motivo})
+
+
 # ── Salud del Agente de Impresión Local (heartbeat) ─────────────────────────────
 # El agente hace upsert de su latido en agentes_estado en cada ciclo de polling. Aquí
 # lo leemos para que el panel muestre si está vivo y cuánto tiene en cola, en vez de
