@@ -558,6 +558,79 @@ def registrar_pago_items(pedido_id, seleccion, metodo="efectivo", submetodo=None
     return int(cobro)
 
 
+# ── DB: corrección de un cobro mal registrado (monto o método equivocado) ───────
+# Sin esta salida, un cajero que tecleó $86.000 en vez de $68.000 quedaba atrapado: el
+# anti-skimming bloquea cancelar la cuenta y no existía forma de revertir el asiento. Se
+# resuelve igual que los descuentos/cortesías (empleados.admin_pin_valido): solo el
+# ÚLTIMO pago, de UN pedido a la vez, autorizado con PIN de admin y auditado con el
+# detalle completo del pago borrado.
+def _ultimo_pago(pedido_id: int):
+    """Último pago (fila más reciente de 'pagos') de un pedido, o None. Solo para
+    mostrarlo antes de anular; anular_ultimo_pago vuelve a leerlo con FOR UPDATE dentro
+    de su propia transacción (no confía en esta lectura). Tolerante a fallos."""
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(text(
+                "SELECT id, monto, metodo, submetodo, comprobante, fecha FROM pagos "
+                "WHERE pedido_id = :pid ORDER BY id DESC LIMIT 1"
+            ), {"pid": int(pedido_id)}).mappings().first()
+        return dict(row) if row else None
+    except Exception:
+        return None
+
+
+def anular_ultimo_pago(pedido_id: int, admin_pin: str) -> tuple:
+    """Anula el ÚLTIMO pago de UN pedido, autorizado con PIN de administrador. Devuelve
+    (ok, mensaje).
+
+    No revierte 'cobro_iniciado' (anti-skimming: la cuenta ya tocó caja) ni el estado de
+    cocina/entrega (si el pago disparó 'domicilio → entregado', eso NO se deshace: el
+    pedido físicamente ya salió). Alcance deliberadamente mínimo: nada de editar pagos
+    libremente, un ajuste a la vez.
+
+    Candado 'por plato': 'pagos' no guarda QUÉ líneas cubrió cada abono (solo el monto),
+    así que si revertir este pago dejaría pago_lineas (Σ cantidad_pagada × precio) por
+    ENCIMA del nuevo total_pagado, no se puede anular sin corromper ese libro auxiliar —
+    se rechaza en vez de adivinar qué unidades destildar."""
+    pedido_id = int(pedido_id)
+    autoriza = empleados.admin_pin_valido(admin_pin)
+    if not autoriza:
+        return False, "PIN de administrador inválido."
+    with engine.begin() as conn:
+        pago = conn.execute(text(
+            "SELECT id, monto, metodo, submetodo, comprobante, fecha FROM pagos "
+            "WHERE pedido_id = :pid ORDER BY id DESC LIMIT 1 FOR UPDATE"
+        ), {"pid": pedido_id}).mappings().first()
+        if not pago:
+            return False, "Este pedido no tiene pagos registrados."
+        ped = conn.execute(text(
+            "SELECT total, COALESCE(total_pagado, 0) AS total_pagado, estado "
+            "FROM pedidos WHERE id = :id FOR UPDATE"
+        ), {"id": pedido_id}).mappings().first()
+        if not ped or ped["estado"] == "cancelado":
+            return False, "Pedido no disponible."
+        monto = int(pago["monto"])
+        nuevo_total_pagado = max(0, int(ped["total_pagado"]) - monto)
+        if valor_lineas_pagadas(pedido_id) > nuevo_total_pagado:
+            return False, ("Este cobro se hizo 'por plato' y no se puede corregir "
+                           "automáticamente. Usa 🏷️ Descuento o contacta soporte.")
+        conn.execute(text(
+            "UPDATE pedidos SET total_pagado = :tp, pagado = FALSE WHERE id = :id"
+        ), {"tp": nuevo_total_pagado, "id": pedido_id})
+        conn.execute(text("DELETE FROM pagos WHERE id = :id"), {"id": int(pago["id"])})
+        fecha_pago = pago["fecha"]
+        detalle = {
+            "pago_id": int(pago["id"]), "monto": monto, "metodo": pago["metodo"],
+            "submetodo": pago["submetodo"], "comprobante": pago["comprobante"],
+            "fecha_pago_original": (fecha_pago.isoformat()
+                                    if hasattr(fecha_pago, "isoformat") else str(fecha_pago)),
+            "autoriza": autoriza,
+        }
+    refrescar_pedidos()
+    audit.registrar("pago_anulado", "pedido", pedido_id, detalle)
+    return True, f"Cobro anulado · ${fmt_money(monto)} ({pago['metodo']})"
+
+
 # ── DB: cambio de mesa (transferir cuenta a otra mesa) ──────────────────────────
 # Mueve TODOS los pedidos activos de una mesa a otra reescribiendo su FK mesa_id en
 # UNA sola transacción (atómico: o se mueven todos, o ninguno). La ocupación de las
@@ -1340,6 +1413,31 @@ def dialog_cobrar(ids, titulo, total, uid):
     with c2:
         if st.button("Cancelar", key=f"volver_cobrar_{uid}", use_container_width=True):
             st.rerun()
+
+    # Corrección de un cobro mal registrado (monto o método equivocado): solo si esta
+    # cuenta es UN pedido (con varios a la vez, "el último pago" sería ambiguo — igual
+    # que el candado de 'Por plato' arriba) y solo si ya tiene algún pago que corregir.
+    if len(ids) == 1:
+        ultimo = _ultimo_pago(ids[0])
+        if ultimo:
+            hora = (ultimo["fecha"].strftime("%H:%M")
+                   if hasattr(ultimo["fecha"], "strftime") else "")
+            with st.expander("⚠️ Corregir último cobro"):
+                st.caption(f"Último pago: ${fmt_money(ultimo['monto'])} · "
+                          f"{ultimo['metodo']}" + (f" · {hora}" if hora else ""))
+                st.caption("🔐 Requiere PIN de administrador. Queda registrado en la "
+                          "auditoría a su nombre.")
+                admin_pin = st.text_input("PIN de administrador", type="password",
+                                          key=f"anular_pin_{uid}")
+                if st.button("Anular este cobro", key=f"anular_btn_{uid}",
+                             use_container_width=True):
+                    ok, msg = anular_ultimo_pago(ids[0], admin_pin)
+                    if ok:
+                        st.session_state.pop(f"_cobro_lock_{uid}", None)
+                        flash(msg, "⚠️")
+                        st.rerun()
+                    else:
+                        st.error(msg)
 
 
 # ── Modal de descuento / cortesía (gated por PIN de admin) ──────────────────────
