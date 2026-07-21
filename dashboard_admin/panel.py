@@ -518,10 +518,9 @@ div[data-testid="stColumn"] .stButton > button[kind="primary"]:hover {
 
 /* Verde vibrante → avanzar estado / cobrar / guardar / confirmar (positivas). */
 [class*="st-key-avanzar_"] button, [class*="st-key-cobrar_"] button,
-[class*="st-key-mon_cobrar_mesa_"] button, [class*="st-key-confirm_cobrar_"] button,
+[class*="st-key-confirm_cobrar_"] button,
 [class*="st-key-btn_guardar"] button, [class*="st-key-btn_confirmar"] button,
 div[data-testid="stColumn"] [class*="st-key-avanzar_"] .stButton > button,
-div[data-testid="stColumn"] [class*="st-key-mon_cobrar_mesa_"] .stButton > button,
 div[data-testid="stColumn"] [class*="st-key-confirm_cobrar_"] .stButton > button,
 div[data-testid="stColumn"] [class*="st-key-btn_guardar"] .stButton > button,
 div[data-testid="stColumn"] [class*="st-key-btn_confirmar"] .stButton > button {
@@ -529,10 +528,9 @@ div[data-testid="stColumn"] [class*="st-key-btn_confirmar"] .stButton > button {
     color: #ffffff !important; font-weight: 700 !important;
 }
 [class*="st-key-avanzar_"] button:hover, [class*="st-key-cobrar_"] button:hover,
-[class*="st-key-mon_cobrar_mesa_"] button:hover, [class*="st-key-confirm_cobrar_"] button:hover,
+[class*="st-key-confirm_cobrar_"] button:hover,
 [class*="st-key-btn_guardar"] button:hover, [class*="st-key-btn_confirmar"] button:hover,
 div[data-testid="stColumn"] [class*="st-key-avanzar_"] .stButton > button:hover,
-div[data-testid="stColumn"] [class*="st-key-mon_cobrar_mesa_"] .stButton > button:hover,
 div[data-testid="stColumn"] [class*="st-key-confirm_cobrar_"] .stButton > button:hover,
 div[data-testid="stColumn"] [class*="st-key-btn_guardar"] .stButton > button:hover,
 div[data-testid="stColumn"] [class*="st-key-btn_confirmar"] .stButton > button:hover {
@@ -959,6 +957,27 @@ def _render_mobile_shell():
     _dispatch(st.session_state["current_view"])
 
 
+def _destacar_nav_caja() -> None:
+    """Para el rol CAJA: el botón 'Caja' de la nav destaca sobre el resto (fondo sólido,
+    ambos estados activo/inactivo) porque es donde vive TODO lo urgente del turno — el
+    cajero no debería tener que pensar dónde ir. Solo se inyecta para este rol: la nav
+    del admin no cambia (Caja es una vista más entre varias)."""
+    st.markdown("""
+    <style>
+    [class*="st-key-nav_active_caja"] button, [class*="st-key-nav_inactive_caja"] button {
+        background: #16a34a !important; color: #ffffff !important;
+        border: 1px solid #16a34a !important; font-weight: 700 !important;
+    }
+    [class*="st-key-nav_active_caja"] button:hover, [class*="st-key-nav_inactive_caja"] button:hover {
+        background: #15803d !important; border-color: #15803d !important; color: #ffffff !important;
+    }
+    [class*="st-key-nav_active_caja"] button::before, [class*="st-key-nav_inactive_caja"] button::before {
+        background-color: #ffffff !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # SHELL ESCRITORIO (admin / caja) · navegación · contenido · pedidos en vivo
 # ══════════════════════════════════════════════════════════════════════════════
@@ -966,6 +985,9 @@ def _render_desktop_shell():
     # Proporciones: el panel de Pedidos (derecha) se estrechó (2.0 → 1.7) para dar más
     # ancho al contenido (3.3 → 3.6), donde vive el Menú con sus categorías en acordeón.
     col_nav, col_content, col_pedidos = st.columns([0.7, 3.6, 1.7], gap="medium")
+
+    if role == auth.CAJA:
+        _destacar_nav_caja()
 
     with col_nav:
         with st.container(border=True):

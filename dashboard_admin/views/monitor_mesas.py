@@ -48,13 +48,6 @@ CARD_TINT = {
 # luego se borra solo (ver poda en _monitor_en_vivo).
 TRANSFER_WINDOW = 120  # s
 
-# Recordatorio de cambio: tras un cobro en efectivo con vuelto, pedidos.dialog_cobrar deja
-# session_state['cambio_pendiente'] = {monto, titulo, ts}. El Monitor lo muestra como banner
-# durante esta ventana (segundos) para que el cajero no olvide cuánto sacar del cajón; el
-# refresco de 30 s lo deja expirar solo, y un botón "Entregado" lo descarta antes.
-CAMBIO_WINDOW = 45  # s
-
-
 def _mesa_corto(nombre) -> str:
     """Etiqueta corta de una mesa para la metadata de transferencia: los dígitos del
     nombre ('Mesa 5' → '5') o, si no los hay, el nombre tal cual ('Terraza')."""
@@ -63,38 +56,10 @@ def _mesa_corto(nombre) -> str:
 
 
 def _banner_cambio(suf: str) -> None:
-    """Banner persistente con el cambio a entregar tras un cobro en efectivo. Lo deja
-    pedidos.dialog_cobrar en session_state; se muestra arriba del Monitor durante
-    CAMBIO_WINDOW s (o hasta que el cajero pulse 'Entregado'). 'suf' hace única la clave
-    del botón porque st.tabs ejecuta los dos fragmentos (salón y web) en cada render."""
-    info = st.session_state.get("cambio_pendiente")
-    if not info:
-        return
-    # Expira solo: el refresco de 30 s re-evalúa esto y lo descarta pasada la ventana.
-    if time.time() - float(info.get("ts", 0)) > CAMBIO_WINDOW:
-        st.session_state.pop("cambio_pendiente", None)
-        return
-    monto = int(info.get("monto", 0) or 0)
-    titulo = html.escape(str(info.get("titulo", "")))
-    c_msg, c_btn = st.columns([5, 1])
-    with c_msg:
-        st.markdown(
-            '<div style="background:#fef3c7; border:1px solid #f59e0b; border-radius:14px; '
-            'padding:0.9rem 1.2rem; display:flex; align-items:center; gap:14px;">'
-            '<span style="font-size:1.9rem; line-height:1;">💵</span>'
-            '<div><div style="font-family:\'DM Sans\',sans-serif; font-weight:700; '
-            f'font-size:1.2rem; color:#92400e;">Entregar cambio: ${fmt_money(monto)}</div>'
-            f'<div style="font-size:0.82rem; color:#b45309;">{titulo} · recuérdalo antes de '
-            'cerrar el cajón</div></div></div>',
-            unsafe_allow_html=True,
-        )
-    with c_btn:
-        # Rerun COMPLETO (no de fragmento) para que el banner desaparezca de ambas pestañas.
-        if st.button("✓ Entregado", key=f"cambio_ok_{suf}", use_container_width=True):
-            st.session_state.pop("cambio_pendiente", None)
-            _reanudar_refresco()   # ya entregó el cambio del cobro → reanuda el refresco en vivo
-            st.rerun()
-    st.markdown("<br>", unsafe_allow_html=True)
+    """Wrapper del banner compartido (pedidos.banner_cambio): al confirmar 'Entregado'
+    reanuda el refresco en vivo del Monitor, que quedaba pausado mientras el banner
+    forzaba reruns completos."""
+    pedidos.banner_cambio(suf, on_entregado=_reanudar_refresco)
 
 
 def _mesero_html(mesero) -> str:
@@ -288,9 +253,7 @@ def _abrir_dialogo_pendiente() -> None:
         return
     st.session_state["_mon_dialog"] = None   # one-shot: Streamlit mantiene el modal abierto
     kind = d.get("kind")
-    if kind == "cobrar":
-        pedidos.dialog_cobrar(d["ids"], d["titulo"], d["saldo"], d["uid"])
-    elif kind == "cancelar":
+    if kind == "cancelar":
         pedidos.dialog_cancelar(d["pid"], d["uid"])
     elif kind == "descuento":
         pedidos.dialog_descuento(d["pid"], d["saldo"], d["uid"])
@@ -917,29 +880,25 @@ def _detalle_mesa(mid: int, nombre: str, sub: pd.DataFrame, color: str,
     </div>
     """, unsafe_allow_html=True)
 
-    # Acciones de mesa. El cobro abre el modal compartido (efectivo/transferencia,
-    # cambio y abonos parciales). Cobra contra los ids visibles de 'sub' (así también
-    # entran los pedidos heredados con mesa_id NULL); un abono parcial deja la mesa
-    # abierta, un pago completo la libera.
+    # Acciones de mesa. El cobro ya NO vive en el Monitor (se centralizó en 💰 Caja,
+    # única superficie de dinero); aquí solo queda un recordatorio no accionable donde
+    # antes estaba el botón, para no romper el hábito visual de "el dinero va a la
+    # izquierda".
     a1, a2, a3, a4 = st.columns([2, 1.6, 1.6, 1])
     with a1:
-        # Cobrar es capacidad bloqueada para el mesero (monitor de solo visualización).
-        if not sub.empty and auth.can("cobrar"):
-            if st.button("💵 Cobrar mesa", key=f"mon_cobrar_mesa_{mid}",
-                         type="primary", use_container_width=True):
-                _pedir_dialogo("cobrar", ids=[int(i) for i in sub["id"].tolist()],
-                               titulo=nombre, saldo=int(saldo_activo), uid=f"mesa_{mid}")
+        if not sub.empty and saldo_activo > 0:
+            st.caption("💵 Se cobra en Caja")
     with a2:
         # Precuenta de TODA la mesa: junta los ítems de todos los pedidos activos en un
         # solo prerecibo, en vez de imprimir uno por pedido y sumarlos a mano. Disponible
         # para todo el personal (llevar la cuenta es tarea de salón, no de caja).
         if not sub.empty:
-            if st.button("🧾 Precuenta mesa", key=f"mon_precuenta_mesa_{mid}",
+            if st.button("🧾 Cuenta mesa", key=f"mon_precuenta_mesa_{mid}",
                          use_container_width=True,
-                         help="Imprimir la cuenta previa con todos los pedidos activos de la mesa"):
+                         help="Imprimir la cuenta con todos los pedidos activos de la mesa"):
                 ids_mesa = [int(i) for i in sub["id"].tolist()]
                 pedidos.enqueue_prerecibo(ids_mesa, titulo=nombre)
-                pedidos.flash(f"Precuenta enviada · {nombre} · {len(ids_mesa)} pedido(s)", "🖨")
+                pedidos.flash(f"Cuenta enviada · {nombre} · {len(ids_mesa)} pedido(s)", "🖨")
                 st.rerun()
     with a3:
         # Cambio de mesa: mueve la cuenta a una mesa libre. Disponible para todo el
@@ -1079,27 +1038,22 @@ def _detalle_pedido(row, idx: int):
     </div>
     """, unsafe_allow_html=True)
 
-    # Jerarquía de acciones: Cobrar es la única acción de dinero y la más ancha (con el
-    # monto en el propio label); Marcar listo la sigue; Precuenta (antes "Ticket", de uso
-    # frecuente) queda visible; Descuento/Comanda/Nota —ocasionales— se agrupan en "⋯"
-    # para no competir por espacio con las acciones que la caja usa en cada pedido.
+    # Jerarquía de acciones: el cobro ya no vive aquí (se centralizó en 💰 Caja); Marcar
+    # listo pasa a ser la acción principal, Precuenta (de uso frecuente) queda visible,
+    # Descuento/Comanda/Nota —ocasionales— se agrupan en "⋯".
     b_cobrar, b_listo, b_prec, b_mas, b_cancelar = st.columns([2.4, 1.6, 1.6, 0.8, 0.8])
     with b_cobrar:
-        if auth.can("cobrar") and saldo > 0:
-            if st.button(f"💵 Cobrar ${fmt_money(saldo)}", key=f"cobrar_{uid}",
-                         use_container_width=True,
-                         help="Cobrar este pedido (efectivo/transferencia, abono parcial o por plato)"):
-                _pedir_dialogo("cobrar", ids=[int(pid)], titulo=f"Pedido #{num_dia}",
-                               saldo=int(saldo), uid=uid)
+        if saldo > 0:
+            st.caption("💵 Se cobra en Caja")
     with b_listo:
         btn_label = pedidos.ESTADO_LABEL_BTN.get(estado)
         if btn_label and st.button(btn_label, key=f"avanzar_{uid}", use_container_width=True):
             pedidos.avanzar_estado(pid, estado)  # flashea toast + st.rerun()
     with b_prec:
-        if st.button("🧾 Precuenta", key=f"ticket_{uid}", use_container_width=True,
-                     help="Imprimir el prerecibo (pre-cuenta) del cliente"):
+        if st.button("🧾 Cuenta", key=f"ticket_{uid}", use_container_width=True,
+                     help="Imprimir la cuenta del cliente"):
             pedidos.enqueue_prerecibo(pid)
-            pedidos.flash(f"Prerecibo enviado · Pedido #{pid}", "🖨")
+            pedidos.flash(f"Cuenta enviada · Pedido #{pid}", "🖨")
             st.rerun()
     with b_mas:
         with st.popover("⋯", key=f"mas_{uid}", use_container_width=True, help="Más acciones"):
@@ -1314,26 +1268,22 @@ def _web_card(row, idx: int):
         unsafe_allow_html=True,
     )
 
-    # Misma jerarquía que en el salón: Cobrar (con el monto en el label) es la única
-    # acción de dinero y la más ancha; Marcar listo la sigue; Precuenta queda visible;
+    # Misma jerarquía que en el salón: el cobro ya no vive aquí (se centralizó en
+    # 💰 Caja); Marcar listo pasa a ser la acción principal, Precuenta queda visible,
     # Descuento/Comanda/Nota/Editar —ocasionales— se agrupan en "⋯".
     b_cobrar, b_listo, b_prec, b_mas, b_cancelar = st.columns([2.4, 1.6, 1.6, 0.8, 0.8])
     with b_cobrar:
-        if auth.can("cobrar") and saldo > 0:
-            if st.button(f"💵 Cobrar ${fmt_money(saldo)}", key=f"cobrar_{uid}",
-                         use_container_width=True,
-                         help="Cobrar este pedido (efectivo/transferencia, abono parcial o por plato)"):
-                _pedir_dialogo("cobrar", ids=[int(pid)], titulo=f"Pedido #{num_dia}",
-                               saldo=int(saldo), uid=uid)
+        if saldo > 0:
+            st.caption("💵 Se cobra en Caja")
     with b_listo:
         btn_label = pedidos.ESTADO_LABEL_BTN.get(estado)
         if btn_label and st.button(btn_label, key=f"avanzar_{uid}", use_container_width=True):
             pedidos.avanzar_estado(pid, estado)  # flashea toast + st.rerun()
     with b_prec:
-        if st.button("🧾 Precuenta", key=f"ticket_{uid}", use_container_width=True,
-                     help="Imprimir el prerecibo (pre-cuenta) del cliente"):
+        if st.button("🧾 Cuenta", key=f"ticket_{uid}", use_container_width=True,
+                     help="Imprimir la cuenta del cliente"):
             pedidos.enqueue_prerecibo(pid)
-            pedidos.flash(f"Prerecibo enviado · Pedido #{pid}", "🖨")
+            pedidos.flash(f"Cuenta enviada · Pedido #{pid}", "🖨")
             st.rerun()
     with b_mas:
         with st.popover("⋯", key=f"mas_{uid}", use_container_width=True, help="Más acciones"):
