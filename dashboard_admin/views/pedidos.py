@@ -50,6 +50,51 @@ ESTADOS_ACTIVOS = ["pendiente", "en preparacion", "listo"]
 # pedidos.drain_toasts) desde panel.py y monitor_mesas.py.
 
 
+# ── Banner de cambio/vueltas pendiente ──────────────────────────────────────────
+# Recordatorio de cambio: tras un cobro en efectivo con vuelto, dialog_cobrar deja
+# session_state['cambio_pendiente'] = {monto, titulo, ts}. Quien llame a banner_cambio()
+# (Caja, Monitor) lo muestra arriba de su vista durante CAMBIO_WINDOW s (o hasta que el
+# cajero pulse 'Entregado'). Vive aquí (no en monitor_mesas) porque este módulo es el
+# dueño de 'cambio_pendiente' — así Caja puede mostrarlo sin depender del Monitor.
+CAMBIO_WINDOW = 45  # s
+
+
+def banner_cambio(suf: str, on_entregado=None) -> None:
+    """Banner persistente con el cambio a entregar tras un cobro en efectivo. 'suf' hace
+    única la clave del botón cuando varias vistas/pestañas lo muestran a la vez.
+    'on_entregado' (opcional): callback que se llama al confirmar la entrega (p. ej.
+    reanudar el refresco en vivo de quien lo invoca) antes del rerun."""
+    info = st.session_state.get("cambio_pendiente")
+    if not info:
+        return
+    # Expira solo: el refresco en vivo re-evalúa esto y lo descarta pasada la ventana.
+    if time.time() - float(info.get("ts", 0)) > CAMBIO_WINDOW:
+        st.session_state.pop("cambio_pendiente", None)
+        return
+    monto = int(info.get("monto", 0) or 0)
+    titulo = html.escape(str(info.get("titulo", "")))
+    c_msg, c_btn = st.columns([5, 1])
+    with c_msg:
+        st.markdown(
+            '<div style="background:#fef3c7; border:1px solid #f59e0b; border-radius:14px; '
+            'padding:0.9rem 1.2rem; display:flex; align-items:center; gap:14px;">'
+            '<span style="font-size:1.9rem; line-height:1;">💵</span>'
+            '<div><div style="font-family:\'DM Sans\',sans-serif; font-weight:700; '
+            f'font-size:1.2rem; color:#92400e;">Entregar cambio: ${fmt_money(monto)}</div>'
+            f'<div style="font-size:0.82rem; color:#b45309;">{titulo} · recuérdalo antes de '
+            'cerrar el cajón</div></div></div>',
+            unsafe_allow_html=True,
+        )
+    with c_btn:
+        # Rerun COMPLETO (no de fragmento) para que el banner desaparezca de todas partes.
+        if st.button("✓ Entregado", key=f"cambio_ok_{suf}", use_container_width=True):
+            st.session_state.pop("cambio_pendiente", None)
+            if on_entregado is not None:
+                on_entregado()
+            st.rerun()
+    st.markdown("<br>", unsafe_allow_html=True)
+
+
 # ── DB: pedidos ────────────────────────────────────────────────────────────────
 # P-CAJA: cacheada con TTL corto. Antes era una lectura SIN caché que corría en
 # CADA rerun de los tres fragmentos en vivo (tablero, monitor, web) — uno por mesa

@@ -509,17 +509,19 @@ def imprimir_comanda(printer, payload: dict) -> None:
 
 
 def imprimir_prerecibo(printer, payload: dict) -> None:
-    """PRERECIBO (pre-cuenta) para el cliente ANTES de pagar — botón "🖨 Ticket".
+    """CUENTA para el cliente ANTES de pagar — botón "🧾 Imprimir cuenta" (nombre interno
+    del job y de esta función se conservan como "prerecibo"/"imprimir_prerecibo" por
+    compatibilidad con el panel y con agentes ya desplegados; solo cambió lo IMPRESO).
 
     Mismo layout que el recibo (mismos ítems en Fuente B + Total) pero con dos
-    diferencias clave: el encabezado dice PRERECIBO con el aviso de que NO es una
-    factura válida, y muestra de forma prominente la MESA de la que proviene la cuenta.
-    Sin pulso de cajón ni desglose de pago: es una cuenta previa para revisar."""
-    # 1) Encabezado PRERECIBO + aviso de que NO es factura (Fuente A, bien visible).
+    diferencias clave: el encabezado dice CUENTA (documento de operación del local, no
+    una factura fiscal electrónica) y muestra de forma prominente la MESA de la que
+    proviene la cuenta. Sin pulso de cajón ni desglose de pago: es una cuenta previa
+    para revisar antes de pagar."""
+    # 1) Encabezado CUENTA (Fuente A, bien visible).
     printer.set(font="a", align="center", bold=True, double_height=True, double_width=True)
-    printer.text("PRERECIBO\n")
+    printer.text("CUENTA\n")
     printer.set(align="center", bold=False, double_height=False, double_width=False)
-    printer.text("** NO ES FACTURA VALIDA **\n")
     _imprimir_encabezado_restaurante(printer, payload)   # nombre/dir/tel del restaurante
     # 2) MESA siempre visible (requisito): de qué mesa proviene la cuenta.
     printer.set(bold=True)

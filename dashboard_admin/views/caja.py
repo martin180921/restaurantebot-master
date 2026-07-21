@@ -12,6 +12,7 @@ import streamlit as st
 from sqlalchemy import text, bindparam
 import json
 import html
+import time
 
 import auth
 import audit
@@ -20,6 +21,7 @@ import mesero_keys
 from db import engine, fmt_money, flash, saldo_pedido, titulo_seccion
 from utils.print_jobs import (badge_agente_html, enqueue_hoja_ruta, enqueue_recibo,
                               enqueue_abrir_cajon)
+from utils.items import parse_items, etiqueta_item
 from views import pedidos, menu
 
 
@@ -373,20 +375,25 @@ def pedidos_domicilio_pendientes():
 
 
 def _cuentas_por_cobrar_hoy():
-    """[{tipo, nombre, ids, saldo}] de las cuentas de HOY con saldo pendiente, para el
-    punto de entrada 'Cobrar mesa' de la caja simple. Agrupa por mesa (mesa_id) cuando
+    """[{tipo, nombre, ids, saldo, lista}] de las cuentas de HOY con saldo pendiente, para
+    el punto de entrada 'Cobrar mesa' de la caja simple. Agrupa por mesa (mesa_id) cuando
     aplica; los pedidos de entrega sin mesa se listan uno a uno (si YA tienen una base de
     repartidor asignada, se cobran desde 🛵 Repartidores, no aquí, para no ofrecer el
     mismo pedido por dos caminos). Los pedidos heredados sin mesa_id (previos a esa
     columna) caen como líneas sueltas en vez de agruparse por nombre de mesa — caso raro,
-    se sigue pudiendo cobrar, solo no se agrupa. Tolerante a fallos → None (no listar
-    nada si la lectura falló, para no dar una foto a medias)."""
+    se sigue pudiendo cobrar, solo no se agrupa.
+
+    'lista' (solo para tipo='mesa'): TODOS los pedidos activos de la mesa están
+    'entregado' — mismo criterio AZUL del Monitor ('solo falta el pago'). Las cuentas
+    listas se devuelven PRIMERO (orden), para que el cajero las vea de un vistazo sin
+    tener que leer toda la lista. Tolerante a fallos → None (no listar nada si la
+    lectura falló, para no dar una foto a medias)."""
     try:
         with engine.connect() as conn:
             rows = conn.execute(text("""
                 SELECT p.id, p.mesa_id, m.nombre AS mesa_nombre, p.numero_cliente,
                        p.cliente_nombre, p.total, COALESCE(p.total_pagado, 0) AS total_pagado,
-                       p.base_id
+                       p.base_id, p.estado
                 FROM pedidos p
                 LEFT JOIN mesas m ON m.id = p.mesa_id
                 WHERE p.pagado = FALSE AND p.estado <> 'cancelado'
@@ -405,17 +412,64 @@ def _cuentas_por_cobrar_hoy():
             mid = int(d["mesa_id"])
             g = mesas_map.setdefault(mid, {
                 "tipo": "mesa", "nombre": d.get("mesa_nombre") or f"Mesa {mid}",
-                "ids": [], "saldo": 0,
+                "ids": [], "saldo": 0, "lista": True,
             })
             g["ids"].append(int(d["id"]))
             g["saldo"] += s
+            if d.get("estado") != "entregado":
+                g["lista"] = False
         elif d.get("base_id") is None:
             sueltos.append({
                 "tipo": "pedido",
                 "nombre": d.get("cliente_nombre") or d.get("numero_cliente") or f"#{d['id']}",
-                "ids": [int(d["id"])], "saldo": s,
+                "ids": [int(d["id"])], "saldo": s, "lista": False,
             })
-    return list(mesas_map.values()) + sueltos
+    cuentas = list(mesas_map.values()) + sueltos
+    cuentas.sort(key=lambda c: 0 if c.get("lista") else 1)
+    return cuentas
+
+
+def _pedidos_con_items(ids: list):
+    """[{id, items, total, total_pagado, saldo}] de los pedidos dados, con sus ítems
+    crudos — para el detalle de la cuenta que el cajero revisa antes de cobrar (escoger
+    mesa → ver todo → confirmar). Tolerante a fallos → None (no mostrar un detalle a
+    medias si la lectura falló)."""
+    ids = [int(i) for i in ids]
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(text(
+                "SELECT id, items, total, COALESCE(total_pagado, 0) AS total_pagado "
+                "FROM pedidos WHERE id = ANY(:ids) ORDER BY id"
+            ), {"ids": ids}).mappings().all()
+    except Exception:
+        return None
+    out = []
+    for r in rows:
+        d = dict(r)
+        out.append({"id": int(d["id"]), "items": d.get("items"),
+                    "total": int(d["total"] or 0),
+                    "total_pagado": int(d["total_pagado"] or 0),
+                    "saldo": saldo_pedido(d)})
+    return out
+
+
+def _items_html(items_raw) -> str:
+    """Lista compacta ítem por ítem (cant x nombre · precio) para el detalle de cuenta."""
+    items_list = parse_items(items_raw)
+    if not items_list:
+        return '<div style="font-size:0.85rem; color:#a3a39b;">Sin ítems registrados.</div>'
+    filas = []
+    for it in items_list:
+        cant = int(it.get("cantidad", 1) or 1)
+        nombre = html.escape(etiqueta_item(it))
+        precio_linea = int(it.get("precio") or 0) * cant
+        filas.append(
+            '<div style="display:flex; justify-content:space-between; padding:2px 0; '
+            'font-size:0.85rem; color:#45443e;">'
+            f'<span>{cant}x {nombre}</span>'
+            f'<span style="white-space:nowrap; margin-left:10px;">${fmt_money(precio_linea)}</span></div>'
+        )
+    return "".join(filas)
 
 
 def _cuentas_cobradas_hoy():
@@ -1099,9 +1153,41 @@ def _bloque_resultado_cierre():
 # mismo patrón "pedir/abrir" que ya usa monitor_mesas.py: se guarda la intención en
 # session_state y se relanza; el diálogo real se abre en el run siguiente, DESDE FUERA
 # del diálogo que lo pidió.
+# Refresco en vivo (Tanda 3): mientras un diálogo esté en camino/abierto, el fragmento de
+# la home NO debe auto-relanzarse por su temporizador (le cerraría el modal encima del
+# cajero). Mismo problema que resuelve Monitor con '_mon_refresco_pausa', pero aquí la
+# pausa se guarda como TIMESTAMP, no como booleano: algunos cierres (p. ej. un cobro
+# exitoso en pedidos.dialog_cobrar, que no conoce este módulo) no pasan por
+# _reanudar_refresco_caja(), así que un booleano se quedaría pegado en pausa para
+# siempre. Con el timestamp, la pausa expira sola a los _REFRESCO_PAUSA_MAX segundos
+# aunque nadie la libere explícitamente — red de seguridad, no el camino normal. El
+# techo es generoso (10 min, no 90s): un diálogo abierto de verdad (p. ej. "Cerrar
+# turno" mientras el cajero cuenta efectivo) puede durar más de 90s, y si la pausa
+# expirara con el modal todavía abierto, el timer del fragmento lo relanzaría y
+# podría tumbarlo — el mismo fallo que Monitor evita manteniendo su pausa sin límite.
+_REFRESCO_PAUSA_MAX = 600  # s
+
+
 def _pedir_dialogo_simple(kind: str, **args) -> None:
     st.session_state["_caja_simple_dialog"] = {"kind": kind, **args}
+    st.session_state["_caja_refresco_pausa_ts"] = time.time()
     st.rerun()
+
+
+def _reanudar_refresco_caja() -> None:
+    """Quita la pausa del refresco en vivo de la home del cajero. Se llama desde los
+    cierres que vuelven a la home (no desde los que encadenan a otro diálogo)."""
+    st.session_state.pop("_caja_refresco_pausa_ts", None)
+
+
+def _refresco_caja_pausado() -> bool:
+    ts = st.session_state.get("_caja_refresco_pausa_ts")
+    if not ts:
+        return False
+    if time.time() - float(ts) > _REFRESCO_PAUSA_MAX:
+        st.session_state.pop("_caja_refresco_pausa_ts", None)
+        return False
+    return True
 
 
 def _abrir_dialogo_simple_pendiente() -> None:
@@ -1112,6 +1198,20 @@ def _abrir_dialogo_simple_pendiente() -> None:
     kind = d.get("kind")
     if kind == "cobrar":
         pedidos.dialog_cobrar(d["ids"], d["titulo"], d["saldo"], d["uid"])
+    elif kind == "cobrar_mesas":
+        _dialog_cobrar_mesas()
+    elif kind == "detalle_cuenta":
+        _dialog_detalle_cuenta(d["ids"], d["nombre"], d["tipo"])
+    elif kind == "home_repartidores":
+        _dialog_repartidores_simple(d["cierre_id"])
+    elif kind == "home_gastos":
+        _dialog_gastos_simple(d["cierre_id"])
+    elif kind == "home_cerrar_turno":
+        _dialog_cerrar_turno_simple(d["cierre"])
+    elif kind == "home_cajon":
+        _dialog_abrir_cajon_simple(d["cierre_id"])
+    elif kind == "home_equipo":
+        _dialog_equipo_turno()
     elif kind == "base":
         _dialog_base(d["cierre_id"])
     elif kind == "retorno":
@@ -1231,9 +1331,11 @@ def _dialog_abrir_cajon_simple(cierre_id: int):
             audit.registrar("cajon_abierto", "caja", int(cierre_id),
                             {"motivo": (motivo or "").strip() or None})
             flash("Cajón abierto", "🗄️")
+            _reanudar_refresco_caja()
             st.rerun()
     with c2:
         if st.button("Cancelar", key="dlg_cajon_cancelar", use_container_width=True):
+            _reanudar_refresco_caja()
             st.rerun()
 
 
@@ -1277,6 +1379,7 @@ def _dialog_equipo_turno():
                         flash(f"Turno cerrado · {nombre} (su acceso queda bloqueado)", "🔒")
                     st.rerun()
     if st.button("Cerrar", key="equipo_turno_cerrar", use_container_width=True):
+        _reanudar_refresco_caja()
         st.rerun()
 
 
@@ -1287,23 +1390,26 @@ def _dialog_cobrar_mesas():
         st.error("⚠️ No se pudieron leer las cuentas pendientes (conexión). Reintenta en "
                  "unos segundos.")
         if st.button("Volver", key="simple_cobrarmesas_err", use_container_width=True):
+            _reanudar_refresco_caja()
             st.rerun()
         return
     if cuentas:
-        st.caption("Elige la cuenta a cobrar.")
+        st.caption("Elige la cuenta para ver el detalle y cobrar.")
         for c in cuentas:
             col_a, col_b = st.columns([3, 1])
             with col_a:
                 icono = "🍽️" if c["tipo"] == "mesa" else "🛍️"
+                lista_txt = (' <span style="color:#16a34a; font-weight:700;">✅ lista</span>'
+                            if c.get("lista") else "")
                 st.markdown(
                     f'<div style="font-size:0.9rem; color:#45443e; padding:6px 0;">{icono} '
-                    f'<b>{html.escape(str(c["nombre"]))}</b> · restan ${fmt_money(c["saldo"])}'
-                    f'</div>', unsafe_allow_html=True)
+                    f'<b>{html.escape(str(c["nombre"]))}</b>{lista_txt} · '
+                    f'restan ${fmt_money(c["saldo"])}</div>', unsafe_allow_html=True)
             with col_b:
-                key = f"simple_cobrarmesa_{c['tipo']}_{'_'.join(map(str, c['ids']))}"
-                if st.button("Cobrar", key=key, use_container_width=True):
-                    _pedir_dialogo_simple("cobrar", ids=c["ids"], titulo=c["nombre"],
-                                          saldo=c["saldo"], uid=key)
+                key = f"simple_vercuenta_{c['tipo']}_{'_'.join(map(str, c['ids']))}"
+                if st.button("Ver", key=key, use_container_width=True):
+                    _pedir_dialogo_simple("detalle_cuenta", ids=c["ids"], nombre=c["nombre"],
+                                          tipo=c["tipo"])
     else:
         st.info("No hay cuentas pendientes de cobro por ahora.")
 
@@ -1332,7 +1438,82 @@ def _dialog_cobrar_mesas():
                         st.rerun()
 
     if st.button("Cerrar", key="simple_cobrarmesas_cerrar", use_container_width=True):
+        _reanudar_refresco_caja()
         st.rerun()
+
+
+# Detalle de cuenta: escoger mesa/pedido → ver TODO lo que consumió (ítems, abonos,
+# saldo) → confirmar el cobro (todo de una vez o pedido por pedido) o imprimir la
+# cuenta. Evita cobrar a ciegas y evita que el cajero tenga que ir a Monitor a
+# verificar qué pidió la mesa cuando el cliente pregunta.
+@st.dialog("🧾 Cuenta")
+def _dialog_detalle_cuenta(ids: list, nombre: str, tipo: str):
+    ids = [int(i) for i in ids]
+    ordenes = _pedidos_con_items(ids)
+    if ordenes is None:
+        st.error("⚠️ No se pudo leer el detalle de esta cuenta (conexión). Reintenta en "
+                 "unos segundos.")
+        if st.button("Volver", key="detalle_cuenta_err", use_container_width=True):
+            _reanudar_refresco_caja()
+            st.rerun()
+        return
+
+    icono = "🍽️" if tipo == "mesa" else "🛍️"
+    st.markdown(f'<div style="font-size:1rem; font-weight:700; color:#26262b; '
+               f'margin-bottom:8px;">{icono} {html.escape(str(nombre))}</div>',
+               unsafe_allow_html=True)
+
+    # Conciliación en vivo: el saldo real sale de AQUÍ (no del que traía la tarjeta de
+    # la lista), igual que hace _dialog_retorno con las bases de repartidor.
+    saldo_real = sum(o["saldo"] for o in ordenes)
+    varios = len(ordenes) > 1
+    for o in ordenes:
+        with st.container(border=True):
+            if varios:
+                st.markdown(f'<div style="font-size:0.78rem; color:#a3a39b; '
+                           f'margin-bottom:2px;">Pedido #{o["id"]}</div>',
+                           unsafe_allow_html=True)
+            st.markdown(_items_html(o["items"]), unsafe_allow_html=True)
+            if o["total_pagado"] > 0:
+                st.markdown(
+                    f'<div style="display:flex; justify-content:space-between; '
+                    f'padding-top:4px; margin-top:4px; border-top:1px solid #ececec; '
+                    f'font-size:0.82rem; color:#6b6b64;">'
+                    f'<span>Abonado</span><span>${fmt_money(o["total_pagado"])}</span></div>',
+                    unsafe_allow_html=True)
+            st.markdown(
+                f'<div style="display:flex; justify-content:space-between; '
+                f'font-weight:700; color:#26262b; font-size:0.9rem; margin-top:2px;">'
+                f'<span>{"Saldo" if o["total_pagado"] > 0 else "Total"}</span>'
+                f'<span>${fmt_money(o["saldo"] if o["saldo"] > 0 else o["total"])}</span></div>',
+                unsafe_allow_html=True)
+            if varios and o["saldo"] > 0:
+                if st.button(f"💵 Cobrar #{o['id']} (${fmt_money(o['saldo'])})",
+                             key=f"detalle_cobrar_{o['id']}", use_container_width=True):
+                    _pedir_dialogo_simple(
+                        "cobrar", ids=[o["id"]], titulo=f"Pedido #{o['id']} · {nombre}",
+                        saldo=int(o["saldo"]), uid=f"detalle_{o['id']}")
+
+    st.markdown("<div style='height:4px;'></div>", unsafe_allow_html=True)
+    if saldo_real > 0:
+        if st.button(f"💵 Cobrar todo (${fmt_money(saldo_real)})", key="detalle_cobrar_todo",
+                     type="primary", use_container_width=True):
+            _pedir_dialogo_simple(
+                "cobrar", ids=ids, titulo=nombre, saldo=int(saldo_real),
+                uid=f"detalle_todo_{'_'.join(map(str, ids))}")
+    else:
+        st.success("✅ Esta cuenta ya está saldada.")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("🧾 Imprimir cuenta", key="detalle_imprimir", use_container_width=True):
+            pedidos.enqueue_prerecibo(ids, titulo=nombre)
+            flash(f"Cuenta impresa · {nombre}", "🖨️")
+            _reanudar_refresco_caja()
+            st.rerun()
+    with c2:
+        if st.button("← Volver", key="detalle_volver", use_container_width=True):
+            _pedir_dialogo_simple("cobrar_mesas")
 
 
 @st.dialog("🛵 Repartidores")
@@ -1412,6 +1593,7 @@ def _dialog_repartidores_simple(cierre_id: int):
             st.session_state.pop(_k, None)
         _pedir_dialogo_simple("base", cierre_id=cid)
     if st.button("Cerrar", key="simple_repartidores_cerrar", use_container_width=True):
+        _reanudar_refresco_caja()
         st.rerun()
 
 
@@ -1443,6 +1625,7 @@ def _dialog_gastos_simple(cierre_id: int):
                  use_container_width=True):
         _pedir_dialogo_simple("gasto", cierre_id=cid)
     if st.button("Cerrar", key="simple_gastos_cerrar", use_container_width=True):
+        _reanudar_refresco_caja()
         st.rerun()
 
 
@@ -1481,16 +1664,25 @@ def _dialog_cerrar_turno_simple(cierre: dict):
                               transferencia_real=transferencia_real, diferencia=diferencia,
                               total_esperado=total_esperado)
     if st.button("Volver", key="simple_btn_cerrar_volver", use_container_width=True):
+        _reanudar_refresco_caja()
         st.rerun()
 
 
-def _tarjeta_simple(col, icono: str, titulo: str, subtitulo: str, key: str, on_click):
+def _tarjeta_simple(col, icono: str, titulo: str, subtitulo: str, key: str, kind: str,
+                    destacar: bool = False, **kind_args):
     """Una tarjeta grande y clicable de la home del cajero: icono + título + subtítulo de
-    estado (p. ej. 'N sin devolución') y un botón 'Abrir' de ancho completo."""
+    estado (p. ej. 'N sin devolución') y un botón 'Abrir' de ancho completo. Abre su
+    diálogo vía _pedir_dialogo_simple (kind/kind_args), NUNCA llamándolo directo: esta
+    tarjeta vive dentro del fragmento en vivo (Tanda 3) y un diálogo llamado directo ahí
+    no sobrevive al siguiente refresco automático (mismo motivo por el que Monitor usa
+    _pedir_dialogo en vez de invocar sus diálogos en el sitio).
+    'destacar' pinta el borde izquierdo de la tarjeta en verde (alerta discreta, p. ej.
+    mesas listas para cobrar) vía el mismo patrón de centinela que usa la nav (.nav-box)."""
     with col:
         with st.container(border=True):
+            centinela = '<span class="tile-alerta"></span>' if destacar else ''
             st.markdown(
-                f'<div style="text-align:center; padding:4px 0;">'
+                f'{centinela}<div style="text-align:center; padding:4px 0;">'
                 f'<div style="font-size:1.8rem; line-height:1;">{icono}</div>'
                 f'<div style="font-family:\'DM Sans\',sans-serif; font-weight:800; '
                 f'font-size:1.05rem; color:#26262b; margin-top:6px;">{titulo}</div>'
@@ -1498,20 +1690,21 @@ def _tarjeta_simple(col, icono: str, titulo: str, subtitulo: str, key: str, on_c
                 f'</div>', unsafe_allow_html=True,
             )
             if st.button("Abrir", key=key, use_container_width=True):
-                on_click()
+                _pedir_dialogo_simple(kind, **kind_args)
 
 
-def _render_caja_simple():
-    """Home del cajero: sin pestañas, sin inventario/importar, sin métricas de venta — 4
-    acciones grandes que cubren el turno completo (cobrar, repartidores, gastos, cerrar).
-    Ver cabecera de esta sección: reutiliza los diálogos y helpers del admin tal cual."""
-    _abrir_dialogo_simple_pendiente()
-
+def _caja_simple_en_vivo():
+    """Cuerpo EN VIVO de la home del cajero (Tanda 3): se re-ejecuta solo (fragmento,
+    ver _render_caja_simple) cada 30s mientras no haya un diálogo abierto/pendiente, así
+    los contadores (cuentas por cobrar, mesas listas, domicilios sin asignar) y el banner
+    de vueltas aparecen sin que el cajero tenga que tocar nada."""
     st.markdown(
         "<style>"
         ".st-key-simple_tile_cobrar button, .st-key-simple_tile_repartidores button, "
         ".st-key-simple_tile_gasto button, .st-key-simple_tile_cerrar button {"
         "height:52px !important; font-weight:700 !important; font-size:1rem !important;}"
+        '[data-testid="stVerticalBlockBorderWrapper"]:has(.tile-alerta) {'
+        "border-left:4px solid #16a34a !important;}"
         "</style>",
         unsafe_allow_html=True,
     )
@@ -1521,6 +1714,7 @@ def _render_caja_simple():
         unsafe_allow_html=True,
     )
     _bloque_resultado_cierre()
+    pedidos.banner_cambio("caja")
 
     cierre = cierre_activo()
 
@@ -1551,45 +1745,69 @@ def _render_caja_simple():
         unsafe_allow_html=True,
     )
 
+    # Cuentas por cobrar hoy + cuántas ya están LISTAS (todo entregado, solo falta el
+    # pago — mismo criterio AZUL del Monitor). Alerta discreta: SOLO un número en el
+    # subtítulo y el borde verde de la tarjeta; el detalle vive en el diálogo.
     n_cuentas = _cuentas_por_cobrar_hoy()
     if n_cuentas is None:
-        sub_cobrar = "—"
+        sub_cobrar, n_listas = "—", 0
     elif n_cuentas:
-        sub_cobrar = f"{len(n_cuentas)} cuenta(s) con saldo"
+        n_listas = sum(1 for c in n_cuentas if c.get("lista"))
+        sub_cobrar = f"{len(n_cuentas)} cuenta(s)" + (f" · {n_listas} lista(s) ✅" if n_listas else "")
     else:
-        sub_cobrar = "Sin pendientes"
+        sub_cobrar, n_listas = "Sin pendientes", 0
+
     bases_abiertas = movimientos_abiertos(cid, "base_repartidor")
     gastos_abiertos = movimientos_abiertos(cid, "gasto")
 
+    # Domicilios/para llevar sin asignar a una base: mismo criterio, SOLO el número (evita
+    # llenar la home de tarjetas — el detalle vive dentro de 🛵 Repartidores).
+    domicilios = pedidos_domicilio_pendientes()
+    n_domicilios = len(domicilios) if domicilios else 0
+    sub_repartidores = f"{len(bases_abiertas)} en ruta" if bases_abiertas else "Ninguno en ruta"
+    if n_domicilios:
+        sub_repartidores += f" · {n_domicilios} por asignar"
+
     r1c1, r1c2 = st.columns(2)
     _tarjeta_simple(r1c1, "💵", "Cobrar mesa", sub_cobrar, "simple_tile_cobrar",
-                    _dialog_cobrar_mesas)
-    _tarjeta_simple(r1c2, "🛵", "Repartidores",
-                    f"{len(bases_abiertas)} en ruta" if bases_abiertas else "Ninguno en ruta",
-                    "simple_tile_repartidores", lambda: _dialog_repartidores_simple(cid))
+                    "cobrar_mesas", destacar=(n_listas > 0))
+    _tarjeta_simple(r1c2, "🛵", "Repartidores", sub_repartidores, "simple_tile_repartidores",
+                    "home_repartidores", cierre_id=cid)
 
     r2c1, r2c2 = st.columns(2)
     _tarjeta_simple(r2c1, "🧾", "Gasto de caja",
                     f"{len(gastos_abiertos)} sin devolución" if gastos_abiertos else
                     "Ninguno abierto",
-                    "simple_tile_gasto", lambda: _dialog_gastos_simple(cid))
+                    "simple_tile_gasto", "home_gastos", cierre_id=cid)
     _tarjeta_simple(r2c2, "🔒", "Cerrar turno", "Contar y finalizar",
-                    "simple_tile_cerrar", lambda: _dialog_cerrar_turno_simple(cierre))
+                    "simple_tile_cerrar", "home_cerrar_turno", cierre=cierre)
 
     st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
     s1, s2 = st.columns(2)
     with s1:
         if st.button("🗄️ Abrir cajón (cambio)", key="simple_btn_abrir_cajon",
                      use_container_width=True):
-            _dialog_abrir_cajon_simple(cid)
+            _pedir_dialogo_simple("home_cajon", cierre_id=cid)
     with s2:
         if st.button("👥 Equipo del turno", key="simple_btn_equipo_turno",
                      use_container_width=True,
                      help="Da salida o reactiva a un mesero a media jornada"):
-            _dialog_equipo_turno()
+            _pedir_dialogo_simple("home_equipo")
 
     st.markdown("<div style='height:12px;'></div>", unsafe_allow_html=True)
     _bloque_historial_movimientos(cid)
+
+
+def _render_caja_simple():
+    """Home del cajero: sin pestañas, sin inventario/importar, sin métricas de venta — 4
+    acciones grandes que cubren el turno completo (cobrar, repartidores, gastos, cerrar).
+    El diálogo pendiente se abre FUERA del fragmento en vivo (mismo patrón que Monitor:
+    'ya FUERA de los fragmentos: así es estable y los fragmentos quedan pausados mientras
+    esté abierto'); el cuerpo dinámico corre en un fragmento run_every=30s que se pausa
+    mientras haya un diálogo en camino o abierto (_refresco_caja_pausado)."""
+    _abrir_dialogo_simple_pendiente()
+    rv = None if _refresco_caja_pausado() else "30s"
+    st.fragment(run_every=rv)(_caja_simple_en_vivo)()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1648,6 +1866,7 @@ def _render_cierre():
     # muestra aquí, prominente, si la caja cuadró o cuánto faltó/sobró. Se consume una sola vez
     # (la caja contó a ciegas, así que este es el momento en que se entera del resultado).
     _bloque_resultado_cierre()
+    pedidos.banner_cambio("caja_admin")
 
     cierre = cierre_activo()
 
