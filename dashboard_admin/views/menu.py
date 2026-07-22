@@ -37,7 +37,7 @@ from db import (engine, titulo_seccion, cargar_menu, cargar_componentes, cargar_
                 cargar_grupos_pd, etiquetas_grupos_pd, crear_grupo_pd,
                 guardar_grupo_pd, eliminar_grupo_pd,
                 cargar_categorias, etiquetas_categorias, comportamiento_categoria,
-                crear_categoria, guardar_categoria, eliminar_categoria,
+                extras_de_categoria, crear_categoria, guardar_categoria, eliminar_categoria,
                 en_horario_categoria, ahora_bogota,
                 guardar_inventario, stock_int, STOCK_BAJO, agotado_por_stock, hoy_bogota)
 
@@ -652,10 +652,11 @@ def _render_grupos_editor(grupos):
 # ══════════════════════════════════════════════════════════════════════════════
 def _render_categorias_editor():
     """Gestión de las categorías del catálogo: nombre, emoji, orden, activa/inactiva,
-    horario opcional (SOLO oculta en la carta digital del cliente) y borrado (solo si
-    la categoría no tiene platos cargados). Alta de categorías nuevas al final. El
-    comportamiento (descripción / recargo / extras incluidos) NO se edita aquí a
-    propósito: una categoría nueva se comporta como 'A la carta'."""
+    horario opcional (SOLO oculta en la carta digital del cliente), extras incluidos
+    (qué grupos del Plato del Día vienen sin costo, ver db.extras_de_categoria) y
+    borrado (solo si la categoría no tiene platos cargados). Alta de categorías nuevas
+    al final. El comportamiento fijo (descripción / recargo de entrega) NO se edita
+    aquí a propósito: una categoría nueva se comporta como 'A la carta'."""
     st.markdown("<div style='height:10px;'></div>", unsafe_allow_html=True)
     if not _acc_header("categorias_editor", "🏷️ Categorías (pestañas del catálogo)",
                        default_open=False):
@@ -669,11 +670,12 @@ def _render_categorias_editor():
         return
     st.caption("Cada categoría es una pestaña del catálogo (aquí, en el POS del mesero y "
                "en la carta digital). Una categoría nueva se agrega con el mismo "
-               "comportamiento de 'A la carta'. El horario es opcional y SOLO oculta la "
-               "categoría en la carta digital del cliente fuera de rango — el panel y el "
-               "POS siempre la ven, sin importar la hora, y el cambio tarda hasta un "
-               "minuto en verse en la carta ya abierta (se refresca sola). La clave "
-               "(entre paréntesis) no se edita: ancla los platos ya cargados.")
+               "comportamiento de 'A la carta' y SIN extras incluidos. El horario es "
+               "opcional y SOLO oculta la categoría en la carta digital del cliente "
+               "fuera de rango — el panel y el POS siempre la ven, sin importar la "
+               "hora, y el cambio tarda hasta un minuto en verse en la carta ya abierta "
+               "(se refresca sola). La clave (entre paréntesis) no se edita: ancla los "
+               "platos ya cargados.")
     h = st.columns([0.8, 2.2, 0.8, 0.9, 0.7])
     for col, t in zip(h, ["Emoji", "Nombre", "Orden", "Activa", ""]):
         col.markdown(f"<span style='font-size:0.72rem; color:#a3a39b;'>{t}</span>",
@@ -681,6 +683,12 @@ def _render_categorias_editor():
     # Hora del negocio para el aviso 'visible/oculta ahora' de cada horario. Una sola vez
     # para todas las filas: así el editor entero razona contra el mismo instante.
     ahora = ahora_bogota().time()
+    # Grupos del Plato del Día ofrecibles como extra: solo los de selección ÚNICA
+    # (max_sel==1) — el selector de extras es un radio de una opción, no soporta
+    # grupos multi como acompañamientos. {clave: etiqueta}, en su 'orden'.
+    opciones_extra = {g["clave"]: g["etiqueta"] for g in cargar_grupos_pd()
+                      if int(g.get("max_sel") or 1) == 1}
+    comp_activos = componentes_activos_por_grupo()
     vals = {}
     for c in categorias:
         cid = int(c["id"])
@@ -733,13 +741,32 @@ def _render_categorias_editor():
             st.markdown(f'{chip} <span style="font-size:0.72rem; color:#a3a39b;">'
                         f'son las {ahora.strftime("%H:%M")} en Bogotá</span>',
                         unsafe_allow_html=True)
+
+        extras_actuales = extras_de_categoria(c)
+        ex_on = st.checkbox("🎁 Incluye entrada/bebida sin costo", value=bool(extras_actuales),
+                            key=f"cat_ex_on_{cid}")
+        extras_sel = []
+        if ex_on:
+            if opciones_extra:
+                default = [g for g in extras_actuales if g in opciones_extra]
+                extras_sel = st.multiselect(
+                    "Grupos incluidos", options=list(opciones_extra.keys()), default=default,
+                    key=f"cat_ex_grupos_{cid}", format_func=lambda g: opciones_extra.get(g, g),
+                    label_visibility="collapsed")
+                if extras_sel and not any(comp_activos.get(g) for g in extras_sel):
+                    st.caption("⚠️ Ninguna opción activa en esos grupos todavía: no se "
+                               "mostrará nada hasta que actives alguna en 🍽️ Plato del Día.")
+            else:
+                st.caption("⚠️ No hay grupos de selección única en el Plato del Día "
+                           "(ver 🍽️ Plato del Día → 🧩 Grupos).")
         st.markdown("<div style='height:6px;'></div>", unsafe_allow_html=True)
-        vals[cid] = (et, emoji, orden, act, desde, hasta)
+        vals[cid] = (et, emoji, orden, act, desde, hasta, extras_sel)
 
     if st.button("💾 Guardar categorías", type="primary", key="cat_guardar"):
-        for cid, (et, emoji, orden, act, desde, hasta) in vals.items():
+        for cid, (et, emoji, orden, act, desde, hasta, extras_sel) in vals.items():
             guardar_categoria(cid, etiqueta=et, emoji=emoji, orden=int(orden), activo=bool(act),
-                              disponible_desde=desde, disponible_hasta=hasta)
+                              disponible_desde=desde, disponible_hasta=hasta,
+                              extras_grupos=extras_sel)
         flash("Categorías guardadas", "🏷️")
         st.rerun()
 
