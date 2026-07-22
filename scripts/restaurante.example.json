@@ -42,6 +42,9 @@
     "bebida":         ["Limonada", "Jugo del día"]
   },
 
+  "_categorias_extras": "OPCIONAL. Qué categorías del catálogo vienen con entrada/bebida del Plato del Día INCLUIDAS sin costo: clave de categoría -> lista de claves de grupo (de 'grupos', solo de selección única, min/max=1). Sin este bloque, TODA categoría nace en catálogo simple (sin extras); se activan después desde el panel, 🏷️ Categorías. Ejemplo: el restaurante 1 del piloto usa {\"especial\": [\"entrada\", \"bebida\"], \"a_la_carta\": [\"entrada\", \"bebida\"]} — no lo pongas por defecto salvo que el restaurante lo pida explícitamente.",
+  "categorias_extras": {},
+
   "_mesas": "Número de mesas a crear (se nombran Mesa 1..N) o lista de nombres [\"Mesa 1\", \"Barra\"].",
   "mesas": 8,
 

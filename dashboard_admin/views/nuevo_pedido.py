@@ -7,8 +7,9 @@ taxonomía de secciones que la app del cliente.
   #2.. una sección por CATEGORÍA activa (tabla categorias, ver db.cargar_categorias),
      en su 'orden': las 4 clásicas (Especiales, A la carta, Adicionales, Bebidas)
      vienen sembradas y el restaurante agrega las suyas desde 🍔 Menú → ⚙️ Ajustes →
-     🏷️ Categorías. El comportamiento de cada una (¿lleva descripción?, ¿cuenta para el
-     recargo?, ¿ofrece entrada/bebida incluidas?) sale de db.comportamiento_categoria.
+     🏷️ Categorías. El comportamiento fijo de cada una (¿lleva descripción?, ¿cuenta
+     para el recargo?) sale de db.comportamiento_categoria; los extras incluidos
+     (qué grupos del Plato del Día vienen sin costo) salen de db.extras_de_categoria.
   #N Nota general del pedido.
 
 Produce el MISMO JSON de items por secciones que la app del cliente (utils.items lo
@@ -29,7 +30,7 @@ from db import (engine, titulo_seccion, cargar_mesas_activas, componentes_activo
                 siguiente_num_dia, resumen_disponibilidad_componentes, agotado_por_stock,
                 stock_int, STOCK_BAJO,
                 cargar_categorias, comportamiento_categoria, tipo_de_categoria,
-                tipos_con_recargo)
+                tipos_con_recargo, extras_de_categoria)
 from utils.items import componentes_lineas
 from utils.print_jobs import enqueue_comanda, badge_agente_html, badge_fallos_html, estado_agente
 
@@ -589,21 +590,24 @@ def _seccion_catalogo(productos, tipo, titulo, con_desc=False, mostrar=True, hea
     return elegidos
 
 
-def _seccion_con_extras(productos, tipo, titulo, comp, con_desc=False, mostrar=True, header=True):
-    """Sección (Especiales / A la carta) con stepper por producto y, cuando el restaurante
-    tiene entradas/bebidas del Plato del Día configuradas, selectores OPCIONALES (Entrada /
-    Bebida) que van INCLUIDOS sin costo.
+def _seccion_con_extras(productos, tipo, titulo, comp, extras=(), con_desc=False,
+                        mostrar=True, header=True):
+    """Sección (Especiales / A la carta / cualquier categoría con extras_grupos) con
+    stepper por producto y, para cada grupo del Plato del Día en 'extras' (claves de
+    categorias.extras_grupos, ver db.extras_de_categoria) que tenga opciones activas,
+    un selector OPCIONAL de esa opción, INCLUIDA sin costo.
 
-    Si se piden 2 o más unidades de un mismo producto, la entrada/bebida se elige por CADA
+    Si se piden 2 o más unidades de un mismo producto, los extras se eligen por CADA
     unidad ("Unidad #1", "Unidad #2"…) → se emite un ítem (cantidad 1) por unidad, cada uno
-    con su propia config. Con una sola unidad va un único bloque sin cabecera. Si el
-    restaurante no tiene esos componentes, el producto se comporta como un catálogo simple
-    (un ítem con cantidad N). 'Ninguno' por defecto en cada selector.
+    con su propia config. Con una sola unidad va un único bloque sin cabecera. Si la
+    categoría no tiene extras configurados (o el restaurante no tiene componentes en esos
+    grupos), el producto se comporta como un catálogo simple (un ítem con cantidad N).
+    'Ninguno' por defecto en cada selector.
 
     mostrar=False pliega la sección (acordeón del mesero, ver render()): se omiten los
-    steppers y los selectores de entrada/bebida, pero la config ya elegida se conserva
-    leyéndola de session_state (_peek_selector_grupo) en vez de perderse. header=False
-    omite el título porque ya lo pintó la cabecera plegable de quien llama."""
+    steppers y los selectores de extras, pero la config ya elegida se conserva leyéndola
+    de session_state (_peek_selector_grupo) en vez de perderse. header=False omite el
+    título porque ya lo pintó la cabecera plegable de quien llama."""
     if header:
         st.markdown(titulo_seccion(titulo), unsafe_allow_html=True)
     if not productos:
@@ -611,14 +615,11 @@ def _seccion_con_extras(productos, tipo, titulo, comp, con_desc=False, mostrar=T
             st.markdown('<p style="color:#a3a39b; font-size:0.85rem;">Sin opciones disponibles.</p>',
                         unsafe_allow_html=True)
         return []
-    # Los extras incluidos siguen anclados a los grupos con clave 'entrada'/'bebida':
-    # si el restaurante los desactivó o no existen, la sección se comporta como
-    # catálogo simple (sin selectores).
-    ofrece_entrada = bool(comp.get("entrada"))
-    ofrece_bebida  = bool(comp.get("bebida"))
+    # Solo los grupos que la categoría marcó como extra Y que tienen opciones activas
+    # hoy; si no queda ninguno, la sección se comporta como catálogo simple (sin
+    # selectores) más abajo.
     etiquetas = etiquetas_grupos_pd()
-    et_entrada = etiquetas.get("entrada", "Entrada")
-    et_bebida = etiquetas.get("bebida", "Bebida")
+    grupos_extra = [(g, etiquetas.get(g, g)) for g in extras if comp.get(g)]
     carrito = st.session_state["carrito_manual"]
     elegidos = []
     for p in productos:
@@ -660,8 +661,9 @@ def _seccion_con_extras(productos, tipo, titulo, comp, con_desc=False, mostrar=T
         if qty <= 0:
             continue
 
-        # Sin entrada/bebida configuradas: catálogo simple (un ítem con cantidad N).
-        if not (ofrece_entrada or ofrece_bebida):
+        # Categoría sin extras (o sin opciones vivas en esos grupos): catálogo simple
+        # (un ítem con cantidad N).
+        if not grupos_extra:
             elegidos.append({"tipo": tipo, "id": pid, "nombre": p["nombre"],
                              "precio": int(p["precio"]), "cantidad": qty})
             continue
@@ -675,25 +677,16 @@ def _seccion_con_extras(productos, tipo, titulo, comp, con_desc=False, mostrar=T
                 if qty > 1:
                     st.markdown(_grupo_label(f'{html.escape(str(p["nombre"]))} · Unidad #{u+1}'),
                                 unsafe_allow_html=True)
-                if ofrece_entrada:
-                    ent = _selector_grupo(uid, "entrada", comp["entrada"],
-                                          f"{et_entrada} (incluida)", default_ninguno=True)
-                    if ent:
-                        sel_cfg.append({"k": "entrada", "l": et_entrada, "v": [ent]})
-                if ofrece_bebida:
-                    beb = _selector_grupo(uid, "bebida", comp["bebida"],
-                                          f"{et_bebida} (incluida)", default_ninguno=True)
-                    if beb:
-                        sel_cfg.append({"k": "bebida", "l": et_bebida, "v": [beb]})
+                for g, et_g in grupos_extra:
+                    val = _selector_grupo(uid, g, comp[g], f"{et_g} (incluida)",
+                                          default_ninguno=True)
+                    if val:
+                        sel_cfg.append({"k": g, "l": et_g, "v": [val]})
             else:
-                if ofrece_entrada:
-                    ent = _peek_selector_grupo(uid, "entrada", comp["entrada"], default_ninguno=True)
-                    if ent:
-                        sel_cfg.append({"k": "entrada", "l": et_entrada, "v": [ent]})
-                if ofrece_bebida:
-                    beb = _peek_selector_grupo(uid, "bebida", comp["bebida"], default_ninguno=True)
-                    if beb:
-                        sel_cfg.append({"k": "bebida", "l": et_bebida, "v": [beb]})
+                for g, et_g in grupos_extra:
+                    val = _peek_selector_grupo(uid, g, comp[g], default_ninguno=True)
+                    if val:
+                        sel_cfg.append({"k": g, "l": et_g, "v": [val]})
             item = {"tipo": tipo, "id": pid, "nombre": p["nombre"],
                     "precio": int(p["precio"]), "cantidad": 1}
             if sel_cfg:
@@ -871,18 +864,20 @@ def _form_fragment():
 
         # Una sección por categoría ACTIVA (tabla categorias), en su 'orden': las 4
         # clásicas vienen sembradas y el restaurante agrega las suyas desde 🍔 Menú →
-        # ⚙️ Ajustes → 🏷️ Categorías. El comportamiento (con_desc / con_extras) sale de
-        # comportamiento_categoria; una categoría nueva se comporta como 'A la carta'.
+        # ⚙️ Ajustes → 🏷️ Categorías. con_desc sale de comportamiento_categoria; qué
+        # grupos del Plato del Día vienen incluidos sale de extras_de_categoria (una
+        # categoría nueva no tiene ninguno: catálogo simple hasta que se active).
         items_cat = []
         for cat_row in cargar_categorias():
             clave = cat_row["clave"]
             tipo = tipo_de_categoria(clave)
             comport = comportamiento_categoria(clave)
+            extras = extras_de_categoria(cat_row)
             etiqueta = f'{cat_row["emoji"]} {cat_row["etiqueta"]}'.strip()
             productos = _catalogo_seccion(df_cat, clave)
             mostrar, header = _estado_seccion(tipo, etiqueta, productos)
-            if comport["extras"]:
-                items_cat += _seccion_con_extras(productos, tipo, etiqueta, comp,
+            if extras:
+                items_cat += _seccion_con_extras(productos, tipo, etiqueta, comp, extras=extras,
                                                  con_desc=comport["desc"],
                                                  mostrar=mostrar, header=header)
             else:

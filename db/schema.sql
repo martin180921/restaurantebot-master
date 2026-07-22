@@ -84,6 +84,10 @@ CREATE TABLE IF NOT EXISTS plato_dia_grupos (
 -- las 11:00); NULL en cualquiera de las dos = visible todo el día. Ese horario SOLO
 -- se aplica en la carta digital del cliente (app_cliente); el panel y el POS del
 -- mesero siempre ven todas las categorías activas, sin importar la hora.
+-- extras_grupos: claves de grupo del Plato del Día (separadas por coma, p. ej.
+-- 'entrada,bebida') que esta categoría ofrece INCLUIDAS sin costo extra. '' = catálogo
+-- simple (default: ningún restaurante nuevo sale con extras encendidos). Ver
+-- db.extras_de_categoria().
 CREATE TABLE IF NOT EXISTS categorias (
     id                SERIAL      PRIMARY KEY,
     clave             VARCHAR(20) UNIQUE NOT NULL,
@@ -92,7 +96,8 @@ CREATE TABLE IF NOT EXISTS categorias (
     orden             INTEGER     NOT NULL DEFAULT 0,
     activo            BOOLEAN     NOT NULL DEFAULT TRUE,
     disponible_desde  TIME,
-    disponible_hasta  TIME
+    disponible_hasta  TIME,
+    extras_grupos     TEXT        NOT NULL DEFAULT ''
 );
 
 -- Ajustes clave/valor: precios planos, recargo de entrega, nº de acompañamientos
@@ -351,6 +356,9 @@ ALTER TABLE menu    ADD COLUMN IF NOT EXISTS categoria VARCHAR(20) NOT NULL DEFA
 ALTER TABLE menu    ADD COLUMN IF NOT EXISTS descripcion TEXT;
 ALTER TABLE menu             ADD COLUMN IF NOT EXISTS stock INTEGER;  -- inventario diario (NULL = ilimitado)
 ALTER TABLE menu_componentes ADD COLUMN IF NOT EXISTS stock INTEGER;  -- inventario diario por componente
+ALTER TABLE categorias ADD COLUMN IF NOT EXISTS disponible_desde TIME;
+ALTER TABLE categorias ADD COLUMN IF NOT EXISTS disponible_hasta TIME;
+ALTER TABLE categorias ADD COLUMN IF NOT EXISTS extras_grupos TEXT NOT NULL DEFAULT '';
 ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS mesa_id INTEGER REFERENCES mesas(id);
 ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS mesero VARCHAR(120);
 ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS motivo_cancelacion TEXT;
