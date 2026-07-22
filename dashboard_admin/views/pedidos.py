@@ -539,23 +539,54 @@ def valor_lineas_pagadas(pedido_id: int) -> int:
     return sum(l["pagada"] * l["precio"] for l in lineas_pagables(pedido_id))
 
 
-def registrar_pago_items(pedido_id, seleccion, metodo="efectivo", submetodo=None, comprobante=None) -> int:
-    """Cobra unidades concretas de un pedido. 'seleccion' = {linea_idx: cantidad}. Cobra
-    el subtotal de lo elegido (acotado al saldo real), avanza total_pagado/pagado, anota
-    el abono en 'pagos' y suma las unidades en pago_lineas. Todo en UNA transacción.
+def _detalle_transferencia(metodo, submetodo, comprobante):
+    """(submetodo, comprobante) normalizados para el libro 'pagos': solo las transferencias
+    los llevan (en efectivo van NULL) y el submétodo debe ser uno de los válidos del
+    restaurante (ver _submetodos_validos)."""
+    if metodo != "transferencia":
+        return None, None
+    sub = (str(submetodo or "").strip().lower() or None)
+    sub = sub if sub in _submetodos_validos() else None
+    return sub, (str(comprobante or "").strip()[:60] or None)
+
+
+def _repartir_tramos(cobro, tramos):
+    """Reparte 'cobro' entre 'tramos' ([{metodo, monto, submetodo, comprobante}]) en orden,
+    sin pasarse. El ÚLTIMO tramo se lleva SIEMPRE lo que quede (su 'monto' es indicativo),
+    de modo que Σ(lo repartido) == cobro exacto. Devuelve solo los tramos con monto > 0.
+    Función PURA (sin BD) para poder testearla, igual que _distribuir_abono."""
+    restante = max(0, int(cobro))
+    out = []
+    for i, tramo in enumerate(tramos or []):
+        if restante <= 0:
+            break
+        pedido_tramo = tramo.get("monto")
+        monto = (restante if (i == len(tramos) - 1 or pedido_tramo is None)
+                 else min(max(0, int(pedido_tramo)), restante))
+        if monto <= 0:
+            continue
+        out.append(dict(tramo, monto=monto))
+        restante -= monto
+    return out
+
+
+def _cobrar_items(pedido_id, seleccion, tramos) -> int:
+    """Núcleo del cobro POR PLATO. 'seleccion' = {linea_idx: cantidad}; 'tramos' =
+    [{metodo, monto, submetodo, comprobante}] con el reparto pretendido de ese subtotal.
+    Cobra el subtotal de lo elegido (acotado al saldo real), avanza total_pagado/pagado,
+    anota UNA fila en 'pagos' por tramo con monto > 0 y suma las unidades en pago_lineas.
+    Todo en UNA transacción — los tramos de un mixto comparten así el mismo 'fecha', que
+    es lo que usa _es_tramo_mixto para reconocerlos al corregir un cobro.
+
+    El ÚLTIMO tramo se lleva SIEMPRE el resto (su 'monto' es indicativo): así Σ('pagos')
+    == lo asentado en total_pagado aunque el saldo haya bajado entre medias (otra caja
+    cobrando en paralelo), y el desglose efectivo/transferencia de Caja nunca descuadra.
 
     H2 — devuelve el monto realmente cobrado; 0 si la cuenta ya estaba pagada o no quedaba
     nada por cobrar de lo elegido (el llamador NO imprime recibo ni audita sobre un 0)."""
     pedido_id = int(pedido_id)
     seleccion = {int(k): int(v) for k, v in (seleccion or {}).items() if int(v) > 0}
-    metodo = metodo if metodo in ("efectivo", "transferencia") else "efectivo"
-    if metodo == "transferencia":
-        sub = (str(submetodo or "").strip().lower() or None)
-        sub = sub if sub in _submetodos_validos() else None
-        comp = (str(comprobante or "").strip()[:60] or None)
-    else:
-        sub, comp = None, None
-    if not seleccion:
+    if not seleccion or not tramos:
         return 0
     ins = text("INSERT INTO pagos (pedido_id, monto, metodo, submetodo, comprobante) "
                "VALUES (:pedido_id, :monto, :metodo, :submetodo, :comprobante)")
@@ -594,13 +625,43 @@ def registrar_pago_items(pedido_id, seleccion, metodo="efectivo", submetodo=None
         nuevo_pagado = int(row["total_pagado"]) + cobro
         conn.execute(text("UPDATE pedidos SET total_pagado = :tp, pagado = :pg WHERE id = :id"),
                      {"tp": nuevo_pagado, "pg": nuevo_pagado >= int(row["total"]), "id": pedido_id})
-        conn.execute(ins, {"pedido_id": pedido_id, "monto": cobro, "metodo": metodo,
-                           "submetodo": sub, "comprobante": comp})
+        for tramo in _repartir_tramos(cobro, tramos):
+            conn.execute(ins, {"pedido_id": pedido_id, "monto": tramo["monto"],
+                               "metodo": tramo["metodo"], "submetodo": tramo.get("submetodo"),
+                               "comprobante": tramo.get("comprobante")})
         for idx, usar in aplicar.items():
             conn.execute(ups, {"pid": pedido_id, "idx": idx, "cant": usar})
         _entregar_domicilios_pagados(conn, [pedido_id])   # domicilio pagado → entregado (mismo txn)
     refrescar_pedidos()
     return int(cobro)
+
+
+def registrar_pago_items(pedido_id, seleccion, metodo="efectivo", submetodo=None, comprobante=None) -> int:
+    """Cobra unidades concretas de un pedido con UN método (efectivo o transferencia).
+    Ver _cobrar_items para el detalle y el contrato de retorno (H2)."""
+    metodo = metodo if metodo in ("efectivo", "transferencia") else "efectivo"
+    sub, comp = _detalle_transferencia(metodo, submetodo, comprobante)
+    return _cobrar_items(pedido_id, seleccion,
+                         [{"metodo": metodo, "monto": None, "submetodo": sub,
+                           "comprobante": comp}])
+
+
+def registrar_pago_items_mixto(pedido_id, seleccion, efectivo,
+                               submetodo=None, comprobante=None) -> int:
+    """Cobro MIXTO POR PLATO: el comensal paga unidades concretas repartiendo ESE subtotal
+    entre efectivo y transferencia (un solo ticket, dos tramos en 'pagos'). Solo se pasa
+    el tramo en 'efectivo': la transferencia es SIEMPRE el resto del subtotal cobrado, así
+    que la suma no puede quedarse corta ni pasarse (ver _cobrar_items).
+
+    Es el caso real que antes obligaba a elegir: 'estos dos platos son míos, pago 20.000
+    en efectivo y el resto por Nequi'. Ver registrar_pago_mixto para el equivalente por
+    monto (sin atribuir platos)."""
+    sub, comp = _detalle_transferencia("transferencia", submetodo, comprobante)
+    return _cobrar_items(pedido_id, seleccion, [
+        {"metodo": "efectivo", "monto": max(0, int(round(float(efectivo or 0)))),
+         "submetodo": None, "comprobante": None},
+        {"metodo": "transferencia", "monto": None, "submetodo": sub, "comprobante": comp},
+    ])
 
 
 # ── DB: corrección de un cobro mal registrado (monto o método equivocado) ───────
@@ -1071,6 +1132,81 @@ def _sugerencias_tender(abono: int) -> list:
     return sorted(c for c in cands if c >= abono)[:4]
 
 
+def _tarjeta_cobro(concepto, detalle, total, abono, tramos, recibido, cambio, bloqueo="") -> str:
+    """HTML de la tarjeta que remata el checkout ('Vas a cobrar'). Es la ÚLTIMA lectura
+    antes de confirmar, así que repite en grande los dos números que más se equivocan —
+    monto a cobrar y cambio a devolver— y dice explícitamente qué se está cobrando, con
+    qué método(s) y si la cuenta queda saldada o sigue abierta.
+
+    'concepto' = qué se cobra ("Cuenta completa" / "3 unidades"); 'detalle' = líneas
+    elegidas en modo por plato; 'tramos' = [(etiqueta, monto)] del método o del reparto
+    mixto; 'bloqueo' = motivo por el que aún no se puede confirmar (si lo hay, la tarjeta
+    se apaga y no promete un cobro que no va a ocurrir)."""
+    saldo = max(0, int(total) - int(abono))
+    borde = "#d8d8d2" if bloqueo else "#26262b"
+    tinta = "#a3a39b" if bloqueo else "#26262b"
+    filas = "".join(
+        '<div style="display:flex; justify-content:space-between; gap:12px; '
+        'font-size:0.88rem; padding:3px 0;">'
+        f'<span style="color:#45443e;">{html.escape(str(etq))}</span>'
+        f'<span style="font-family:\'DM Sans\',sans-serif; font-weight:600; color:#26262b;">'
+        f'${fmt_money(monto)}</span></div>'
+        for etq, monto in tramos if int(monto) > 0
+    )
+    items_html = ""
+    if detalle:
+        items_html = (
+            '<div style="margin-top:8px; padding:8px 10px; background:#faf9f5; '
+            'border-radius:8px; font-size:0.82rem; color:#45443e; line-height:1.5;">'
+            + "<br>".join(html.escape(str(d)) for d in detalle) + "</div>"
+        )
+    cambio_html = ""
+    if int(recibido or 0) > 0:
+        if int(cambio) > 0:
+            cambio_html = (
+                '<div style="background:#dcfce7; border:1px solid #86efac; border-radius:10px; '
+                'padding:10px 12px; margin-top:10px; display:flex; justify-content:space-between; '
+                'align-items:center; gap:10px;">'
+                '<span style="color:#14532d; font-weight:700;">Cambio a devolver</span>'
+                '<span style="font-family:\'DM Sans\',sans-serif; font-weight:700; '
+                f'font-size:1.5rem; color:#14532d; line-height:1.1;">${fmt_money(cambio)}</span></div>'
+                f'<div style="font-size:0.78rem; color:#6b6b64; margin-top:3px;">'
+                f'Recibes ${fmt_money(recibido)} en efectivo</div>'
+            )
+        else:
+            cambio_html = (
+                f'<div style="font-size:0.82rem; color:#14532d; margin-top:8px;">'
+                f'✓ Efectivo exacto (${fmt_money(recibido)}) · sin cambio</div>'
+            )
+    if bloqueo:
+        cierre = ('<div style="background:#fef3c7; border:1px solid #fcd34d; border-radius:10px; '
+                  'padding:9px 12px; margin-top:10px; color:#92400e; font-weight:600; '
+                  f'font-size:0.85rem;">{html.escape(str(bloqueo))}</div>')
+    elif saldo > 0:
+        cierre = ('<div style="background:#fef3c7; border:1px solid #fcd34d; border-radius:10px; '
+                  'padding:9px 12px; margin-top:10px; color:#92400e; font-weight:600; '
+                  f'font-size:0.85rem;">Queda un saldo de ${fmt_money(saldo)} · la cuenta '
+                  'sigue abierta.</div>')
+    else:
+        cierre = ('<div style="background:#dcfce7; border:1px solid #86efac; border-radius:10px; '
+                  'padding:9px 12px; margin-top:10px; color:#14532d; font-weight:600; '
+                  'font-size:0.85rem;">✓ Con esto la cuenta queda saldada.</div>')
+    return (
+        f'<div style="border:2px solid {borde}; border-radius:14px; padding:14px 16px; '
+        'margin-top:6px; background:#ffffff;">'
+        '<div style="font-size:0.72rem; letter-spacing:0.08em; text-transform:uppercase; '
+        'color:#6b6b64; font-weight:600;">Vas a cobrar</div>'
+        '<div style="display:flex; align-items:baseline; justify-content:space-between; gap:12px;">'
+        f'<div style="font-family:\'DM Sans\',sans-serif; font-size:2.2rem; font-weight:700; '
+        f'color:{tinta}; line-height:1.2;">${fmt_money(abono)}</div>'
+        f'<div style="font-size:0.8rem; color:#6b6b64; text-align:right; line-height:1.4;">'
+        f'{html.escape(str(concepto))}<br>de ${fmt_money(total)}</div></div>'
+        f'{items_html}'
+        f'<div style="border-top:1px solid #ececec; margin-top:10px; padding-top:7px;">{filas}</div>'
+        f'{cambio_html}{cierre}</div>'
+    )
+
+
 def _datos_cobro_pedido(ids):
     """(metodo_pago, paga_con) del pedido cuando el cobro es de UN pedido de entrega, para
     precargar el tender con lo que el cliente dijo que pagaría. ('', 0) si no aplica o falla."""
@@ -1211,7 +1347,8 @@ def dialog_cobrar(ids, titulo, total, uid):
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # ── Modo de cobro: por MONTO o POR PLATO — se decide ANTES que el método ────
+    # ── Paso 1 · ¿CUÁNTO se cobra? — por MONTO o POR PLATO ─────────────────────
+    # El checkout se lee como tres decisiones seguidas: cuánto → cómo → confirmar.
     # 'Por plato' cobra unidades concretas (ej: 1 de 2 Coca-Colas): el modo natural para
     # dividir una cuenta entre comensales. Se ofrece solo con UN pedido y si el valor de
     # las unidades pendientes cuadra con el saldo; si hubo un abono por monto suelto (o
@@ -1220,14 +1357,15 @@ def dialog_cobrar(ids, titulo, total, uid):
     # del método de pago y la billetera/comprobante — fácil de pasar por alto, así que
     # el cajero terminaba cobrando "por monto" sin quererlo. Ponerlo primero, con la
     # preferencia recordada por pedido, evita que el segundo/tercer comensal de una mesa
-    # tenga que volver a elegir el modo.
+    # tenga que volver a elegir el modo. El método (paso 2) ya no lo condiciona: un plato
+    # también se puede pagar mitad efectivo, mitad transferencia.
     lineas = lineas_pagables(ids[0]) if len(ids) == 1 else []
     precio_idx = {l["idx"]: l["precio"] for l in lineas}
     valor_items = sum(l["restante"] * l["precio"] for l in lineas)
     por_plato_ok = (len(ids) == 1 and any(l["restante"] > 0 for l in lineas)
                     and valor_items == total)
 
-    modo_por_plato = False
+    por_plato = False
     if por_plato_ok:
         pref_key = f"modo_pref_{ids[0]}"
         opciones_modo = ["💵 Monto", "🍽️ Por plato"]
@@ -1238,113 +1376,11 @@ def dialog_cobrar(ids, titulo, total, uid):
             key=f"modo_{uid}",
             index=opciones_modo.index(modo_default) if modo_default in opciones_modo else 0,
         )
-        modo_por_plato = modo == "🍽️ Por plato"
+        por_plato = modo == "🍽️ Por plato"
         st.session_state[pref_key] = modo
 
-    # Método de pago. El CSS global pinta el st.radio horizontal como píldoras
-    # (segmented-control) y oculta su label → ponemos uno propio con st.caption.
-    st.caption("Método de pago")
-    metodo = st.radio(
-        "Método de pago", ["💵 Efectivo", "💳 Transferencia", "🔀 Mixto"],
-        horizontal=True, label_visibility="collapsed", key=f"metodo_{uid}",
-    )
-    es_efectivo = metodo == "💵 Efectivo"
-    es_mixto = metodo == "🔀 Mixto"
-    # 'Mixto' = UNA persona paga ESTA cuenta repartiendo el monto entre efectivo y
-    # transferencia → un solo ticket, sobre el TOTAL (no unidades concretas), así que es
-    # incompatible con 'Por plato'. (Para DOS personas que dividen la cuenta en dos
-    # recibos, se hacen dos cobros aparte: por monto o '🍽️ Por plato'.)
-    por_plato = modo_por_plato and not es_mixto
-    if modo_por_plato and es_mixto:
-        st.caption("🔀 Mixto cobra por monto — cambia a Efectivo o Transferencia para "
-                   "dividir por plato.")
-
-    # El tender de efectivo solo aplica al método Efectivo puro. Limpiamos su estado
-    # cuando no estamos en ese modo para que un valor "insuficiente" previo no quede
-    # bloqueando el cobro ni reaparezca al volver. Seguro: el widget 'recibe' solo se
-    # instancia en la rama de efectivo, así que aquí podemos limpiar su clave.
-    submetodo_val, comprobante_val = None, None
-    if not es_efectivo:
-        st.session_state.pop(f"recibe_{uid}", None)
-    # Detalle de la transferencia (también el tramo de transferencia de un cobro mixto):
-    # billetera + comprobante. Las billeteras salen del ajuste 'metodos_pago'
-    # (configurable por restaurante); sin billeteras configuradas se omite el radio.
-    # El comprobante vive solo en este cobro de caja (no en la app pública del cliente).
-    if not es_efectivo:
-        _SUBMETODOS = {etq: clave
-                       for clave, etq in metodos_pago().get("transferencia", {}).items()}
-        if _SUBMETODOS:
-            st.caption("Billetera / canal" + (" · tramo de transferencia" if es_mixto else ""))
-            sub_label = st.radio(
-                "Billetera", list(_SUBMETODOS.keys()),
-                horizontal=True, label_visibility="collapsed", key=f"submetodo_{uid}",
-            )
-            submetodo_val = _SUBMETODOS.get(sub_label)
-        comprobante_val = (st.text_input(
-            "N.º de comprobante", key=f"comprobante_{uid}",
-            placeholder="Referencia de la transacción (opcional)",
-        ) or "").strip() or None
-
     seleccion = {}
-    ef_monto, tr_monto, mixto_sobra, mixto_corto, recibe_ef = 0, 0, False, False, 0
-    if es_mixto:
-        st.caption("Reparte el monto entre los dos métodos (un solo ticket)")
-        col_ef, col_tr = st.columns(2)
-        with col_ef:
-            ef_monto = int(st.number_input(
-                "💵 Efectivo", min_value=0, max_value=total, value=0, step=1000,
-                format="%d", key=f"mix_ef_{uid}") or 0)
-        with col_tr:
-            tr_monto = int(st.number_input(
-                "💳 Transferencia", min_value=0, max_value=total, value=0, step=1000,
-                format="%d", key=f"mix_tr_{uid}") or 0)
-        abono = ef_monto + tr_monto
-        mixto_sobra = abono > total
-        if mixto_sobra:
-            st.markdown(
-                '<div style="background:#fef3c7; border:1px solid #fcd34d; border-radius:10px; '
-                'padding:10px 14px; margin-top:6px; color:#92400e; font-weight:600;">'
-                f'La suma (${fmt_money(abono)}) supera el total por '
-                f'${fmt_money(abono - total)}. Ajusta los montos.</div>',
-                unsafe_allow_html=True,
-            )
-        else:
-            st.markdown(
-                '<div style="display:flex; justify-content:space-between; padding:8px 0 2px; '
-                'border-top:1px solid #ececec; margin-top:6px;"><span style="font-weight:600; '
-                'color:#45443e;">Suma a abonar</span>'
-                f'<span style="font-family:\'DM Sans\',sans-serif; font-weight:600; color:#26262b;">'
-                f'${fmt_money(abono)} de ${fmt_money(total)}</span></div>',
-                unsafe_allow_html=True,
-            )
-        # Tender del tramo de EFECTIVO: cambio = recibido − ef_monto (nunca < 0). Solo
-        # aplica a la parte en efectivo; la de transferencia es exacta.
-        if ef_monto > 0:
-            recibe_ef = int(st.number_input(
-                "¿Con cuánto paga en efectivo?", min_value=0, value=ef_monto, step=1000,
-                format="%d", key=f"mix_recibe_{uid}",
-                help="Tender del tramo en efectivo. La transferencia se registra exacta.",
-            ) or 0)
-            if recibe_ef >= ef_monto:
-                st.markdown(
-                    '<div style="background:#dcfce7; border:1px solid #86efac; border-radius:10px; '
-                    'padding:10px 14px; margin-top:6px; display:flex; justify-content:space-between; '
-                    'align-items:center;"><span style="color:#14532d; font-weight:600;">'
-                    'Cambio (efectivo)</span>'
-                    f'<span style="font-family:\'DM Sans\',sans-serif; font-weight:600; font-size:1.2rem; '
-                    f'color:#14532d;">${fmt_money(recibe_ef - ef_monto)}</span></div>',
-                    unsafe_allow_html=True,
-                )
-            else:
-                mixto_corto = True
-                st.markdown(
-                    '<div style="background:#fef3c7; border:1px solid #fcd34d; border-radius:10px; '
-                    'padding:10px 14px; margin-top:6px; color:#92400e; font-weight:600;">'
-                    f'Efectivo insuficiente: faltan ${fmt_money(ef_monto - recibe_ef)} para el '
-                    f'tramo en efectivo de ${fmt_money(ef_monto)}.</div>',
-                    unsafe_allow_html=True,
-                )
-    elif por_plato:
+    if por_plato:
         # Progreso del cobro por plato: cuánto de este pedido ya se pagó por unidades
         # concretas y cuántas quedan, para que el cajero vea de un vistazo cómo va la
         # división de la cuenta sin tener que sumar las líneas mentalmente.
@@ -1434,56 +1470,147 @@ def dialog_cobrar(ids, titulo, total, uid):
             st.session_state.pop(f"abono_{uid}", None)   # no arrastrar un parcial previo
             abono = total
 
-    # Efectivo: cuánto entrega el cliente → cambio = entregado − abono (nunca < 0).
-    efectivo_corto = False
-    if es_efectivo:
-        recibe_key = f"recibe_{uid}"
-        # Precarga (una sola vez por apertura) el tender con lo que el cliente dijo que pagaría
-        # si alcanza para el abono; si no, con el monto exacto. Sembramos en session_state y NO
-        # pasamos value= al number_input para que los botones de denominación puedan fijarlo sin
-        # que Streamlit se queje de "valor por defecto + Session State".
-        tender_default = paga_con_hint if (paga_con_hint and paga_con_hint >= abono) else abono
-        if recibe_key not in st.session_state:
+    # ── Paso 2 · ¿CÓMO paga? — método y, si es mixto, el reparto ───────────────
+    # El método ya no decide CUÁNTO se cobra (eso fue el paso 1): solo cómo entra ese
+    # monto. El CSS global pinta el st.radio horizontal como píldoras (segmented-control)
+    # y oculta su label → ponemos uno propio con st.caption.
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.caption("Método de pago")
+    metodo = st.radio(
+        "Método de pago", ["💵 Efectivo", "💳 Transferencia", "🔀 Mixto"],
+        horizontal=True, label_visibility="collapsed", key=f"metodo_{uid}",
+    )
+    es_efectivo = metodo == "💵 Efectivo"
+    es_mixto = metodo == "🔀 Mixto"
+
+    # 'Mixto' = UNA persona paga ESTE cobro repartiéndolo entre efectivo y transferencia
+    # (un solo ticket, dos tramos en el libro 'pagos'). Solo se teclea el tramo en
+    # EFECTIVO: la transferencia es el resto del monto del paso 1. Así desaparecen los dos
+    # errores del mixto de dos campos (la suma se pasaba del total o se quedaba corta sin
+    # querer) y el mixto funciona igual cobrando por monto o por plato.
+    ef_monto, tr_monto, mixto_invalido = 0, 0, False
+    if es_mixto and abono <= 0:
+        # Sin monto que repartir no tiene sentido (ni max_value) el campo del reparto.
+        st.caption("Elige primero qué se va a cobrar, arriba, para poder repartirlo.")
+    elif es_mixto:
+        mix_key = f"mix_ef_{uid}"
+        if mix_key not in st.session_state:
+            st.session_state[mix_key] = 0
+        # El monto del paso 1 puede cambiar DESPUÉS de teclear el reparto (p. ej. se
+        # selecciona otra unidad): acotamos el valor guardado para no pasarle a
+        # number_input un estado fuera de su rango.
+        st.session_state[mix_key] = max(0, min(int(st.session_state[mix_key] or 0), abono))
+        st.caption("Escribe cuánto paga en EFECTIVO · el resto va por transferencia")
+        ef_monto = int(st.number_input(
+            "💵 Efectivo", min_value=0, max_value=abono, step=1000, format="%d",
+            key=mix_key,
+            help="La transferencia se calcula sola con el resto: la suma siempre cuadra "
+                 "con el monto a cobrar.",
+        ) or 0)
+        tr_monto = max(0, abono - ef_monto)
+        st.markdown(
+            '<div style="display:flex; gap:8px; margin-top:6px;">'
+            '<div style="flex:1; border:1px solid #ececec; border-radius:10px; padding:8px 10px;">'
+            '<div style="font-size:0.74rem; color:#6b6b64;">💵 Efectivo</div>'
+            f'<div style="font-family:\'DM Sans\',sans-serif; font-weight:700; font-size:1.1rem; '
+            f'color:#26262b;">${fmt_money(ef_monto)}</div></div>'
+            '<div style="flex:1; border:1px solid #ececec; border-radius:10px; padding:8px 10px;">'
+            '<div style="font-size:0.74rem; color:#6b6b64;">💳 Transferencia</div>'
+            f'<div style="font-family:\'DM Sans\',sans-serif; font-weight:700; font-size:1.1rem; '
+            f'color:#26262b;">${fmt_money(tr_monto)}</div></div></div>',
+            unsafe_allow_html=True,
+        )
+        # Un tramo en cero no es un cobro mixto: quedaría un ticket 'mixto' con un solo
+        # método. Se bloquea y se dice qué hacer, en vez de dejarlo pasar.
+        mixto_invalido = ef_monto <= 0 or tr_monto <= 0
+
+    # Detalle de la transferencia (también el tramo de transferencia de un cobro mixto):
+    # billetera + comprobante. Las billeteras salen del ajuste 'metodos_pago'
+    # (configurable por restaurante); sin billeteras configuradas se omite el radio.
+    # El comprobante vive solo en este cobro de caja (no en la app pública del cliente).
+    submetodo_val, comprobante_val, sub_label = None, None, "Transferencia"
+    if not es_efectivo:
+        _SUBMETODOS = {etq: clave
+                       for clave, etq in metodos_pago().get("transferencia", {}).items()}
+        if _SUBMETODOS:
+            st.caption("Billetera / canal" + (" · tramo de transferencia" if es_mixto else ""))
+            sub_label = st.radio(
+                "Billetera", list(_SUBMETODOS.keys()),
+                horizontal=True, label_visibility="collapsed", key=f"submetodo_{uid}",
+            )
+            submetodo_val = _SUBMETODOS.get(sub_label)
+        comprobante_val = (st.text_input(
+            "N.º de comprobante", key=f"comprobante_{uid}",
+            placeholder="Referencia de la transacción (opcional)",
+        ) or "").strip() or None
+
+    # Efectivo recibido → cambio = entregado − monto en efectivo (nunca < 0). Aplica al
+    # método Efectivo puro Y al TRAMO en efectivo de un mixto: el cajero cuenta billetes
+    # igual en los dos casos, así que usan el mismo campo y los mismos botones.
+    monto_efectivo = abono if es_efectivo else ef_monto
+    recibe, cambio_dar, efectivo_corto = 0, 0, False
+    recibe_key, base_key = f"recibe_{uid}", f"_tender_base_{uid}"
+    if monto_efectivo > 0:
+        # Precarga el tender con lo que el cliente dijo que pagaría si alcanza; si no, con
+        # el monto exacto. Se siembra en session_state y NO se pasa value= al number_input,
+        # para que los botones de denominación puedan fijarlo sin que Streamlit se queje de
+        # "valor por defecto + Session State". Se vuelve a sembrar cuando el monto en
+        # efectivo CAMBIA (otra unidad seleccionada, otro reparto) y el tender anterior ya
+        # no alcanza — si no, quedaba pegado un "efectivo insuficiente" heredado.
+        tender_default = (paga_con_hint if (paga_con_hint and paga_con_hint >= monto_efectivo)
+                          else monto_efectivo)
+        if recibe_key not in st.session_state or (
+                st.session_state.get(base_key) != monto_efectivo
+                and int(st.session_state.get(recibe_key, 0) or 0) < monto_efectivo):
             st.session_state[recibe_key] = int(tender_default)
-        if paga_con_hint and paga_con_hint >= abono:
+        st.session_state[base_key] = monto_efectivo
+        if paga_con_hint and paga_con_hint >= monto_efectivo:
             st.caption(f"💡 El cliente dijo que paga con ${fmt_money(paga_con_hint)}")
         # Botones de denominación: fijan el tender de un toque (menos error que digitar).
-        sugerencias = _sugerencias_tender(abono)
+        sugerencias = _sugerencias_tender(monto_efectivo)
         den_cols = st.columns(len(sugerencias))
         for i, val in enumerate(sugerencias):
-            etiqueta = "Exacto" if val == abono else f"${fmt_money(val)}"
+            etiqueta = "Exacto" if val == monto_efectivo else f"${fmt_money(val)}"
             den_cols[i].button(etiqueta, key=f"den_{uid}_{val}", use_container_width=True,
                                on_click=_set_tender, args=(recibe_key, val))
         recibe = int(st.number_input(
-            "¿Con cuánto paga el cliente?", min_value=0, step=1000,
-            format="%d", key=recibe_key,
+            "¿Con cuánto paga en efectivo?" if es_mixto else "¿Con cuánto paga el cliente?",
+            min_value=0, step=1000, format="%d", key=recibe_key,
         ) or 0)
-        if recibe >= abono:
-            st.markdown(
-                '<div style="background:#dcfce7; border:1px solid #86efac; border-radius:10px; '
-                'padding:10px 14px; margin-top:6px; display:flex; justify-content:space-between; '
-                'align-items:center;"><span style="color:#14532d; font-weight:600;">Cambio</span>'
-                f'<span style="font-family:\'DM Sans\',sans-serif; font-weight:600; font-size:1.2rem; '
-                f'color:#14532d;">${fmt_money(recibe - abono)}</span></div>',
-                unsafe_allow_html=True,
-            )
-        else:
-            # No mostramos cambio negativo: el efectivo no alcanza para el abono.
-            efectivo_corto = True
+        efectivo_corto = recibe < monto_efectivo
+        cambio_dar = max(0, recibe - monto_efectivo)
+        if efectivo_corto:
+            # No mostramos cambio negativo: el efectivo no alcanza para lo que se cobra.
             st.markdown(
                 '<div style="background:#fef3c7; border:1px solid #fcd34d; border-radius:10px; '
                 'padding:10px 14px; margin-top:6px; color:#92400e; font-weight:600;">'
-                f'Efectivo insuficiente: faltan ${fmt_money(abono - recibe)} para abonar '
-                f'${fmt_money(abono)}.</div>',
+                f'Efectivo insuficiente: faltan ${fmt_money(monto_efectivo - recibe)} para '
+                f'los ${fmt_money(monto_efectivo)} en efectivo.</div>',
                 unsafe_allow_html=True,
             )
+        elif cambio_dar > 0:
+            st.markdown(
+                f'<div style="font-size:0.82rem; color:#14532d; margin-top:6px;">'
+                f'Cambio: <b>${fmt_money(cambio_dar)}</b></div>', unsafe_allow_html=True)
+    else:
+        # Sin tramo en efectivo no hay tender: limpiamos su estado para que un valor
+        # "insuficiente" previo no quede bloqueando el cobro ni reaparezca al volver.
+        st.session_state.pop(recibe_key, None)
+        st.session_state.pop(base_key, None)
 
-    if abono < total and not efectivo_corto and not mixto_corto:
-        st.markdown(
-            f'<div style="font-size:0.8rem; color:#4b43b0; margin-top:8px;">Abono parcial · '
-            f'saldo restante: <b>${fmt_money(total - abono)}</b> (la cuenta sigue abierta).</div>',
-            unsafe_allow_html=True,
-        )
+    # Motivo por el que AÚN no se puede confirmar. Uno solo (el primero que aplica) y
+    # redactado como instrucción: se muestra dentro de la tarjeta de confirmación, que es
+    # donde el cajero está mirando cuando pulsa el botón.
+    if abono <= 0:
+        bloqueo = ("Selecciona al menos una unidad para cobrar." if por_plato
+                   else "El monto a cobrar debe ser mayor que $0.")
+    elif efectivo_corto:
+        bloqueo = f"Falta efectivo: ${fmt_money(monto_efectivo - recibe)}."
+    elif mixto_invalido:
+        bloqueo = ("Un cobro mixto lleva algo en cada método. Reparte el monto o elige "
+                   "💵 Efectivo / 💳 Transferencia.")
+    else:
+        bloqueo = ""
 
     # Recibo bajo demanda: por defecto NO se imprime (la mayoría de clientes no lo pide y
     # gasta papel). Se activa SOLO si el cliente lo pide. En efectivo el cajón se abre igual
@@ -1492,27 +1619,56 @@ def dialog_cobrar(ids, titulo, total, uid):
         "🖨️ Imprimir recibo", key=f"imprimir_recibo_{uid}", value=False,
         help="El recibo solo se imprime si el cliente lo pide. En efectivo el cajón se abre igual.")
 
-    st.markdown("<br>", unsafe_allow_html=True)
+    # ── Paso 3 · Confirmar — la tarjeta repite TODO lo elegido antes de asentar ──
+    # Cerrar el checkout con un botón "Confirmar pago" a secas obligaba a recordar (o a
+    # subir a releer) cuánto, de qué y con qué método se estaba cobrando. Aquí se resume
+    # todo junto al botón: qué se cobra, el desglose por método, el cambio a devolver y si
+    # la cuenta queda saldada. El botón lleva SIEMPRE el monto para que un "+" de más o un
+    # reparto a medias no se confirmen a ciegas.
+    detalle = []
+    if por_plato:
+        n_unidades = sum(seleccion.values())
+        concepto = f"{n_unidades} unidad{'es' if n_unidades != 1 else ''} de la cuenta"
+        for l in lineas:
+            q = int(seleccion.get(l["idx"], 0))
+            if q > 0:
+                detalle.append(f"{q} × {l['nombre']} · ${fmt_money(q * l['precio'])}")
+    else:
+        concepto = "Cuenta completa" if abono >= total else "Abono parcial"
+    etiqueta_transf = f"💳 {sub_label}"
+    if comprobante_val:
+        etiqueta_transf += f" · {comprobante_val}"
+    if es_mixto:
+        tramos_card = [("💵 Efectivo", ef_monto), (etiqueta_transf, tr_monto)]
+    elif es_efectivo:
+        tramos_card = [("💵 Efectivo", abono)]
+    else:
+        tramos_card = [(etiqueta_transf, abono)]
+    st.markdown(
+        _tarjeta_cobro(concepto, detalle, total, abono, tramos_card,
+                       recibe if monto_efectivo > 0 else 0, cambio_dar, bloqueo),
+        unsafe_allow_html=True,
+    )
 
     c1, c2 = st.columns(2)
     with c1:
-        # Transferencia se confirma solo con abono > 0 (sin cálculo de cambio); en
-        # efectivo además exige que el tender alcance (no efectivo_corto). En modo por
-        # plato el botón muestra el monto seleccionado: un "+" de más no se confirma a
-        # ciegas, el cajero ve exactamente cuánto está a punto de cobrar.
-        confirm_label = f"✓ Cobrar ${fmt_money(abono)}" if por_plato else "✓ Confirmar pago"
-        if st.button(confirm_label, key=f"confirm_cobrar_{uid}", type="primary",
-                     use_container_width=True,
-                     disabled=(abono <= 0 or (es_efectivo and efectivo_corto)
-                               or mixto_sobra or mixto_corto)):
+        if st.button(f"✓ Cobrar ${fmt_money(abono)}", key=f"confirm_cobrar_{uid}",
+                     type="primary", use_container_width=True, disabled=bool(bloqueo)):
             # 1) Asienta el cobro y captura lo REALMENTE aplicado (H2). Si otra caja ya cobró
             #    esta cuenta (carrera sobre la caché de 8 s / doble toque), 'aplicado' = 0.
             if es_mixto:
                 metodo_pago = "mixto"
                 # Un solo cobro repartido en dos tramos (dos filas en 'pagos', un ticket).
-                aplicado = int(registrar_pago_mixto(
-                    ids, ef_monto, tr_monto,
-                    submetodo=submetodo_val, comprobante=comprobante_val) or 0)
+                # Por plato cobra además las unidades elegidas (suma a pago_lineas) y deja
+                # el tramo de transferencia como resto exacto de ese subtotal.
+                if por_plato:
+                    aplicado = int(registrar_pago_items_mixto(
+                        ids[0], seleccion, ef_monto,
+                        submetodo=submetodo_val, comprobante=comprobante_val) or 0)
+                else:
+                    aplicado = int(registrar_pago_mixto(
+                        ids, ef_monto, tr_monto,
+                        submetodo=submetodo_val, comprobante=comprobante_val) or 0)
             else:
                 metodo_pago = "efectivo" if es_efectivo else "transferencia"
                 if por_plato:
@@ -1541,7 +1697,7 @@ def dialog_cobrar(ids, titulo, total, uid):
                 # El tramo de efectivo lleva su tender para imprimir Recibido/Cambio.
                 ef_tramo = {"metodo": "efectivo", "monto": ef_monto}
                 if ef_monto > 0:
-                    ef_tramo["recibido"] = recibe_ef
+                    ef_tramo["recibido"] = recibe
                 enqueue_recibo(ids, titulo, total, aplicado, "mixto", desglose=[
                     ef_tramo,
                     {"metodo": "transferencia", "monto": tr_monto,
@@ -1554,22 +1710,18 @@ def dialog_cobrar(ids, titulo, total, uid):
                                submetodo=submetodo_val, comprobante=comprobante_val,
                                imprimir=imprimir_recibo)
             # Libro mayor: el cobro queda atribuido al cajero (base del informe de personal).
-            # Tender y cambio en efectivo (puro o el tramo de efectivo de un mixto). Se anotan
-            # en el libro mayor (auditable: permite detectar un cambio mal dado) y alimentan el
-            # recordatorio de vuelto del Monitor.
-            recibido_val, cambio_dar = None, 0
-            if es_efectivo:
-                recibido_val = int(recibe)
-                cambio_dar = max(0, recibe - abono)
-            elif es_mixto and ef_monto > 0:
-                recibido_val = int(recibe_ef)
-                cambio_dar = max(0, recibe_ef - ef_monto)
+            # Tender y cambio en efectivo (puro o el tramo de efectivo de un mixto) ya salieron
+            # del campo de tender. Se anotan en el libro mayor (auditable: permite detectar un
+            # cambio mal dado) y alimentan el recordatorio de vuelto del Monitor.
+            recibido_val = int(recibe) if monto_efectivo > 0 else None
             # 'monto' = lo REALMENTE asentado (no el abono pretendido) → arqueo exacto.
             audit.registrar("cobrar", "pedido", ids[0], {
                 "ids": ids, "titulo": str(titulo), "monto": int(aplicado),
                 "metodo": metodo_pago, "submetodo": submetodo_val,
                 "saldo_antes": int(total), "saldo_despues": int(max(0, total - aplicado)),
                 "por_plato": bool(por_plato),
+                "reparto": ({"efectivo": ef_monto, "transferencia": tr_monto}
+                            if es_mixto else None),
                 "recibido": recibido_val, "cambio": int(cambio_dar),
             })
             # Recordatorio de cambio: si el cobro fue en efectivo y sobró dinero, deja un aviso
