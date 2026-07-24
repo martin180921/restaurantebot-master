@@ -28,7 +28,7 @@ import login_guard
 import mesero_keys
 import remember
 from views import (pedidos, monitor_mesas, nuevo_pedido, menu, mesas, resumen,
-                   caja, cancelaciones, meseros, reporte_personal)
+                   caja, cancelaciones, meseros, reporte_personal, facturas)
 from db import fecha_larga, ahora_bogota, restaurante_nombre
 
 load_dotenv()
@@ -861,16 +861,19 @@ NAV_TEXT = {
 def _render_admin():
     """Entorno de Administración (SOLO admin), aislado del flujo operativo de Caja:
     reúne los reportes y registros sensibles en pestañas limpias — Resumen de ventas,
-    Cancelaciones, gestión de Personal (perfiles/PIN, antes vista 'meseros' propia) y
+    Cancelaciones, Facturas (documentos fiscales, bloque C del plan de facturación
+    electrónica), gestión de Personal (perfiles/PIN, antes vista 'meseros' propia) y
     Actividad (marcaje de turno, libro mayor). El acceso lo gobierna la matriz de rol
     (solo ADMIN tiene la vista 'admin'); require_view ya lo valida en _dispatch, así que
     aquí no hace falta otro candado."""
-    tab_resumen, tab_cancel, tab_personal, tab_actividad = st.tabs(
-        ["📊 Resumen", "🚫 Cancelaciones", "👤 Personal", "🕒 Actividad"])
+    tab_resumen, tab_cancel, tab_facturas, tab_personal, tab_actividad = st.tabs(
+        ["📊 Resumen", "🚫 Cancelaciones", "🧾 Facturas", "👤 Personal", "🕒 Actividad"])
     with tab_resumen:
         resumen.render()
     with tab_cancel:
         cancelaciones.render()
+    with tab_facturas:
+        facturas.render()
     with tab_personal:
         meseros.render()
     with tab_actividad:

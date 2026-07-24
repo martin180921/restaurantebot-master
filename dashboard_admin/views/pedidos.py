@@ -796,21 +796,25 @@ def _resumen_pagos(ids) -> dict:
             "submetodo": None, "comprobante": None, "desglose": desglose}
 
 
-def reimprimir_recibo(ids, titulo: str) -> None:
+def reimprimir_recibo(ids, titulo: str, documento_fiscal: dict | None = None) -> None:
     """Reimprime el recibo de una cuenta YA cobrada, reconstruido desde 'pagos'
     (_resumen_pagos). Nunca reabre el cajón (forzar_abrir_cajon=False: el efectivo de
     esa venta ya se guardó la primera vez) y marca el ticket como copia. Compartida por
     dialog_cobrar (cuando detecta que la cuenta ya está saldada) y la lista 'Cobradas
     hoy' de la caja simple (ver caja._dialog_cobrar_mesas) — sin este segundo punto de
     entrada, la reimpresión solo era alcanzable por una carrera improbable, nunca a
-    propósito."""
+    propósito.
+
+    'documento_fiscal' (opcional, bloque C): pásalo cuando la cuenta tenga un documento
+    fiscal EMITIDO (ver views/facturas.py) para que la copia conserve su CUFE/QR."""
     ids = [int(i) for i in ids]
     resumen = _resumen_pagos(ids)
     enqueue_recibo(ids, titulo, resumen["total"], resumen["abono_total"],
                    resumen["metodo"], submetodo=resumen.get("submetodo"),
                    comprobante=resumen.get("comprobante"),
                    desglose=resumen.get("desglose"), imprimir=True,
-                   forzar_abrir_cajon=False, copia=True)
+                   forzar_abrir_cajon=False, copia=True,
+                   documento_fiscal=documento_fiscal)
     audit.registrar("recibo_reimpreso", "pedido", ids[0], {"ids": ids})
 
 
