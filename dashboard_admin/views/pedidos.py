@@ -10,9 +10,11 @@ import time
 import auth
 import audit
 import empleados
+import facturacion
 from db import (engine, titulo_seccion, fmt_money, fecha_corta, flash, drain_toasts,
                 saldo_pedido, cobrado_pedido, _es_pagado, _a_entero,
-                aplicar_inventario, SinStock, ahora_bogota, hoy_bogota, metodos_pago)
+                aplicar_inventario, SinStock, ahora_bogota, hoy_bogota, metodos_pago,
+                facturacion_electronica)
 from utils.print_jobs import enqueue_recibo, enqueue_comanda, enqueue_prerecibo
 from utils.items import (formatear_items_html, lineas_por_categoria,
                          parse_items, etiqueta_item)
@@ -1619,6 +1621,36 @@ def dialog_cobrar(ids, titulo, total, uid):
         "🖨️ Imprimir recibo", key=f"imprimir_recibo_{uid}", value=False,
         help="El recibo solo se imprime si el cliente lo pide. En efectivo el cajón se abre igual.")
 
+    # Factura electrónica (bloque C del plan; APAGADA por defecto). Solo aparece si el
+    # restaurante la activó en Ajustes. El documento (factura de venta, con NIT/CC) se
+    # emite con el proveedor configurado ('simulado' por defecto, sin llamar a la DIAN)
+    # DESPUÉS de que el cobro ya quedó asentado — ver facturacion.emitir_para_cobro.
+    desea_factura = False
+    factura_doc = factura_nombre = factura_email = None
+    if facturacion_electronica():
+        desea_factura = st.toggle(
+            "🧾 Factura electrónica (opcional)", key=f"factura_{uid}", value=False,
+            help="Actívalo solo si el cliente la pide: emite un documento fiscal además del recibo.")
+        if desea_factura:
+            fc1, fc2 = st.columns(2)
+            with fc1:
+                factura_doc = (st.text_input(
+                    "NIT / Cédula", key=f"factura_doc_{uid}",
+                    placeholder="Documento del cliente",
+                ) or "").strip() or None
+            with fc2:
+                factura_nombre = (st.text_input(
+                    "Nombre / Razón social", key=f"factura_nombre_{uid}",
+                    placeholder="Nombre completo",
+                ) or "").strip() or None
+            factura_email = (st.text_input(
+                "Email (opcional, para enviar la factura)", key=f"factura_email_{uid}",
+                placeholder="correo@ejemplo.com",
+            ) or "").strip() or None
+            if not (factura_doc and factura_nombre):
+                bloqueo = bloqueo or ("Para la factura electrónica, ingresa el documento "
+                                      "y el nombre del cliente.")
+
     # ── Paso 3 · Confirmar — la tarjeta repite TODO lo elegido antes de asentar ──
     # Cerrar el checkout con un botón "Confirmar pago" a secas obligaba a recordar (o a
     # subir a releer) cuánto, de qué y con qué método se estaba cobrando. Aquí se resume
@@ -1709,6 +1741,17 @@ def dialog_cobrar(ids, titulo, total, uid):
                                recibido=recibe if es_efectivo else None,
                                submetodo=submetodo_val, comprobante=comprobante_val,
                                imprimir=imprimir_recibo)
+            # 3b) Factura electrónica (si se pidió): se emite DESPUÉS de que el cobro ya
+            # está commiteado — un fallo del proveedor nunca debe tumbar un pago ya
+            # asentado (emitir_para_cobro lo captura y registra 'rechazado').
+            if desea_factura:
+                _res_factura = facturacion.emitir_para_cobro(
+                    ids, aplicado, tipo="factura", cliente_doc=factura_doc,
+                    cliente_nombre=factura_nombre, cliente_email=factura_email)
+                if _res_factura and _res_factura.get("estado") == "emitido":
+                    flash(f"🧾 Factura {_res_factura.get('numero')} emitida", "🧾")
+                elif _res_factura:
+                    flash("⚠️ No se pudo emitir la factura; el cobro sí quedó registrado.", "⚠️")
             # Libro mayor: el cobro queda atribuido al cajero (base del informe de personal).
             # Tender y cambio en efectivo (puro o el tramo de efectivo de un mixto) ya salieron
             # del campo de tender. Se anotan en el libro mayor (auditable: permite detectar un
