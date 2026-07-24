@@ -375,6 +375,10 @@ def _distribuir_abono(pendientes, monto):
 # siendo válidas SIEMPRE para no rechazar pagos históricos ni configs recortadas.
 _SUBMETODOS_CLASICOS = {"nequi", "daviplata", "breb"}
 
+# Métodos de cobro válidos en el libro 'pagos'. 'tarjeta' = datáfono manual (bloque A del
+# plan): el aparato lo opera el cajero aparte, OLO solo registra el voucher.
+_METODOS_VALIDOS = {"efectivo", "transferencia", "tarjeta"}
+
 
 def _submetodos_validos() -> set:
     return _SUBMETODOS_CLASICOS | set(metodos_pago().get("transferencia", {}).keys())
@@ -403,7 +407,9 @@ def registrar_pago(ids, monto, metodo="efectivo", submetodo=None, comprobante=No
     comprobante + hora real de pago). Lee y escribe en la MISMA transacción
     (FOR UPDATE) sobre el saldo real.
 
-    submetodo/comprobante solo aplican a transferencias; en efectivo se guardan NULL.
+    submetodo solo aplica a transferencias (billetera); comprobante aplica a
+    transferencias (n.º de transacción) y a tarjeta (voucher/aprobación del datáfono);
+    en efectivo ambos se guardan NULL.
 
     H2 — devuelve el monto REALMENTE aplicado (suma de los abonos asentados). Si la cuenta
     ya estaba pagada (carrera entre dos cajas / doble toque sobre la caché de 8 s), el
@@ -411,13 +417,8 @@ def registrar_pago(ids, monto, metodo="efectivo", submetodo=None, comprobante=No
     usa ese 0 para NO imprimir un recibo fantasma ni auditar un cobro que no ocurrió."""
     ids = [int(i) for i in ids]
     monto = int(round(float(monto or 0)))
-    metodo = metodo if metodo in ("efectivo", "transferencia") else "efectivo"
-    if metodo == "transferencia":
-        sub = (str(submetodo or "").strip().lower() or None)
-        sub = sub if sub in _submetodos_validos() else None
-        comp = (str(comprobante or "").strip()[:60] or None)
-    else:
-        sub, comp = None, None   # el efectivo no lleva submétodo ni comprobante
+    metodo = metodo if metodo in _METODOS_VALIDOS else "efectivo"
+    sub, comp = _detalle_metodo(metodo, submetodo, comprobante)
     if not ids or monto <= 0:
         return 0
     sel = text("""
@@ -539,15 +540,19 @@ def valor_lineas_pagadas(pedido_id: int) -> int:
     return sum(l["pagada"] * l["precio"] for l in lineas_pagables(pedido_id))
 
 
-def _detalle_transferencia(metodo, submetodo, comprobante):
-    """(submetodo, comprobante) normalizados para el libro 'pagos': solo las transferencias
-    los llevan (en efectivo van NULL) y el submétodo debe ser uno de los válidos del
-    restaurante (ver _submetodos_validos)."""
-    if metodo != "transferencia":
+def _detalle_metodo(metodo, submetodo, comprobante):
+    """(submetodo, comprobante) normalizados para el libro 'pagos'. Submétodo (billetera)
+    solo aplica a transferencia y debe ser uno de los válidos del restaurante (ver
+    _submetodos_validos). Comprobante aplica a transferencia (n.º de transacción) y a
+    tarjeta (voucher/aprobación del datáfono); en efectivo ambos van NULL."""
+    if metodo not in ("transferencia", "tarjeta"):
         return None, None
+    comp = (str(comprobante or "").strip()[:60] or None)
+    if metodo != "transferencia":
+        return None, comp   # tarjeta: comprobante sí, submétodo no
     sub = (str(submetodo or "").strip().lower() or None)
     sub = sub if sub in _submetodos_validos() else None
-    return sub, (str(comprobante or "").strip()[:60] or None)
+    return sub, comp
 
 
 def _repartir_tramos(cobro, tramos):
@@ -637,10 +642,10 @@ def _cobrar_items(pedido_id, seleccion, tramos) -> int:
 
 
 def registrar_pago_items(pedido_id, seleccion, metodo="efectivo", submetodo=None, comprobante=None) -> int:
-    """Cobra unidades concretas de un pedido con UN método (efectivo o transferencia).
-    Ver _cobrar_items para el detalle y el contrato de retorno (H2)."""
-    metodo = metodo if metodo in ("efectivo", "transferencia") else "efectivo"
-    sub, comp = _detalle_transferencia(metodo, submetodo, comprobante)
+    """Cobra unidades concretas de un pedido con UN método (efectivo, transferencia o
+    tarjeta). Ver _cobrar_items para el detalle y el contrato de retorno (H2)."""
+    metodo = metodo if metodo in _METODOS_VALIDOS else "efectivo"
+    sub, comp = _detalle_metodo(metodo, submetodo, comprobante)
     return _cobrar_items(pedido_id, seleccion,
                          [{"metodo": metodo, "monto": None, "submetodo": sub,
                            "comprobante": comp}])
@@ -656,7 +661,7 @@ def registrar_pago_items_mixto(pedido_id, seleccion, efectivo,
     Es el caso real que antes obligaba a elegir: 'estos dos platos son míos, pago 20.000
     en efectivo y el resto por Nequi'. Ver registrar_pago_mixto para el equivalente por
     monto (sin atribuir platos)."""
-    sub, comp = _detalle_transferencia("transferencia", submetodo, comprobante)
+    sub, comp = _detalle_metodo("transferencia", submetodo, comprobante)
     return _cobrar_items(pedido_id, seleccion, [
         {"metodo": "efectivo", "monto": max(0, int(round(float(efectivo or 0)))),
          "submetodo": None, "comprobante": None},
