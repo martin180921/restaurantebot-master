@@ -169,6 +169,18 @@ def _submetodo_etiqueta(d: dict):
     return SUBMETODO_LABEL.get(str(d.get("submetodo") or "").lower())
 
 
+# Etiqueta imprimible de 'metodo' (libro 'pagos'). 'tarjeta' = datáfono manual (bloque A
+# del plan): el panel guarda 'tarjeta' pero en el ticket se rotula "Datáfono", no
+# "Tarjeta" a secas, para que quede claro que ya se cobró en el aparato del mostrador.
+METODO_LABEL = {"efectivo": "Efectivo", "transferencia": "Transferencia",
+               "tarjeta": "Datáfono", "mixto": "Mixto"}
+
+
+def _metodo_etiqueta(metodo) -> str:
+    m = str(metodo or "").lower()
+    return METODO_LABEL.get(m, m.capitalize() or "—")
+
+
 def _imprimir_encabezado_restaurante(printer, payload: dict) -> None:
     """Identidad del restaurante en el ticket (nombre/dirección/teléfono): la manda el
     panel desde 'ajustes' (replicabilidad). Payloads de paneles anteriores no traen
@@ -407,15 +419,16 @@ def imprimir_recibo(printer, payload: dict) -> None:
         printer.text(linea_precio("Pagado (Mixto)", payload.get("pagado", 0), ANCHO_B) + "\n")
         printer.set(bold=False)
         for tramo in desglose:
-            etiqueta = str(tramo.get("metodo", "")).capitalize()
+            etiqueta = _metodo_etiqueta(tramo.get("metodo"))
             if tramo.get("metodo") == "transferencia":
                 sub = _submetodo_etiqueta(tramo)
                 if sub:
                     etiqueta = f"{etiqueta} · {sub}"
             printer.text(linea_precio(f"  {etiqueta}", tramo.get("monto", 0), ANCHO_B) + "\n")
             comp_t = str(tramo.get("comprobante") or "").strip()
-            if tramo.get("metodo") == "transferencia" and comp_t:
-                printer.text(f"  Comp. {comp_t}\n")
+            if tramo.get("metodo") in ("transferencia", "tarjeta") and comp_t:
+                etiqueta_comp = "Voucher" if tramo.get("metodo") == "tarjeta" else "Comp."
+                printer.text(f"  {etiqueta_comp} {comp_t}\n")
             # Tender del tramo en efectivo (Recibido/Cambio), si vino.
             if tramo.get("metodo") == "efectivo" and tramo.get("recibido") is not None:
                 printer.text(linea_precio("  Recibido", tramo.get("recibido", 0), ANCHO_B) + "\n")
@@ -423,8 +436,9 @@ def imprimir_recibo(printer, payload: dict) -> None:
     else:
         printer.set(bold=True)
         # En transferencia, anexa la billetera (Nequi/Daviplata/Bre-B) a la etiqueta del
-        # método: 'Pagado (Transferencia · Nequi)'. En efectivo queda 'Pagado (Efectivo)'.
-        metodo = str(payload.get("metodo", "")).capitalize()
+        # método: 'Pagado (Transferencia · Nequi)'. En efectivo/datáfono queda tal cual
+        # ('Pagado (Efectivo)' / 'Pagado (Datáfono)').
+        metodo = _metodo_etiqueta(payload.get("metodo"))
         if payload.get("metodo") == "transferencia":
             sub = _submetodo_etiqueta(payload)
             if sub:
@@ -432,10 +446,12 @@ def imprimir_recibo(printer, payload: dict) -> None:
         printer.text(linea_precio(f"Pagado ({metodo})", payload.get("pagado", 0), ANCHO_B) + "\n")
         printer.set(bold=False)
 
-        # Comprobante de la transferencia (n.º de transacción), si se registró.
+        # Comprobante: n.º de transacción en transferencia, voucher/aprobación en
+        # datáfono. Si se registró.
         comprobante = str(payload.get("comprobante") or "").strip()
-        if payload.get("metodo") == "transferencia" and comprobante:
-            printer.text(f"Comp. {comprobante}\n")
+        if payload.get("metodo") in ("transferencia", "tarjeta") and comprobante:
+            etiqueta_comp = "Voucher" if payload.get("metodo") == "tarjeta" else "Comp."
+            printer.text(f"{etiqueta_comp} {comprobante}\n")
 
         if payload.get("metodo") == "efectivo" and payload.get("recibido") is not None:
             printer.text(linea_precio("Recibido", payload.get("recibido", 0), ANCHO_B) + "\n")
@@ -658,6 +674,29 @@ def _payload_demo_transfer() -> dict:
     }
 
 
+def _payload_demo_tarjeta() -> dict:
+    """Recibo de muestra pagado por DATÁFONO (bloque A · sin API) con voucher, para
+    previsualizar la etiqueta "Pagado (Datáfono)" y el n.º de aprobación en el ticket.
+    Sin cajón: la tarjeta nunca lo abre (regla del cajón SAT: solo efectivo)."""
+    return {
+        "mesa": "Mesa 7",
+        "mesero": "Lucía",
+        "items": [
+            {"tipo": "especial", "nombre": "Sancocho de gallina", "cantidad": 1, "precio": 26000, "componentes": []},
+            {"tipo": "bebida", "nombre": "Limonada natural", "cantidad": 1, "precio": 5000, "componentes": []},
+        ],
+        "total": 31000,
+        "pagado": 31000,
+        "saldo": 0,
+        "metodo": "tarjeta",
+        "comprobante": "AUTH0042",
+        "recibido": None,
+        "cambio": 0,
+        "abrir_cajon": False,
+        "pedido_ids": [0],
+    }
+
+
 class _DummyPrinter:
     """Impresora simulada para --dry-run: acumula texto en vez de mandarlo al hardware,
     para previsualizar el layout de 80mm sin papel ni escpos instalado."""
@@ -778,6 +817,7 @@ def modo_dry_run() -> int:
     """Renderiza recibo, prerecibo, comanda y cajón de muestra como TEXTO (sin impresora ni BD)."""
     for payload, render_fn in ((_payload_demo(), imprimir_recibo),
                                (_payload_demo_transfer(), imprimir_recibo),
+                               (_payload_demo_tarjeta(), imprimir_recibo),
                                (_payload_demo_prerecibo(), imprimir_prerecibo),
                                (_payload_demo_comanda(), imprimir_comanda),
                                (_payload_demo_cajon(), imprimir_solo_cajon)):
