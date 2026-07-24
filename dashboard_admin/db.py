@@ -1530,13 +1530,15 @@ def moneda_simbolo() -> str:
 _METODOS_PAGO_DEFAULT = {
     "efectivo": True,
     "transferencia": {"nequi": "Nequi", "daviplata": "Daviplata", "breb": "Bre-B"},
+    "tarjeta": False,
 }
 
 
 def metodos_pago() -> dict:
-    """{'efectivo': bool, 'transferencia': {clave: etiqueta}} desde el ajuste
-    'metodos_pago' (JSON). Malformado o ausente → el set clásico (fallback), para
-    que el cobro NUNCA quede sin métodos."""
+    """{'efectivo': bool, 'transferencia': {clave: etiqueta}, 'tarjeta': bool} desde el
+    ajuste 'metodos_pago' (JSON). Malformado o ausente → el set clásico (fallback), para
+    que el cobro NUNCA quede sin métodos. 'tarjeta' (datáfono manual, sin API) nace
+    apagada: solo la activa el restaurante que ya tiene el aparato."""
     raw = cargar_ajustes().get("metodos_pago")
     try:
         d = json.loads(raw) if raw else {}
@@ -1550,7 +1552,8 @@ def metodos_pago() -> dict:
     tr = {str(k).strip(): (str(v).strip() or str(k).strip())
           for k, v in tr.items() if str(k).strip()}
     ef = d.get("efectivo")
-    return {"efectivo": True if ef is None else bool(ef), "transferencia": tr}
+    return {"efectivo": True if ef is None else bool(ef), "transferencia": tr,
+            "tarjeta": bool(d.get("tarjeta", False))}
 
 
 # ── Base de clientes (la alimenta la app pública) ───────────────────────────────
