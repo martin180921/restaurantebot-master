@@ -634,6 +634,37 @@ def _ensure_schema():
             )
         """))
 
+        # documentos_fiscales: bloque C del plan de facturación electrónica (ver
+        # docs/plan_facturacion_y_datafono.md), APAGADO por defecto (ajuste
+        # 'facturacion_electronica'). Libro append-only, mismo espíritu que 'auditoria':
+        # una fila por documento emitido/rechazado/anulado por un PAC (o por el
+        # ProveedorSimulado de demo), enlazado a los pedidos que cobró. 'tipo' = 'pos'
+        # (documento equivalente, sin identificar cliente) | 'factura' (factura de venta,
+        # con NIT/CC). Ver facturacion.py.
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS documentos_fiscales (
+                id              SERIAL      PRIMARY KEY,
+                pedido_ids      TEXT        NOT NULL,
+                tipo            VARCHAR(10) NOT NULL DEFAULT 'pos',
+                numero          VARCHAR(40),
+                cufe            VARCHAR(120),
+                qr_texto        TEXT,
+                estado          VARCHAR(15) NOT NULL DEFAULT 'borrador',
+                proveedor       VARCHAR(30),
+                cliente_doc     VARCHAR(30),
+                cliente_nombre  VARCHAR(120),
+                cliente_email   VARCHAR(120),
+                monto           INTEGER     NOT NULL DEFAULT 0,
+                fecha           TIMESTAMP   NOT NULL DEFAULT NOW(),
+                respuesta_cruda JSONB,
+                restaurante_id  INTEGER     NOT NULL DEFAULT 1
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_documentos_fiscales_rid_fecha "
+            "ON documentos_fiscales (restaurante_id, fecha DESC)"
+        ))
+
 try:
     _ensure_schema()
 except Exception:
@@ -1563,6 +1594,22 @@ def metodos_pago() -> dict:
     ef = d.get("efectivo")
     return {"efectivo": True if ef is None else bool(ef), "transferencia": tr,
             "tarjeta": bool(d.get("tarjeta", False))}
+
+
+# ── Facturación electrónica (bloque C del plan; APAGADA por defecto) ────────────────
+def facturacion_electronica() -> bool:
+    """True si el restaurante activó la facturación electrónica en Ajustes. Con el
+    flag OFF (default) nada de facturacion.py se ejecuta: el recibo sigue siendo la
+    CUENTA no fiscal de siempre."""
+    raw = cargar_ajustes().get("facturacion_electronica")
+    return str(raw or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def proveedor_factura() -> str:
+    """Proveedor de facturación configurado (ver facturacion.py). 'simulado' (default):
+    genera un CUFE/QR de mentira para poder MOSTRARLE al restaurante cómo se vería su
+    factura, sin contratar ningún PAC ni llamar a la DIAN."""
+    return (cargar_ajustes().get("proveedor_factura") or "").strip().lower() or "simulado"
 
 
 # ── Base de clientes (la alimenta la app pública) ───────────────────────────────

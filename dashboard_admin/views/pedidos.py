@@ -10,9 +10,11 @@ import time
 import auth
 import audit
 import empleados
+import facturacion
 from db import (engine, titulo_seccion, fmt_money, fecha_corta, flash, drain_toasts,
                 saldo_pedido, cobrado_pedido, _es_pagado, _a_entero,
-                aplicar_inventario, SinStock, ahora_bogota, hoy_bogota, metodos_pago)
+                aplicar_inventario, SinStock, ahora_bogota, hoy_bogota, metodos_pago,
+                facturacion_electronica)
 from utils.print_jobs import enqueue_recibo, enqueue_comanda, enqueue_prerecibo
 from utils.items import (formatear_items_html, lineas_por_categoria,
                          parse_items, etiqueta_item)
@@ -799,21 +801,25 @@ def _resumen_pagos(ids) -> dict:
             "submetodo": None, "comprobante": None, "desglose": desglose}
 
 
-def reimprimir_recibo(ids, titulo: str) -> None:
+def reimprimir_recibo(ids, titulo: str, documento_fiscal: dict | None = None) -> None:
     """Reimprime el recibo de una cuenta YA cobrada, reconstruido desde 'pagos'
     (_resumen_pagos). Nunca reabre el cajón (forzar_abrir_cajon=False: el efectivo de
     esa venta ya se guardó la primera vez) y marca el ticket como copia. Compartida por
     dialog_cobrar (cuando detecta que la cuenta ya está saldada) y la lista 'Cobradas
     hoy' de la caja simple (ver caja._dialog_cobrar_mesas) — sin este segundo punto de
     entrada, la reimpresión solo era alcanzable por una carrera improbable, nunca a
-    propósito."""
+    propósito.
+
+    'documento_fiscal' (opcional, bloque C): pásalo cuando la cuenta tenga un documento
+    fiscal EMITIDO (ver views/facturas.py) para que la copia conserve su CUFE/QR."""
     ids = [int(i) for i in ids]
     resumen = _resumen_pagos(ids)
     enqueue_recibo(ids, titulo, resumen["total"], resumen["abono_total"],
                    resumen["metodo"], submetodo=resumen.get("submetodo"),
                    comprobante=resumen.get("comprobante"),
                    desglose=resumen.get("desglose"), imprimir=True,
-                   forzar_abrir_cajon=False, copia=True)
+                   forzar_abrir_cajon=False, copia=True,
+                   documento_fiscal=documento_fiscal)
     audit.registrar("recibo_reimpreso", "pedido", ids[0], {"ids": ids})
 
 
@@ -1642,6 +1648,36 @@ def dialog_cobrar(ids, titulo, total, uid):
         "🖨️ Imprimir recibo", key=f"imprimir_recibo_{uid}", value=False,
         help="El recibo solo se imprime si el cliente lo pide. En efectivo el cajón se abre igual.")
 
+    # Factura electrónica (bloque C del plan; APAGADA por defecto). Solo aparece si el
+    # restaurante la activó en Ajustes. El documento (factura de venta, con NIT/CC) se
+    # emite con el proveedor configurado ('simulado' por defecto, sin llamar a la DIAN)
+    # DESPUÉS de que el cobro ya quedó asentado — ver facturacion.emitir_para_cobro.
+    desea_factura = False
+    factura_doc = factura_nombre = factura_email = None
+    if facturacion_electronica():
+        desea_factura = st.toggle(
+            "🧾 Factura electrónica (opcional)", key=f"factura_{uid}", value=False,
+            help="Actívalo solo si el cliente la pide: emite un documento fiscal además del recibo.")
+        if desea_factura:
+            fc1, fc2 = st.columns(2)
+            with fc1:
+                factura_doc = (st.text_input(
+                    "NIT / Cédula", key=f"factura_doc_{uid}",
+                    placeholder="Documento del cliente",
+                ) or "").strip() or None
+            with fc2:
+                factura_nombre = (st.text_input(
+                    "Nombre / Razón social", key=f"factura_nombre_{uid}",
+                    placeholder="Nombre completo",
+                ) or "").strip() or None
+            factura_email = (st.text_input(
+                "Email (opcional, para enviar la factura)", key=f"factura_email_{uid}",
+                placeholder="correo@ejemplo.com",
+            ) or "").strip() or None
+            if not (factura_doc and factura_nombre):
+                bloqueo = bloqueo or ("Para la factura electrónica, ingresa el documento "
+                                      "y el nombre del cliente.")
+
     # ── Paso 3 · Confirmar — la tarjeta repite TODO lo elegido antes de asentar ──
     # Cerrar el checkout con un botón "Confirmar pago" a secas obligaba a recordar (o a
     # subir a releer) cuánto, de qué y con qué método se estaba cobrando. Aquí se resume
@@ -1721,7 +1757,22 @@ def dialog_cobrar(ids, titulo, total, uid):
                       "no se registró de nuevo.", "⚠️")
                 st.rerun()
 
-            # 3) Cobro confirmado por 'aplicado' → recibo + libro mayor con el monto REAL.
+            # 3) Factura electrónica (si se pidió): se emite AHORA, DESPUÉS de que el
+            # cobro ya está commiteado (un fallo del proveedor nunca debe tumbar un pago
+            # ya asentado — emitir_para_cobro lo captura y registra 'rechazado') pero
+            # ANTES de encolar el recibo, para poder imprimir su CUFE/QR en el mismo
+            # ticket (ver 4).
+            _res_factura = None
+            if desea_factura:
+                _res_factura = facturacion.emitir_para_cobro(
+                    ids, aplicado, tipo="factura", cliente_doc=factura_doc,
+                    cliente_nombre=factura_nombre, cliente_email=factura_email)
+                if _res_factura and _res_factura.get("estado") == "emitido":
+                    flash(f"🧾 Factura {_res_factura.get('numero')} emitida", "🧾")
+                elif _res_factura:
+                    flash("⚠️ No se pudo emitir la factura; el cobro sí quedó registrado.", "⚠️")
+
+            # 4) Cobro confirmado por 'aplicado' → recibo + libro mayor con el monto REAL.
             if es_mixto:
                 # El tramo de efectivo lleva su tender para imprimir Recibido/Cambio.
                 ef_tramo = {"metodo": "efectivo", "monto": ef_monto}
@@ -1731,13 +1782,13 @@ def dialog_cobrar(ids, titulo, total, uid):
                     ef_tramo,
                     {"metodo": "transferencia", "monto": tr_monto,
                      "submetodo": submetodo_val, "comprobante": comprobante_val},
-                ], imprimir=imprimir_recibo)
+                ], imprimir=imprimir_recibo, documento_fiscal=_res_factura)
             else:
                 # 'recibe' solo existe en la rama de efectivo. abrir_cajon lo decide el helper.
                 enqueue_recibo(ids, titulo, total, aplicado, metodo_pago,
                                recibido=recibe if es_efectivo else None,
                                submetodo=submetodo_val, comprobante=comprobante_val,
-                               imprimir=imprimir_recibo)
+                               imprimir=imprimir_recibo, documento_fiscal=_res_factura)
             # Libro mayor: el cobro queda atribuido al cajero (base del informe de personal).
             # Tender y cambio en efectivo (puro o el tramo de efectivo de un mixto) ya salieron
             # del campo de tender. Se anotan en el libro mayor (auditable: permite detectar un

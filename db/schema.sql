@@ -351,6 +351,31 @@ CREATE TABLE IF NOT EXISTS agentes_estado (
     cola_pendiente INTEGER   NOT NULL DEFAULT 0
 );
 
+-- Facturación electrónica (bloque C del plan en docs/plan_facturacion_y_datafono.md),
+-- APAGADA por defecto (ajuste 'facturacion_electronica'). Libro append-only, mismo
+-- espíritu que 'auditoria': una fila por documento fiscal emitido/rechazado/anulado
+-- (por un PAC real o por el ProveedorSimulado de demo), enlazado a los pedidos que
+-- cobró. Ver dashboard_admin/facturacion.py.
+CREATE TABLE IF NOT EXISTS documentos_fiscales (
+    id              SERIAL      PRIMARY KEY,
+    pedido_ids      TEXT        NOT NULL,
+    tipo            VARCHAR(10) NOT NULL DEFAULT 'pos',
+    numero          VARCHAR(40),
+    cufe            VARCHAR(120),
+    qr_texto        TEXT,
+    estado          VARCHAR(15) NOT NULL DEFAULT 'borrador',
+    proveedor       VARCHAR(30),
+    cliente_doc     VARCHAR(30),
+    cliente_nombre  VARCHAR(120),
+    cliente_email   VARCHAR(120),
+    monto           INTEGER     NOT NULL DEFAULT 0,
+    fecha           TIMESTAMP   NOT NULL DEFAULT NOW(),
+    respuesta_cruda JSONB,
+    restaurante_id  INTEGER     NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_documentos_fiscales_rid_fecha
+    ON documentos_fiscales (restaurante_id, fecha DESC);
+
 -- ── Upgrade de tablas preexistentes (idempotente) ───────────────────────────
 -- Si menu/pedidos YA existían (base de datos en uso), los CREATE de arriba no los
 -- tocan, así que estos ALTER garantizan las columnas nuevas sin perder datos —
@@ -438,6 +463,13 @@ INSERT INTO ajustes (clave, valor) VALUES
     ('bot_saludo', E'¡Hola! \U0001F44B Bienvenido a *{nombre}*.\n\n\U0001F4F2 Haz tu pedido a domicilio o para llevar desde nuestra carta digital:\n{link}\n\nElige cómo lo quieres, arma tu pedido y nosotros nos encargamos. ¡Gracias!'),
     ('metodos_pago', '{"efectivo": true, "transferencia": {"nequi": "Nequi", "daviplata": "Daviplata", "breb": "Bre-B"}}'),
     ('moneda_simbolo', '$')
+ON CONFLICT (clave) DO NOTHING;
+
+-- Facturación electrónica: APAGADA por defecto, proveedor 'simulado' (sin API real,
+-- solo para demo). Ver dashboard_admin/facturacion.py.
+INSERT INTO ajustes (clave, valor) VALUES
+    ('facturacion_electronica', 'false'),
+    ('proveedor_factura',       'simulado')
 ON CONFLICT (clave) DO NOTHING;
 
 -- Grupos clásicos del Plato del Día. Solo siembra si la tabla está vacía (no
