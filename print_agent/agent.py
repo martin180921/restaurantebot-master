@@ -355,6 +355,34 @@ def _imprimir_items(printer, items, grande: bool = False, detalle: bool = True) 
             printer.text(f"   * {etiqueta}: {valor}\n")
 
 
+def _imprimir_bloque_fiscal(printer, fiscal: dict | None) -> None:
+    """Encabezado + CUFE + QR de un documento fiscal emitido (bloque C del plan de
+    facturación electrónica). 'fiscal' = {tipo, numero, cufe, qr_texto} o None (nada que
+    imprimir). El QR usa printer.qr() de python-escpos; si la impresora/dummy no lo
+    soporta, se omite sin romper el resto del ticket (best-effort, como el resto del
+    agente ante fallos de hardware)."""
+    if not fiscal:
+        return
+    encabezado = ("FACTURA ELECTRONICA DE VENTA" if fiscal.get("tipo") == "factura"
+                 else "DOCUMENTO EQUIVALENTE POS")
+    printer.text("-" * ANCHO_B + "\n")
+    printer.set(font="a", align="center", bold=True)
+    printer.text(f"{encabezado}\n")
+    printer.set(font="b", bold=False, align="left")
+    if fiscal.get("numero"):
+        printer.text(f"No. {fiscal['numero']}\n")
+    if fiscal.get("cufe"):
+        printer.text(f"CUFE: {fiscal['cufe']}\n")
+    if fiscal.get("qr_texto"):
+        printer.set(align="center")
+        try:
+            printer.qr(fiscal["qr_texto"], size=6)
+        except Exception:
+            pass
+    printer.set(align="center")
+    printer.text("Verifique este documento en dian.gov.co\n")
+
+
 def imprimir_recibo(printer, payload: dict) -> None:
     """Compone y envía el ticket de 80mm. El cajón (si aplica) se abre primero."""
     # 1) Cajón SAT al inicio del buffer, ANTES de cualquier texto, si el cobro fue
@@ -448,6 +476,12 @@ def imprimir_recibo(printer, payload: dict) -> None:
         printer.set(bold=False)
         printer.set(align="center")
         printer.text("** CUENTA AUN ABIERTA **\n")
+
+    # 4b) Bloque fiscal (bloque C del plan de facturación electrónica): solo aparece si
+    # el cobro emitió un documento (payload['fiscal'], ver print_jobs.enqueue_recibo).
+    # Sin facturación activada, o si el documento no se emitió, esta sección no imprime
+    # nada y el ticket queda igual que siempre.
+    _imprimir_bloque_fiscal(printer, payload.get("fiscal"))
 
     # 5) Pie + corte automático.
     printer.set(align="center")
@@ -658,6 +692,36 @@ def _payload_demo_transfer() -> dict:
     }
 
 
+def _payload_demo_factura() -> dict:
+    """Recibo de muestra CON FACTURA ELECTRÓNICA (bloque C · proveedor simulado), para
+    previsualizar el encabezado fiscal + CUFE + QR al final del ticket. Mismo aspecto que
+    produciría facturacion.ProveedorSimulado.emitir() vía print_jobs.enqueue_recibo."""
+    return {
+        "mesa": "Mesa 2",
+        "mesero": "Carlos",
+        "items": [
+            {"tipo": "especial", "nombre": "Mojarra frita", "cantidad": 1, "precio": 32000, "componentes": []},
+            {"tipo": "bebida", "nombre": "Limonada de coco", "cantidad": 1, "precio": 7000, "componentes": []},
+        ],
+        "total": 39000,
+        "pagado": 39000,
+        "saldo": 0,
+        "metodo": "transferencia",
+        "submetodo": "nequi",
+        "comprobante": "M9988776655",
+        "recibido": None,
+        "cambio": 0,
+        "abrir_cajon": False,
+        "pedido_ids": [0],
+        "fiscal": {
+            "tipo": "factura",
+            "numero": "SETP482913",
+            "cufe": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678abcdef0",
+            "qr_texto": "https://catalogo-vpfe.dian.gov.co/document/searchqr?documentkey=a1b2c3d4",
+        },
+    }
+
+
 class _DummyPrinter:
     """Impresora simulada para --dry-run: acumula texto en vez de mandarlo al hardware,
     para previsualizar el layout de 80mm sin papel ni escpos instalado."""
@@ -672,6 +736,9 @@ class _DummyPrinter:
 
     def _raw(self, data):
         self._buf.append(f"[RAW {data!r}  ← pulso de cajón]\n")
+
+    def qr(self, texto, **_kw):
+        self._buf.append(f"[QR {texto}]\n")
 
     def cut(self):
         self._buf.append("─" * ANCHO + "  ✂\n")
@@ -778,6 +845,7 @@ def modo_dry_run() -> int:
     """Renderiza recibo, prerecibo, comanda y cajón de muestra como TEXTO (sin impresora ni BD)."""
     for payload, render_fn in ((_payload_demo(), imprimir_recibo),
                                (_payload_demo_transfer(), imprimir_recibo),
+                               (_payload_demo_factura(), imprimir_recibo),
                                (_payload_demo_prerecibo(), imprimir_prerecibo),
                                (_payload_demo_comanda(), imprimir_comanda),
                                (_payload_demo_cajon(), imprimir_solo_cajon)):

@@ -140,7 +140,7 @@ def enqueue_recibo(ids, titulo: str, total: int, abono: int, metodo: str,
                    recibido: int | None = None, submetodo: str | None = None,
                    comprobante: str | None = None, desglose: list | None = None,
                    imprimir: bool = True, forzar_abrir_cajon: bool | None = None,
-                   copia: bool = False) -> None:
+                   copia: bool = False, documento_fiscal: dict | None = None) -> None:
     """Encola el ticket de un cobro recién commiteado.
 
     Regla del cajón SAT: solo se abre cuando hubo efectivo (abrir_cajon).
@@ -166,6 +166,11 @@ def enqueue_recibo(ids, titulo: str, total: int, abono: int, metodo: str,
 
     'copia' (default False): marca el payload como una REIMPRESIÓN (no un cobro nuevo);
     el print_agent la rotula 'COPIA' en el ticket para que no se confunda con el original.
+
+    'documento_fiscal' (opcional, bloque C del plan de facturación): resultado de
+    facturacion.emitir_para_cobro (numero/cufe/qr_texto/estado). Solo si su estado es
+    'emitido' se agrega el bloque fiscal (CUFE + QR) al ticket; con la facturación
+    apagada o un documento rechazado, el recibo sale igual que siempre.
 
     Tolera cualquier fallo: la impresión no debe tumbar el cobro ya registrado.
     """
@@ -210,6 +215,13 @@ def enqueue_recibo(ids, titulo: str, total: int, abono: int, metodo: str,
             "copia": bool(copia),
         }
         payload.update(_branding_payload())
+        if documento_fiscal and documento_fiscal.get("estado") == "emitido":
+            payload["fiscal"] = {
+                "tipo": "factura",
+                "numero": documento_fiscal.get("numero"),
+                "cufe": documento_fiscal.get("cufe"),
+                "qr_texto": documento_fiscal.get("qr_texto"),
+            }
         if desg:
             tramos = []
             for d in desg:

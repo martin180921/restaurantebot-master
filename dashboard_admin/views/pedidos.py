@@ -1724,7 +1724,22 @@ def dialog_cobrar(ids, titulo, total, uid):
                       "no se registró de nuevo.", "⚠️")
                 st.rerun()
 
-            # 3) Cobro confirmado por 'aplicado' → recibo + libro mayor con el monto REAL.
+            # 3) Factura electrónica (si se pidió): se emite AHORA, DESPUÉS de que el
+            # cobro ya está commiteado (un fallo del proveedor nunca debe tumbar un pago
+            # ya asentado — emitir_para_cobro lo captura y registra 'rechazado') pero
+            # ANTES de encolar el recibo, para poder imprimir su CUFE/QR en el mismo
+            # ticket (ver 4).
+            _res_factura = None
+            if desea_factura:
+                _res_factura = facturacion.emitir_para_cobro(
+                    ids, aplicado, tipo="factura", cliente_doc=factura_doc,
+                    cliente_nombre=factura_nombre, cliente_email=factura_email)
+                if _res_factura and _res_factura.get("estado") == "emitido":
+                    flash(f"🧾 Factura {_res_factura.get('numero')} emitida", "🧾")
+                elif _res_factura:
+                    flash("⚠️ No se pudo emitir la factura; el cobro sí quedó registrado.", "⚠️")
+
+            # 4) Cobro confirmado por 'aplicado' → recibo + libro mayor con el monto REAL.
             if es_mixto:
                 # El tramo de efectivo lleva su tender para imprimir Recibido/Cambio.
                 ef_tramo = {"metodo": "efectivo", "monto": ef_monto}
@@ -1734,24 +1749,13 @@ def dialog_cobrar(ids, titulo, total, uid):
                     ef_tramo,
                     {"metodo": "transferencia", "monto": tr_monto,
                      "submetodo": submetodo_val, "comprobante": comprobante_val},
-                ], imprimir=imprimir_recibo)
+                ], imprimir=imprimir_recibo, documento_fiscal=_res_factura)
             else:
                 # 'recibe' solo existe en la rama de efectivo. abrir_cajon lo decide el helper.
                 enqueue_recibo(ids, titulo, total, aplicado, metodo_pago,
                                recibido=recibe if es_efectivo else None,
                                submetodo=submetodo_val, comprobante=comprobante_val,
-                               imprimir=imprimir_recibo)
-            # 3b) Factura electrónica (si se pidió): se emite DESPUÉS de que el cobro ya
-            # está commiteado — un fallo del proveedor nunca debe tumbar un pago ya
-            # asentado (emitir_para_cobro lo captura y registra 'rechazado').
-            if desea_factura:
-                _res_factura = facturacion.emitir_para_cobro(
-                    ids, aplicado, tipo="factura", cliente_doc=factura_doc,
-                    cliente_nombre=factura_nombre, cliente_email=factura_email)
-                if _res_factura and _res_factura.get("estado") == "emitido":
-                    flash(f"🧾 Factura {_res_factura.get('numero')} emitida", "🧾")
-                elif _res_factura:
-                    flash("⚠️ No se pudo emitir la factura; el cobro sí quedó registrado.", "⚠️")
+                               imprimir=imprimir_recibo, documento_fiscal=_res_factura)
             # Libro mayor: el cobro queda atribuido al cajero (base del informe de personal).
             # Tender y cambio en efectivo (puro o el tramo de efectivo de un mixto) ya salieron
             # del campo de tender. Se anotan en el libro mayor (auditable: permite detectar un
