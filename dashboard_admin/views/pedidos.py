@@ -1481,11 +1481,20 @@ def dialog_cobrar(ids, titulo, total, uid):
     # y oculta su label → ponemos uno propio con st.caption.
     st.markdown("<br>", unsafe_allow_html=True)
     st.caption("Método de pago")
+    # Datáfono (bloque A · sin API): solo aparece si el restaurante lo activó en Ajustes
+    # (metodos_pago().tarjeta). El aparato lo opera el cajero aparte; aquí solo se
+    # registra el voucher/aprobación. 💳 pasa a ser el ícono del datáfono → la
+    # transferencia usa 📲 para no repetirlo.
+    _opciones_metodo = ["💵 Efectivo", "📲 Transferencia"]
+    if bool(metodos_pago().get("tarjeta")):
+        _opciones_metodo.append("💳 Datáfono")
+    _opciones_metodo.append("🔀 Mixto")
     metodo = st.radio(
-        "Método de pago", ["💵 Efectivo", "💳 Transferencia", "🔀 Mixto"],
+        "Método de pago", _opciones_metodo,
         horizontal=True, label_visibility="collapsed", key=f"metodo_{uid}",
     )
     es_efectivo = metodo == "💵 Efectivo"
+    es_tarjeta = metodo == "💳 Datáfono"
     es_mixto = metodo == "🔀 Mixto"
 
     # 'Mixto' = UNA persona paga ESTE cobro repartiéndolo entre efectivo y transferencia
@@ -1520,7 +1529,7 @@ def dialog_cobrar(ids, titulo, total, uid):
             f'<div style="font-family:\'DM Sans\',sans-serif; font-weight:700; font-size:1.1rem; '
             f'color:#26262b;">${fmt_money(ef_monto)}</div></div>'
             '<div style="flex:1; border:1px solid #ececec; border-radius:10px; padding:8px 10px;">'
-            '<div style="font-size:0.74rem; color:#6b6b64;">💳 Transferencia</div>'
+            '<div style="font-size:0.74rem; color:#6b6b64;">📲 Transferencia</div>'
             f'<div style="font-family:\'DM Sans\',sans-serif; font-weight:700; font-size:1.1rem; '
             f'color:#26262b;">${fmt_money(tr_monto)}</div></div></div>',
             unsafe_allow_html=True,
@@ -1533,8 +1542,9 @@ def dialog_cobrar(ids, titulo, total, uid):
     # billetera + comprobante. Las billeteras salen del ajuste 'metodos_pago'
     # (configurable por restaurante); sin billeteras configuradas se omite el radio.
     # El comprobante vive solo en este cobro de caja (no en la app pública del cliente).
+    # Tarjeta (datáfono) tiene su propio campo más abajo: no lleva billetera.
     submetodo_val, comprobante_val, sub_label = None, None, "Transferencia"
-    if not es_efectivo:
+    if not es_efectivo and not es_tarjeta:
         _SUBMETODOS = {etq: clave
                        for clave, etq in metodos_pago().get("transferencia", {}).items()}
         if _SUBMETODOS:
@@ -1547,6 +1557,14 @@ def dialog_cobrar(ids, titulo, total, uid):
         comprobante_val = (st.text_input(
             "N.º de comprobante", key=f"comprobante_{uid}",
             placeholder="Referencia de la transacción (opcional)",
+        ) or "").strip() or None
+
+    # Datáfono: no hay billetera que elegir (la maneja el aparato); solo el voucher/número
+    # de aprobación, opcional, para poder conciliar contra el reporte del banco después.
+    if es_tarjeta:
+        comprobante_val = (st.text_input(
+            "N.º de aprobación / voucher", key=f"voucher_{uid}",
+            placeholder="Aprobación del datáfono (opcional)",
         ) or "").strip() or None
 
     # Efectivo recibido → cambio = entregado − monto en efectivo (nunca < 0). Aplica al
@@ -1613,7 +1631,7 @@ def dialog_cobrar(ids, titulo, total, uid):
         bloqueo = f"Falta efectivo: ${fmt_money(monto_efectivo - recibe)}."
     elif mixto_invalido:
         bloqueo = ("Un cobro mixto lleva algo en cada método. Reparte el monto o elige "
-                   "💵 Efectivo / 💳 Transferencia.")
+                   "💵 Efectivo / 📲 Transferencia.")
     else:
         bloqueo = ""
 
@@ -1640,13 +1658,18 @@ def dialog_cobrar(ids, titulo, total, uid):
                 detalle.append(f"{q} × {l['nombre']} · ${fmt_money(q * l['precio'])}")
     else:
         concepto = "Cuenta completa" if abono >= total else "Abono parcial"
-    etiqueta_transf = f"💳 {sub_label}"
+    etiqueta_transf = f"📲 {sub_label}"
     if comprobante_val:
         etiqueta_transf += f" · {comprobante_val}"
+    etiqueta_tarjeta = "💳 Datáfono"
+    if comprobante_val:
+        etiqueta_tarjeta += f" · {comprobante_val}"
     if es_mixto:
         tramos_card = [("💵 Efectivo", ef_monto), (etiqueta_transf, tr_monto)]
     elif es_efectivo:
         tramos_card = [("💵 Efectivo", abono)]
+    elif es_tarjeta:
+        tramos_card = [(etiqueta_tarjeta, abono)]
     else:
         tramos_card = [(etiqueta_transf, abono)]
     st.markdown(
@@ -1675,7 +1698,8 @@ def dialog_cobrar(ids, titulo, total, uid):
                         ids, ef_monto, tr_monto,
                         submetodo=submetodo_val, comprobante=comprobante_val) or 0)
             else:
-                metodo_pago = "efectivo" if es_efectivo else "transferencia"
+                metodo_pago = ("efectivo" if es_efectivo else
+                               "tarjeta" if es_tarjeta else "transferencia")
                 if por_plato:
                     # Cobra las unidades elegidas (también suma a pago_lineas). El subtotal
                     # ya es 'abono' (= valor de lo seleccionado).
