@@ -195,6 +195,15 @@ def _ensure_schema():
                 estado                 VARCHAR(10) NOT NULL DEFAULT 'abierto'
             )
         """))
+        # tarjeta_esperada/tarjeta_real (bloque A del plan de datáfono): la tarjeta se
+        # concilia aparte del efectivo y la transferencia (no entra al cajón físico,
+        # igual que la transferencia; su comisión y liquidación llegan por el banco).
+        # Aditivo: turnos ya cerrados quedan en 0/NULL sin perder datos.
+        conn.execute(text(
+            "ALTER TABLE cierres_caja ADD COLUMN IF NOT EXISTS "
+            "tarjeta_esperada INTEGER NOT NULL DEFAULT 0"))
+        conn.execute(text(
+            "ALTER TABLE cierres_caja ADD COLUMN IF NOT EXISTS tarjeta_real INTEGER"))
         # movimientos_caja: flujo de efectivo del cajón fuera de las ventas (gastos de
         # caja con su devolución de cambio, y base de cambio del repartidor con el float
         # devuelto al volver). 'estado'='abierto' = dinero aún afuera; 'cerrado' = ya
@@ -1530,13 +1539,15 @@ def moneda_simbolo() -> str:
 _METODOS_PAGO_DEFAULT = {
     "efectivo": True,
     "transferencia": {"nequi": "Nequi", "daviplata": "Daviplata", "breb": "Bre-B"},
+    "tarjeta": False,
 }
 
 
 def metodos_pago() -> dict:
-    """{'efectivo': bool, 'transferencia': {clave: etiqueta}} desde el ajuste
-    'metodos_pago' (JSON). Malformado o ausente → el set clásico (fallback), para
-    que el cobro NUNCA quede sin métodos."""
+    """{'efectivo': bool, 'transferencia': {clave: etiqueta}, 'tarjeta': bool} desde el
+    ajuste 'metodos_pago' (JSON). Malformado o ausente → el set clásico (fallback), para
+    que el cobro NUNCA quede sin métodos. 'tarjeta' (datáfono manual, sin API) nace
+    apagada: solo la activa el restaurante que ya tiene el aparato."""
     raw = cargar_ajustes().get("metodos_pago")
     try:
         d = json.loads(raw) if raw else {}
@@ -1550,7 +1561,8 @@ def metodos_pago() -> dict:
     tr = {str(k).strip(): (str(v).strip() or str(k).strip())
           for k, v in tr.items() if str(k).strip()}
     ef = d.get("efectivo")
-    return {"efectivo": True if ef is None else bool(ef), "transferencia": tr}
+    return {"efectivo": True if ef is None else bool(ef), "transferencia": tr,
+            "tarjeta": bool(d.get("tarjeta", False))}
 
 
 # ── Base de clientes (la alimenta la app pública) ───────────────────────────────

@@ -1017,6 +1017,11 @@ def _render_ajustes():
     with c1:
         mp_ef = st.checkbox("Acepta efectivo", value=bool(mp.get("efectivo", True)),
                             key="aj_mp_ef")
+        mp_tarjeta = st.checkbox(
+            "Acepta datáfono / tarjeta", value=bool(mp.get("tarjeta", False)),
+            key="aj_mp_tarjeta",
+            help="Datáfono físico que ya opera el restaurante (Redeban, Bold, etc.). "
+                 "El cobro solo registra el voucher; OLO no se conecta al aparato.")
     with c2:
         mp_txt = st.text_area(
             "Transferencias aceptadas (una por línea: clave=Etiqueta, o solo la etiqueta)",
@@ -1044,7 +1049,8 @@ def _render_ajustes():
             "restaurante_telefono": r_tel.strip(),
             "bot_saludo": saludo.strip(),
             "metodos_pago": json.dumps(
-                {"efectivo": bool(mp_ef), "transferencia": transf}, ensure_ascii=False),
+                {"efectivo": bool(mp_ef), "transferencia": transf,
+                 "tarjeta": bool(mp_tarjeta)}, ensure_ascii=False),
         })
         st.rerun()
 

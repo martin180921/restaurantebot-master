@@ -375,6 +375,10 @@ def _distribuir_abono(pendientes, monto):
 # siendo válidas SIEMPRE para no rechazar pagos históricos ni configs recortadas.
 _SUBMETODOS_CLASICOS = {"nequi", "daviplata", "breb"}
 
+# Métodos de cobro válidos en el libro 'pagos'. 'tarjeta' = datáfono manual (bloque A del
+# plan): el aparato lo opera el cajero aparte, OLO solo registra el voucher.
+_METODOS_VALIDOS = {"efectivo", "transferencia", "tarjeta"}
+
 
 def _submetodos_validos() -> set:
     return _SUBMETODOS_CLASICOS | set(metodos_pago().get("transferencia", {}).keys())
@@ -403,7 +407,9 @@ def registrar_pago(ids, monto, metodo="efectivo", submetodo=None, comprobante=No
     comprobante + hora real de pago). Lee y escribe en la MISMA transacción
     (FOR UPDATE) sobre el saldo real.
 
-    submetodo/comprobante solo aplican a transferencias; en efectivo se guardan NULL.
+    submetodo solo aplica a transferencias (billetera); comprobante aplica a
+    transferencias (n.º de transacción) y a tarjeta (voucher/aprobación del datáfono);
+    en efectivo ambos se guardan NULL.
 
     H2 — devuelve el monto REALMENTE aplicado (suma de los abonos asentados). Si la cuenta
     ya estaba pagada (carrera entre dos cajas / doble toque sobre la caché de 8 s), el
@@ -411,13 +417,8 @@ def registrar_pago(ids, monto, metodo="efectivo", submetodo=None, comprobante=No
     usa ese 0 para NO imprimir un recibo fantasma ni auditar un cobro que no ocurrió."""
     ids = [int(i) for i in ids]
     monto = int(round(float(monto or 0)))
-    metodo = metodo if metodo in ("efectivo", "transferencia") else "efectivo"
-    if metodo == "transferencia":
-        sub = (str(submetodo or "").strip().lower() or None)
-        sub = sub if sub in _submetodos_validos() else None
-        comp = (str(comprobante or "").strip()[:60] or None)
-    else:
-        sub, comp = None, None   # el efectivo no lleva submétodo ni comprobante
+    metodo = metodo if metodo in _METODOS_VALIDOS else "efectivo"
+    sub, comp = _detalle_metodo(metodo, submetodo, comprobante)
     if not ids or monto <= 0:
         return 0
     sel = text("""
@@ -539,15 +540,19 @@ def valor_lineas_pagadas(pedido_id: int) -> int:
     return sum(l["pagada"] * l["precio"] for l in lineas_pagables(pedido_id))
 
 
-def _detalle_transferencia(metodo, submetodo, comprobante):
-    """(submetodo, comprobante) normalizados para el libro 'pagos': solo las transferencias
-    los llevan (en efectivo van NULL) y el submétodo debe ser uno de los válidos del
-    restaurante (ver _submetodos_validos)."""
-    if metodo != "transferencia":
+def _detalle_metodo(metodo, submetodo, comprobante):
+    """(submetodo, comprobante) normalizados para el libro 'pagos'. Submétodo (billetera)
+    solo aplica a transferencia y debe ser uno de los válidos del restaurante (ver
+    _submetodos_validos). Comprobante aplica a transferencia (n.º de transacción) y a
+    tarjeta (voucher/aprobación del datáfono); en efectivo ambos van NULL."""
+    if metodo not in ("transferencia", "tarjeta"):
         return None, None
+    comp = (str(comprobante or "").strip()[:60] or None)
+    if metodo != "transferencia":
+        return None, comp   # tarjeta: comprobante sí, submétodo no
     sub = (str(submetodo or "").strip().lower() or None)
     sub = sub if sub in _submetodos_validos() else None
-    return sub, (str(comprobante or "").strip()[:60] or None)
+    return sub, comp
 
 
 def _repartir_tramos(cobro, tramos):
@@ -637,10 +642,10 @@ def _cobrar_items(pedido_id, seleccion, tramos) -> int:
 
 
 def registrar_pago_items(pedido_id, seleccion, metodo="efectivo", submetodo=None, comprobante=None) -> int:
-    """Cobra unidades concretas de un pedido con UN método (efectivo o transferencia).
-    Ver _cobrar_items para el detalle y el contrato de retorno (H2)."""
-    metodo = metodo if metodo in ("efectivo", "transferencia") else "efectivo"
-    sub, comp = _detalle_transferencia(metodo, submetodo, comprobante)
+    """Cobra unidades concretas de un pedido con UN método (efectivo, transferencia o
+    tarjeta). Ver _cobrar_items para el detalle y el contrato de retorno (H2)."""
+    metodo = metodo if metodo in _METODOS_VALIDOS else "efectivo"
+    sub, comp = _detalle_metodo(metodo, submetodo, comprobante)
     return _cobrar_items(pedido_id, seleccion,
                          [{"metodo": metodo, "monto": None, "submetodo": sub,
                            "comprobante": comp}])
@@ -656,7 +661,7 @@ def registrar_pago_items_mixto(pedido_id, seleccion, efectivo,
     Es el caso real que antes obligaba a elegir: 'estos dos platos son míos, pago 20.000
     en efectivo y el resto por Nequi'. Ver registrar_pago_mixto para el equivalente por
     monto (sin atribuir platos)."""
-    sub, comp = _detalle_transferencia("transferencia", submetodo, comprobante)
+    sub, comp = _detalle_metodo("transferencia", submetodo, comprobante)
     return _cobrar_items(pedido_id, seleccion, [
         {"metodo": "efectivo", "monto": max(0, int(round(float(efectivo or 0)))),
          "submetodo": None, "comprobante": None},
@@ -1476,11 +1481,20 @@ def dialog_cobrar(ids, titulo, total, uid):
     # y oculta su label → ponemos uno propio con st.caption.
     st.markdown("<br>", unsafe_allow_html=True)
     st.caption("Método de pago")
+    # Datáfono (bloque A · sin API): solo aparece si el restaurante lo activó en Ajustes
+    # (metodos_pago().tarjeta). El aparato lo opera el cajero aparte; aquí solo se
+    # registra el voucher/aprobación. 💳 pasa a ser el ícono del datáfono → la
+    # transferencia usa 📲 para no repetirlo.
+    _opciones_metodo = ["💵 Efectivo", "📲 Transferencia"]
+    if bool(metodos_pago().get("tarjeta")):
+        _opciones_metodo.append("💳 Datáfono")
+    _opciones_metodo.append("🔀 Mixto")
     metodo = st.radio(
-        "Método de pago", ["💵 Efectivo", "💳 Transferencia", "🔀 Mixto"],
+        "Método de pago", _opciones_metodo,
         horizontal=True, label_visibility="collapsed", key=f"metodo_{uid}",
     )
     es_efectivo = metodo == "💵 Efectivo"
+    es_tarjeta = metodo == "💳 Datáfono"
     es_mixto = metodo == "🔀 Mixto"
 
     # 'Mixto' = UNA persona paga ESTE cobro repartiéndolo entre efectivo y transferencia
@@ -1515,7 +1529,7 @@ def dialog_cobrar(ids, titulo, total, uid):
             f'<div style="font-family:\'DM Sans\',sans-serif; font-weight:700; font-size:1.1rem; '
             f'color:#26262b;">${fmt_money(ef_monto)}</div></div>'
             '<div style="flex:1; border:1px solid #ececec; border-radius:10px; padding:8px 10px;">'
-            '<div style="font-size:0.74rem; color:#6b6b64;">💳 Transferencia</div>'
+            '<div style="font-size:0.74rem; color:#6b6b64;">📲 Transferencia</div>'
             f'<div style="font-family:\'DM Sans\',sans-serif; font-weight:700; font-size:1.1rem; '
             f'color:#26262b;">${fmt_money(tr_monto)}</div></div></div>',
             unsafe_allow_html=True,
@@ -1528,8 +1542,9 @@ def dialog_cobrar(ids, titulo, total, uid):
     # billetera + comprobante. Las billeteras salen del ajuste 'metodos_pago'
     # (configurable por restaurante); sin billeteras configuradas se omite el radio.
     # El comprobante vive solo en este cobro de caja (no en la app pública del cliente).
+    # Tarjeta (datáfono) tiene su propio campo más abajo: no lleva billetera.
     submetodo_val, comprobante_val, sub_label = None, None, "Transferencia"
-    if not es_efectivo:
+    if not es_efectivo and not es_tarjeta:
         _SUBMETODOS = {etq: clave
                        for clave, etq in metodos_pago().get("transferencia", {}).items()}
         if _SUBMETODOS:
@@ -1542,6 +1557,14 @@ def dialog_cobrar(ids, titulo, total, uid):
         comprobante_val = (st.text_input(
             "N.º de comprobante", key=f"comprobante_{uid}",
             placeholder="Referencia de la transacción (opcional)",
+        ) or "").strip() or None
+
+    # Datáfono: no hay billetera que elegir (la maneja el aparato); solo el voucher/número
+    # de aprobación, opcional, para poder conciliar contra el reporte del banco después.
+    if es_tarjeta:
+        comprobante_val = (st.text_input(
+            "N.º de aprobación / voucher", key=f"voucher_{uid}",
+            placeholder="Aprobación del datáfono (opcional)",
         ) or "").strip() or None
 
     # Efectivo recibido → cambio = entregado − monto en efectivo (nunca < 0). Aplica al
@@ -1608,7 +1631,7 @@ def dialog_cobrar(ids, titulo, total, uid):
         bloqueo = f"Falta efectivo: ${fmt_money(monto_efectivo - recibe)}."
     elif mixto_invalido:
         bloqueo = ("Un cobro mixto lleva algo en cada método. Reparte el monto o elige "
-                   "💵 Efectivo / 💳 Transferencia.")
+                   "💵 Efectivo / 📲 Transferencia.")
     else:
         bloqueo = ""
 
@@ -1635,13 +1658,18 @@ def dialog_cobrar(ids, titulo, total, uid):
                 detalle.append(f"{q} × {l['nombre']} · ${fmt_money(q * l['precio'])}")
     else:
         concepto = "Cuenta completa" if abono >= total else "Abono parcial"
-    etiqueta_transf = f"💳 {sub_label}"
+    etiqueta_transf = f"📲 {sub_label}"
     if comprobante_val:
         etiqueta_transf += f" · {comprobante_val}"
+    etiqueta_tarjeta = "💳 Datáfono"
+    if comprobante_val:
+        etiqueta_tarjeta += f" · {comprobante_val}"
     if es_mixto:
         tramos_card = [("💵 Efectivo", ef_monto), (etiqueta_transf, tr_monto)]
     elif es_efectivo:
         tramos_card = [("💵 Efectivo", abono)]
+    elif es_tarjeta:
+        tramos_card = [(etiqueta_tarjeta, abono)]
     else:
         tramos_card = [(etiqueta_transf, abono)]
     st.markdown(
@@ -1670,7 +1698,8 @@ def dialog_cobrar(ids, titulo, total, uid):
                         ids, ef_monto, tr_monto,
                         submetodo=submetodo_val, comprobante=comprobante_val) or 0)
             else:
-                metodo_pago = "efectivo" if es_efectivo else "transferencia"
+                metodo_pago = ("efectivo" if es_efectivo else
+                               "tarjeta" if es_tarjeta else "transferencia")
                 if por_plato:
                     # Cobra las unidades elegidas (también suma a pago_lineas). El subtotal
                     # ya es 'abono' (= valor de lo seleccionado).
