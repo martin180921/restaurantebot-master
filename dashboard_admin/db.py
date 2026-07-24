@@ -195,6 +195,15 @@ def _ensure_schema():
                 estado                 VARCHAR(10) NOT NULL DEFAULT 'abierto'
             )
         """))
+        # tarjeta_esperada/tarjeta_real (bloque A del plan de datáfono): la tarjeta se
+        # concilia aparte del efectivo y la transferencia (no entra al cajón físico,
+        # igual que la transferencia; su comisión y liquidación llegan por el banco).
+        # Aditivo: turnos ya cerrados quedan en 0/NULL sin perder datos.
+        conn.execute(text(
+            "ALTER TABLE cierres_caja ADD COLUMN IF NOT EXISTS "
+            "tarjeta_esperada INTEGER NOT NULL DEFAULT 0"))
+        conn.execute(text(
+            "ALTER TABLE cierres_caja ADD COLUMN IF NOT EXISTS tarjeta_real INTEGER"))
         # movimientos_caja: flujo de efectivo del cajón fuera de las ventas (gastos de
         # caja con su devolución de cambio, y base de cambio del repartidor con el float
         # devuelto al volver). 'estado'='abierto' = dinero aún afuera; 'cerrado' = ya

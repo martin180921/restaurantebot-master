@@ -213,7 +213,9 @@ CREATE TABLE IF NOT EXISTS turnos_caja (
     nota             TEXT
 );
 
--- Cierre de caja v2 (apertura con base + congelado esperado vs. contado).
+-- Cierre de caja v2 (apertura con base + congelado esperado vs. contado). tarjeta_* =
+-- datáfono manual (bloque A del plan de facturación/datáfono): se concilia aparte del
+-- efectivo y la transferencia, nunca entra al cajón físico.
 CREATE TABLE IF NOT EXISTS cierres_caja (
     id                     SERIAL      PRIMARY KEY,
     fecha_apertura         TIMESTAMP   DEFAULT CURRENT_TIMESTAMP,
@@ -221,8 +223,10 @@ CREATE TABLE IF NOT EXISTS cierres_caja (
     monto_apertura         INTEGER     NOT NULL,
     efectivo_esperado      INTEGER     NOT NULL DEFAULT 0,
     transferencia_esperada INTEGER     NOT NULL DEFAULT 0,
+    tarjeta_esperada       INTEGER     NOT NULL DEFAULT 0,
     efectivo_real          INTEGER,
     transferencia_real     INTEGER,
+    tarjeta_real           INTEGER,
     diferencia             INTEGER     DEFAULT 0,
     estado                 VARCHAR(10) NOT NULL DEFAULT 'abierto'
 );
@@ -375,6 +379,10 @@ ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS fee INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS nota_general TEXT;
 ALTER TABLE pagos   ADD COLUMN IF NOT EXISTS submetodo VARCHAR(20);
 ALTER TABLE pagos   ADD COLUMN IF NOT EXISTS comprobante VARCHAR(60);
+-- Datáfono manual (bloque A del plan de facturación/datáfono): la tarjeta se concilia
+-- aparte del efectivo y la transferencia (no entra al cajón físico).
+ALTER TABLE cierres_caja ADD COLUMN IF NOT EXISTS tarjeta_esperada INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE cierres_caja ADD COLUMN IF NOT EXISTS tarjeta_real INTEGER;
 -- FASE 1: anti-skimming + descuentos en pedidos, y reclamado_at en la cola de impresión.
 ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS cobro_iniciado BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS descuento_valor INTEGER NOT NULL DEFAULT 0;
