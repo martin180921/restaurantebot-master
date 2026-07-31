@@ -195,6 +195,15 @@ def _ensure_schema():
                 estado                 VARCHAR(10) NOT NULL DEFAULT 'abierto'
             )
         """))
+        # tarjeta_esperada/tarjeta_real (bloque A del plan de datáfono): la tarjeta se
+        # concilia aparte del efectivo y la transferencia (no entra al cajón físico,
+        # igual que la transferencia; su comisión y liquidación llegan por el banco).
+        # Aditivo: turnos ya cerrados quedan en 0/NULL sin perder datos.
+        conn.execute(text(
+            "ALTER TABLE cierres_caja ADD COLUMN IF NOT EXISTS "
+            "tarjeta_esperada INTEGER NOT NULL DEFAULT 0"))
+        conn.execute(text(
+            "ALTER TABLE cierres_caja ADD COLUMN IF NOT EXISTS tarjeta_real INTEGER"))
         # movimientos_caja: flujo de efectivo del cajón fuera de las ventas (gastos de
         # caja con su devolución de cambio, y base de cambio del repartidor con el float
         # devuelto al volver). 'estado'='abierto' = dinero aún afuera; 'cerrado' = ya
@@ -372,7 +381,8 @@ def _ensure_schema():
                 orden             INTEGER     NOT NULL DEFAULT 0,
                 activo            BOOLEAN     NOT NULL DEFAULT TRUE,
                 disponible_desde  TIME,
-                disponible_hasta  TIME
+                disponible_hasta  TIME,
+                extras_grupos     TEXT        NOT NULL DEFAULT ''
             )
         """))
         # El horario va además en ALTER aparte: una base que ya tenga 'categorias' de una
@@ -381,6 +391,11 @@ def _ensure_schema():
         # filtrar. Mismo criterio que las columnas de 'menu'.
         conn.execute(text("ALTER TABLE categorias ADD COLUMN IF NOT EXISTS disponible_desde TIME"))
         conn.execute(text("ALTER TABLE categorias ADD COLUMN IF NOT EXISTS disponible_hasta TIME"))
+        # extras_grupos: claves de grupo del Plato del Día (coma-separadas) que la
+        # categoría ofrece INCLUIDAS sin costo. '' = catálogo simple; default vacío a
+        # propósito (ningún restaurante nuevo nace con extras encendidos).
+        conn.execute(text(
+            "ALTER TABLE categorias ADD COLUMN IF NOT EXISTS extras_grupos TEXT NOT NULL DEFAULT ''"))
         if not conn.execute(text(
                 "SELECT 1 FROM ajustes WHERE clave = 'seed_categorias'")).first():
             conn.execute(text("""
@@ -618,6 +633,37 @@ def _ensure_schema():
                 cola_pendiente INTEGER   NOT NULL DEFAULT 0
             )
         """))
+
+        # documentos_fiscales: bloque C del plan de facturación electrónica (ver
+        # docs/plan_facturacion_y_datafono.md), APAGADO por defecto (ajuste
+        # 'facturacion_electronica'). Libro append-only, mismo espíritu que 'auditoria':
+        # una fila por documento emitido/rechazado/anulado por un PAC (o por el
+        # ProveedorSimulado de demo), enlazado a los pedidos que cobró. 'tipo' = 'pos'
+        # (documento equivalente, sin identificar cliente) | 'factura' (factura de venta,
+        # con NIT/CC). Ver facturacion.py.
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS documentos_fiscales (
+                id              SERIAL      PRIMARY KEY,
+                pedido_ids      TEXT        NOT NULL,
+                tipo            VARCHAR(10) NOT NULL DEFAULT 'pos',
+                numero          VARCHAR(40),
+                cufe            VARCHAR(120),
+                qr_texto        TEXT,
+                estado          VARCHAR(15) NOT NULL DEFAULT 'borrador',
+                proveedor       VARCHAR(30),
+                cliente_doc     VARCHAR(30),
+                cliente_nombre  VARCHAR(120),
+                cliente_email   VARCHAR(120),
+                monto           INTEGER     NOT NULL DEFAULT 0,
+                fecha           TIMESTAMP   NOT NULL DEFAULT NOW(),
+                respuesta_cruda JSONB,
+                restaurante_id  INTEGER     NOT NULL DEFAULT 1
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_documentos_fiscales_rid_fecha "
+            "ON documentos_fiscales (restaurante_id, fecha DESC)"
+        ))
 
 try:
     _ensure_schema()
@@ -1242,10 +1288,12 @@ def componentes_activos_por_grupo() -> dict:
 # ── Categorías del catálogo DINÁMICAS (tabla categorias) ────────────────────────
 # Cada restaurante puede agregar las suyas (Desayunos, Postres…) además de las 4
 # clásicas. 'clave' = menu.categoria (sin FK dura, mismo patrón que plato_dia_grupos).
-# El COMPORTAMIENTO (¿lleva descripción? ¿cobra recargo de entrega? ¿ofrece entrada/
-# bebida del Plato del Día incluidas?) no es editable desde el panel a propósito (MVP):
-# las 4 clásicas conservan el suyo de siempre y cualquier categoría nueva se comporta
-# como 'a_la_carta' — así la pantalla de alta se queda en nombre, emoji y orden.
+# El COMPORTAMIENTO fijo (¿lleva descripción? ¿cobra recargo de entrega?) no es editable
+# desde el panel a propósito (MVP): las 4 clásicas conservan el suyo de siempre y
+# cualquier categoría nueva se comporta como 'a_la_carta'. Los extras incluidos
+# (¿ofrece entrada/bebida del Plato del Día sin costo?) SÍ son editables — viven en la
+# columna categorias.extras_grupos, no aquí — y nacen apagados en toda categoría nueva
+# (ver extras_de_categoria).
 
 _CATEGORIAS_CLASICAS = [
     ("especial",   "Especiales",  "⭐", 1),
@@ -1255,10 +1303,10 @@ _CATEGORIAS_CLASICAS = [
 ]
 
 _COMPORTAMIENTO_CATEGORIA = {
-    "especial":   {"desc": True,  "recargo": True,  "extras": True},
-    "a_la_carta": {"desc": False, "recargo": True,  "extras": True},
-    "adicional":  {"desc": True,  "recargo": False, "extras": False},
-    "bebida":     {"desc": False, "recargo": False, "extras": False},
+    "especial":   {"desc": True,  "recargo": True},
+    "a_la_carta": {"desc": False, "recargo": True},
+    "adicional":  {"desc": True,  "recargo": False},
+    "bebida":     {"desc": False, "recargo": False},
 }
 _COMPORTAMIENTO_DEFAULT = _COMPORTAMIENTO_CATEGORIA["a_la_carta"]
 
@@ -1268,10 +1316,24 @@ _TIPO_CATEGORIA = {"a_la_carta": "item"}
 
 
 def comportamiento_categoria(clave: str) -> dict:
-    """{desc, recargo, extras} de una categoría: si lleva descripción, si cuenta para
-    el recargo de entrega y si ofrece entrada/bebida del Plato del Día incluidas.
-    Categoría desconocida (nueva, creada por el restaurante) → igual que 'a_la_carta'."""
+    """{desc, recargo} de una categoría: si lleva descripción y si cuenta para el
+    recargo de entrega. Categoría desconocida (nueva, creada por el restaurante) →
+    igual que 'a_la_carta'. Los extras incluidos (entrada/bebida) van aparte, ver
+    extras_de_categoria."""
     return _COMPORTAMIENTO_CATEGORIA.get(clave, _COMPORTAMIENTO_DEFAULT)
+
+
+def extras_de_categoria(cat: dict) -> list:
+    """Claves de grupo del Plato del Día que esta categoría ofrece INCLUIDAS sin costo
+    (columna categorias.extras_grupos, coma-separada). [] = catálogo simple (default de
+    toda categoría nueva). Recibe la FILA de la categoría (ya trae el dato, sin
+    consulta aparte). Deduplica y ordena por el 'orden' del grupo del Plato del Día, no
+    por cómo quedó escrita la cadena: la UI debe verse igual sin importar en qué orden
+    se marcaron las casillas al guardar."""
+    crudo = str((cat or {}).get("extras_grupos") or "")
+    claves = [g for g in (p.strip() for p in crudo.split(",")) if g]
+    orden = {g["clave"]: i for i, g in enumerate(cargar_grupos_pd(solo_activos=False))}
+    return sorted(dict.fromkeys(claves), key=lambda g: orden.get(g, 99))
 
 
 def tipo_de_categoria(clave: str) -> str:
@@ -1286,8 +1348,8 @@ def _cargar_categorias_raw():
     invalidar_categorias() para reflejar cambios al vuelo."""
     with engine.connect() as conn:
         rows = conn.execute(text(
-            "SELECT id, clave, etiqueta, emoji, orden, activo, disponible_desde, disponible_hasta "
-            "FROM categorias ORDER BY orden, id"
+            "SELECT id, clave, etiqueta, emoji, orden, activo, disponible_desde, "
+            "disponible_hasta, extras_grupos FROM categorias ORDER BY orden, id"
         )).mappings().all()
     return [dict(r) for r in rows]
 
@@ -1302,7 +1364,8 @@ def cargar_categorias(solo_activas: bool = True) -> list:
     if not filas:
         filas = [
             {"id": 0, "clave": c, "etiqueta": e, "emoji": em, "orden": o,
-             "activo": True, "disponible_desde": None, "disponible_hasta": None}
+             "activo": True, "disponible_desde": None, "disponible_hasta": None,
+             "extras_grupos": ""}
             for c, e, em, o in _CATEGORIAS_CLASICAS
         ]
     if solo_activas:
@@ -1365,7 +1428,9 @@ def en_horario_categoria(cat: dict, ahora=None) -> bool:
 
 def crear_categoria(clave: str, etiqueta: str, emoji: str = ""):
     """Crea una categoría nueva. Devuelve None si ok o un mensaje de error. La clave se
-    normaliza a [a-z0-9_] y máx. 20 chars: debe caber en menu.categoria."""
+    normaliza a [a-z0-9_] y máx. 20 chars: debe caber en menu.categoria. Nace con
+    extras_grupos = '' (el DEFAULT de la columna): sin entrada/bebida incluidas hasta
+    que alguien las active desde el editor."""
     etiqueta = (etiqueta or "").strip()
     clave = slug_categoria(clave or etiqueta)
     if not clave or not etiqueta:
@@ -1393,9 +1458,12 @@ def crear_categoria(clave: str, etiqueta: str, emoji: str = ""):
 
 
 def guardar_categoria(cid: int, *, etiqueta: str, emoji: str, orden: int, activo: bool,
-                      disponible_desde=None, disponible_hasta=None) -> None:
+                      disponible_desde=None, disponible_hasta=None,
+                      extras_grupos=None) -> None:
     """Actualiza una categoría existente (la clave NO se edita: ancla los platos ya
-    cargados). disponible_desde/hasta en None = visible todo el día (sin restricción)."""
+    cargados). disponible_desde/hasta en None = visible todo el día (sin restricción).
+    extras_grupos: lista de claves de grupo del Plato del Día que quedan incluidas sin
+    costo, o None para no tocar la columna (deja intacto lo que hubiera)."""
     with engine.begin() as conn:
         conn.execute(text(
             "UPDATE categorias SET etiqueta = :e, emoji = :em, orden = :o, activo = :a, "
@@ -1403,6 +1471,11 @@ def guardar_categoria(cid: int, *, etiqueta: str, emoji: str, orden: int, activo
         ), {"e": (etiqueta or "").strip() or "?", "em": (emoji or "").strip()[:8],
             "o": int(orden), "a": bool(activo),
             "dd": disponible_desde, "dh": disponible_hasta, "id": int(cid)})
+        if extras_grupos is not None:
+            limpio = dict.fromkeys(g.strip() for g in extras_grupos if g and g.strip())
+            conn.execute(text(
+                "UPDATE categorias SET extras_grupos = :eg WHERE id = :id"
+            ), {"eg": ",".join(limpio), "id": int(cid)})
     invalidar_categorias()
 
 
@@ -1497,13 +1570,15 @@ def moneda_simbolo() -> str:
 _METODOS_PAGO_DEFAULT = {
     "efectivo": True,
     "transferencia": {"nequi": "Nequi", "daviplata": "Daviplata", "breb": "Bre-B"},
+    "tarjeta": False,
 }
 
 
 def metodos_pago() -> dict:
-    """{'efectivo': bool, 'transferencia': {clave: etiqueta}} desde el ajuste
-    'metodos_pago' (JSON). Malformado o ausente → el set clásico (fallback), para
-    que el cobro NUNCA quede sin métodos."""
+    """{'efectivo': bool, 'transferencia': {clave: etiqueta}, 'tarjeta': bool} desde el
+    ajuste 'metodos_pago' (JSON). Malformado o ausente → el set clásico (fallback), para
+    que el cobro NUNCA quede sin métodos. 'tarjeta' (datáfono manual, sin API) nace
+    apagada: solo la activa el restaurante que ya tiene el aparato."""
     raw = cargar_ajustes().get("metodos_pago")
     try:
         d = json.loads(raw) if raw else {}
@@ -1517,7 +1592,24 @@ def metodos_pago() -> dict:
     tr = {str(k).strip(): (str(v).strip() or str(k).strip())
           for k, v in tr.items() if str(k).strip()}
     ef = d.get("efectivo")
-    return {"efectivo": True if ef is None else bool(ef), "transferencia": tr}
+    return {"efectivo": True if ef is None else bool(ef), "transferencia": tr,
+            "tarjeta": bool(d.get("tarjeta", False))}
+
+
+# ── Facturación electrónica (bloque C del plan; APAGADA por defecto) ────────────────
+def facturacion_electronica() -> bool:
+    """True si el restaurante activó la facturación electrónica en Ajustes. Con el
+    flag OFF (default) nada de facturacion.py se ejecuta: el recibo sigue siendo la
+    CUENTA no fiscal de siempre."""
+    raw = cargar_ajustes().get("facturacion_electronica")
+    return str(raw or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def proveedor_factura() -> str:
+    """Proveedor de facturación configurado (ver facturacion.py). 'simulado' (default):
+    genera un CUFE/QR de mentira para poder MOSTRARLE al restaurante cómo se vería su
+    factura, sin contratar ningún PAC ni llamar a la DIAN."""
+    return (cargar_ajustes().get("proveedor_factura") or "").strip().lower() or "simulado"
 
 
 # ── Base de clientes (la alimenta la app pública) ───────────────────────────────

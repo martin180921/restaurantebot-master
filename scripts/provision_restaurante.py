@@ -13,10 +13,14 @@ Qué hace, en orden:
   3. Reemplaza los grupos del Plato del Día (plato_dia_grupos) con los del JSON y
      siembra los componentes iniciales por grupo (solo si la tabla está vacía: no
      resucita opciones que el restaurante borró después).
-  4. Crea las mesas (solo si no hay ninguna).
-  5. Marca los seeds one-time del bot (seed_menu / seed_componentes /
+  4. Activa los extras incluidos (entrada/bebida sin costo) de las categorías del
+     catálogo, SOLO si el JSON trae el bloque opcional 'categorias_extras'. Sin
+     él, toda categoría nace en '' (catálogo simple, el DEFAULT de la columna) —
+     se activan después desde el panel, 🏷️ Categorías.
+  5. Crea las mesas (solo si no hay ninguna).
+  6. Marca los seeds one-time del bot (seed_menu / seed_componentes /
      seed_pd_grupos) para que el arranque del bot NO inserte datos de ejemplo.
-  6. Imprime el bloque de variables de entorno para los 3 servicios de Railway y
+  7. Imprime el bloque de variables de entorno para los 3 servicios de Railway y
      el config.json del Agente de Impresión Local, listos para copiar/pegar.
 
 Es idempotente y seguro de re-correr (las mesas y componentes solo se siembran en
@@ -170,6 +174,46 @@ def sembrar_componentes(cur, cfg: dict, claves: list) -> None:
     marcar_seed(cur, "seed_menu")   # tampoco los 3 platos de ejemplo
 
 
+def escribir_extras_categorias(cur, cfg: dict) -> None:
+    """Activa los extras incluidos (entrada/bebida sin costo) de categorías del
+    catálogo, SOLO si el JSON trae el bloque opcional 'categorias_extras':
+    {clave_categoria: [clave_grupo, ...]}. Sin ese bloque, no toca nada — toda
+    categoría queda en '' (catálogo simple), el DEFAULT de la columna, hasta que el
+    restaurante la active desde el panel (🏷️ Categorías). Valida contra
+    plato_dia_grupos YA APLICADO en la BD (no contra cfg['grupos']): si el JSON no
+    trae grupos propios, los 5 clásicos vienen de todos modos del seed de
+    schema.sql, y validar solo contra el JSON los marcaría como inexistentes por
+    error. Un grupo que no existe se avisa e ignora; una categoría que el
+    restaurante aún no creó (personalizada, se agrega después desde el panel)
+    también se avisa e ignora, sin frenar el resto del aprovisionamiento."""
+    extras = cfg.get("categorias_extras") or {}
+    if not isinstance(extras, dict) or not extras:
+        return
+    cur.execute("SELECT clave, max_sel FROM plato_dia_grupos")
+    max_sel = {row[0]: row[1] for row in cur.fetchall()}
+    for cat_clave_raw, grupos in extras.items():
+        cat_clave = str(cat_clave_raw).strip().lower()
+        pedidos = [str(g).strip().lower() for g in (grupos or [])]
+        validos = [g for g in pedidos if g in max_sel]
+        invalidos = [g for g in pedidos if g not in max_sel]
+        if invalidos:
+            print(f"  ⚠ extras de '{cat_clave}': grupo(s) ignorado(s) (no existe ese "
+                  f"grupo): {', '.join(invalidos)}")
+        multi = [g for g in validos if int(max_sel.get(g) or 1) != 1]
+        if multi:
+            print(f"  ⚠ extras de '{cat_clave}': {', '.join(multi)} permite varias "
+                  "opciones (max>1) — el selector de extras solo ofrece UNA; revisa el "
+                  "resultado en el panel tras aprovisionar.")
+        cur.execute("SELECT 1 FROM categorias WHERE clave = %s", (cat_clave,))
+        if cur.fetchone() is None:
+            print(f"  ⚠ extras de '{cat_clave}' ignorados: esa categoría no existe "
+                  "todavía (créala desde el panel y actívalos ahí).")
+            continue
+        cur.execute("UPDATE categorias SET extras_grupos = %s WHERE clave = %s",
+                    (",".join(dict.fromkeys(validos)), cat_clave))
+    print("  ✔ extras incluidos por categoría aplicados (bloque 'categorias_extras' del JSON)")
+
+
 def crear_mesas(cur, cfg: dict) -> None:
     mesas = cfg.get("mesas")
     if not mesas:
@@ -244,6 +288,7 @@ def main() -> None:
                     escribir_ajustes(cur, cfg)
                     claves = escribir_grupos(cur, cfg)
                     sembrar_componentes(cur, cfg, claves)
+                    escribir_extras_categorias(cur, cfg)
                     crear_mesas(cur, cfg)
         finally:
             conn.close()

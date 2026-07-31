@@ -12,13 +12,16 @@ import streamlit as st
 from sqlalchemy import text, bindparam
 import json
 import html
+import time
 
 import auth
 import audit
 import empleados
 import mesero_keys
-from db import engine, fmt_money, flash, saldo_pedido, titulo_seccion
-from utils.print_jobs import badge_agente_html, enqueue_hoja_ruta, enqueue_recibo
+from db import engine, fmt_money, flash, saldo_pedido, titulo_seccion, metodos_pago
+from utils.print_jobs import (badge_agente_html, enqueue_hoja_ruta, enqueue_recibo,
+                              enqueue_abrir_cajon)
+from utils.items import parse_items, etiqueta_item
 from views import pedidos, menu
 
 
@@ -37,11 +40,13 @@ def cierre_activo():
 
 
 def ingresos_esperados(fecha_apertura) -> dict:
-    """{efectivo, transferencia} cobrados desde 'fecha_apertura' (libro 'pagos').
+    """{efectivo, transferencia, tarjeta} cobrados desde 'fecha_apertura' (libro 'pagos').
 
     efectivo_esperado      = SUM(monto) WHERE metodo='efectivo'      AND fecha >= apertura
     transferencia_esperada = SUM(monto) WHERE metodo='transferencia' AND fecha >= apertura
-    Tolerante a fallos → ceros si la tabla aún no existe.
+    tarjeta_esperada        = SUM(monto) WHERE metodo='tarjeta'       AND fecha >= apertura
+    (datáfono manual, bloque A del plan: se concilia aparte, NUNCA entra al cajón físico
+    — igual que la transferencia). Tolerante a fallos → ceros si la tabla aún no existe.
     """
     try:
         with engine.connect() as conn:
@@ -55,6 +60,7 @@ def ingresos_esperados(fecha_apertura) -> dict:
     return {
         "efectivo": por_metodo.get("efectivo", 0),
         "transferencia": por_metodo.get("transferencia", 0),
+        "tarjeta": por_metodo.get("tarjeta", 0),
     }
 
 
@@ -79,8 +85,13 @@ def abrir_caja(monto_apertura: int) -> bool:
 
 
 def cerrar_caja(cierre_id: int, efectivo_esperado: int, transferencia_esperada: int,
-                efectivo_real: int, transferencia_real: int, diferencia: int):
-    """Congela el arqueo y cierra el turno (estado='cerrado', fecha_cierre=NOW())."""
+                efectivo_real: int, transferencia_real: int, diferencia: int,
+                tarjeta_esperada: int = 0, tarjeta_real: int = 0):
+    """Congela el arqueo y cierra el turno (estado='cerrado', fecha_cierre=NOW()).
+
+    tarjeta_esperada/tarjeta_real (datáfono manual, bloque A): se guardan igual que
+    transferencia_esperada/real — informativas, NO entran en 'diferencia' (esa sigue
+    siendo solo efectivo, la única plata que físicamente pasa por el cajón)."""
     # Candado de capacidad (RBAC): solo admin/caja gestionan el arqueo.
     if not auth.can("manage_caja"):
         return
@@ -89,12 +100,15 @@ def cerrar_caja(cierre_id: int, efectivo_esperado: int, transferencia_esperada: 
             "UPDATE cierres_caja SET "
             "  fecha_cierre = NOW(), "
             "  efectivo_esperado = :ee, transferencia_esperada = :te, "
-            "  efectivo_real = :er, transferencia_real = :tr, "
+            "  tarjeta_esperada = :tae, "
+            "  efectivo_real = :er, transferencia_real = :tr, tarjeta_real = :tar, "
             "  diferencia = :dif, estado = 'cerrado' "
             "WHERE id = :id AND estado = 'abierto'"
         ), {
             "ee": int(efectivo_esperado), "te": int(transferencia_esperada),
+            "tae": int(tarjeta_esperada),
             "er": int(efectivo_real), "tr": int(transferencia_real),
+            "tar": int(tarjeta_real),
             "dif": int(diferencia), "id": int(cierre_id),
         })
     # Cierre de caja = fin de jornada → barrido de acceso de meseros: revoca los PINs de
@@ -107,6 +121,7 @@ def cerrar_caja(cierre_id: int, efectivo_esperado: int, transferencia_esperada: 
     audit.registrar("caja_cierre", "caja", int(cierre_id),
                     {"efectivo_real": int(efectivo_real),
                      "transferencia_real": int(transferencia_real),
+                     "tarjeta_real": int(tarjeta_real),
                      "diferencia": int(diferencia), "sesiones_cerradas": int(cerradas)})
 
 
@@ -116,8 +131,8 @@ def cierres_recientes(n: int = 8):
         with engine.connect() as conn:
             rows = conn.execute(text(
                 "SELECT id, fecha_apertura, fecha_cierre, monto_apertura, "
-                "       efectivo_esperado, transferencia_esperada, "
-                "       efectivo_real, transferencia_real, diferencia "
+                "       efectivo_esperado, transferencia_esperada, tarjeta_esperada, "
+                "       efectivo_real, transferencia_real, tarjeta_real, diferencia "
                 "FROM cierres_caja WHERE estado = 'cerrado' ORDER BY id DESC LIMIT :n"
             ), {"n": n}).mappings().all()
         return [dict(r) for r in rows]
@@ -369,6 +384,157 @@ def pedidos_domicilio_pendientes():
                         "paga_con": int(d.get("paga_con") or 0),
                         "vueltas": _vueltas_pedido(s, d.get("metodo_pago"), d.get("paga_con"))})
     return out
+
+
+def _cuentas_por_cobrar_hoy():
+    """[{tipo, nombre, ids, saldo, lista}] de las cuentas de HOY con saldo pendiente, para
+    el punto de entrada 'Cobrar mesa' de la caja simple. Agrupa por mesa (mesa_id) cuando
+    aplica; los pedidos de entrega sin mesa se listan uno a uno (si YA tienen una base de
+    repartidor asignada, se cobran desde 🛵 Repartidores, no aquí, para no ofrecer el
+    mismo pedido por dos caminos). Los pedidos heredados sin mesa_id (previos a esa
+    columna) caen como líneas sueltas en vez de agruparse por nombre de mesa — caso raro,
+    se sigue pudiendo cobrar, solo no se agrupa.
+
+    'lista' (solo para tipo='mesa'): TODOS los pedidos activos de la mesa están
+    'entregado' — mismo criterio AZUL del Monitor ('solo falta el pago'). Las cuentas
+    listas se devuelven PRIMERO (orden), para que el cajero las vea de un vistazo sin
+    tener que leer toda la lista. Tolerante a fallos → None (no listar nada si la
+    lectura falló, para no dar una foto a medias)."""
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(text("""
+                SELECT p.id, p.mesa_id, m.nombre AS mesa_nombre, p.numero_cliente,
+                       p.cliente_nombre, p.total, COALESCE(p.total_pagado, 0) AS total_pagado,
+                       p.base_id, p.estado
+                FROM pedidos p
+                LEFT JOIN mesas m ON m.id = p.mesa_id
+                WHERE p.pagado = FALSE AND p.estado <> 'cancelado'
+                  AND p.fecha::date = CURRENT_DATE
+                ORDER BY COALESCE(p.mesa_id, 999999), p.id
+            """)).mappings().all()
+    except Exception:
+        return None
+    mesas_map, sueltos = {}, []
+    for r in rows:
+        d = dict(r)
+        s = saldo_pedido(d)
+        if s <= 0:
+            continue
+        if d.get("mesa_id") is not None:
+            mid = int(d["mesa_id"])
+            g = mesas_map.setdefault(mid, {
+                "tipo": "mesa", "nombre": d.get("mesa_nombre") or f"Mesa {mid}",
+                "ids": [], "saldo": 0, "lista": True,
+            })
+            g["ids"].append(int(d["id"]))
+            g["saldo"] += s
+            if d.get("estado") != "entregado":
+                g["lista"] = False
+        elif d.get("base_id") is None:
+            sueltos.append({
+                "tipo": "pedido",
+                "nombre": d.get("cliente_nombre") or d.get("numero_cliente") or f"#{d['id']}",
+                "ids": [int(d["id"])], "saldo": s, "lista": False,
+            })
+    cuentas = list(mesas_map.values()) + sueltos
+    cuentas.sort(key=lambda c: 0 if c.get("lista") else 1)
+    return cuentas
+
+
+def _pedidos_con_items(ids: list):
+    """[{id, items, total, total_pagado, saldo}] de los pedidos dados, con sus ítems
+    crudos — para el detalle de la cuenta que el cajero revisa antes de cobrar (escoger
+    mesa → ver todo → confirmar). Tolerante a fallos → None (no mostrar un detalle a
+    medias si la lectura falló)."""
+    ids = [int(i) for i in ids]
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(text(
+                "SELECT id, items, total, COALESCE(total_pagado, 0) AS total_pagado "
+                "FROM pedidos WHERE id = ANY(:ids) ORDER BY id"
+            ), {"ids": ids}).mappings().all()
+    except Exception:
+        return None
+    out = []
+    for r in rows:
+        d = dict(r)
+        out.append({"id": int(d["id"]), "items": d.get("items"),
+                    "total": int(d["total"] or 0),
+                    "total_pagado": int(d["total_pagado"] or 0),
+                    "saldo": saldo_pedido(d)})
+    return out
+
+
+def _items_html(items_raw) -> str:
+    """Lista compacta ítem por ítem (cant x nombre · precio) para el detalle de cuenta."""
+    items_list = parse_items(items_raw)
+    if not items_list:
+        return '<div style="font-size:0.85rem; color:#a3a39b;">Sin ítems registrados.</div>'
+    filas = []
+    for it in items_list:
+        cant = int(it.get("cantidad", 1) or 1)
+        nombre = html.escape(etiqueta_item(it))
+        precio_linea = int(it.get("precio") or 0) * cant
+        filas.append(
+            '<div style="display:flex; justify-content:space-between; padding:2px 0; '
+            'font-size:0.85rem; color:#45443e;">'
+            f'<span>{cant}x {nombre}</span>'
+            f'<span style="white-space:nowrap; margin-left:10px;">${fmt_money(precio_linea)}</span></div>'
+        )
+    return "".join(filas)
+
+
+def _cuentas_cobradas_hoy():
+    """[{tipo, nombre, ids, total}] de las cuentas cobradas por completo y PAGADAS hoy
+    (fecha de 'pagos', no de creación: un domicilio armado ayer y cobrado hoy en la
+    puerta debe listarse igual), para reimprimir su recibo. Sin esto 'Reimprimir recibo'
+    —que solo vive en la rama total<=0 de pedidos.dialog_cobrar— era inalcanzable:
+    ninguna otra pantalla ofrece una cuenta ya saldada.
+
+    Agrupa por (mesa, MOMENTO del cobro), no solo por mesa: si la misma mesa rotó dos
+    veces en el día (almuerzo y cena, ambas cobradas hoy), son dos recibos distintos y
+    no deben fusionarse en un ticket con los ítems de ambas sentadas mezclados. Los
+    pedidos cobrados en la MISMA transacción comparten MAX(pg.fecha) exacto (registrar_pago
+    inserta todas sus filas con un solo NOW()), así que ese timestamp separa las sentadas.
+    Tolerante a fallos → None."""
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(text("""
+                SELECT p.id, p.mesa_id, m.nombre AS mesa_nombre, p.numero_cliente,
+                       p.cliente_nombre, p.total, MAX(pg.fecha) AS cobrado_at
+                FROM pedidos p
+                JOIN pagos pg ON pg.pedido_id = p.id
+                LEFT JOIN mesas m ON m.id = p.mesa_id
+                WHERE p.pagado = TRUE
+                GROUP BY p.id, p.mesa_id, m.nombre, p.numero_cliente, p.cliente_nombre, p.total
+                HAVING MAX(pg.fecha)::date = CURRENT_DATE
+                ORDER BY MAX(pg.fecha) DESC
+            """)).mappings().all()
+    except Exception:
+        return None
+    grupos, sueltos = {}, []
+    for r in rows:
+        d = dict(r)
+        hora = d["cobrado_at"].strftime("%H:%M") if hasattr(d["cobrado_at"], "strftime") else ""
+        if d.get("mesa_id") is not None:
+            mid = int(d["mesa_id"])
+            # Clave = mesa + momento exacto del cobro: separa sentadas distintas de la
+            # misma mesa; los pedidos de una misma transacción comparten cobrado_at.
+            clave = (mid, d["cobrado_at"])
+            nombre = d.get("mesa_nombre") or f"Mesa {mid}"
+            g = grupos.setdefault(clave, {
+                "tipo": "mesa", "nombre": f"{nombre} · {hora}" if hora else nombre,
+                "ids": [], "total": 0,
+            })
+            g["ids"].append(int(d["id"]))
+            g["total"] += int(d["total"] or 0)
+        else:
+            sueltos.append({
+                "tipo": "pedido",
+                "nombre": d.get("cliente_nombre") or d.get("numero_cliente") or f"#{d['id']}",
+                "ids": [int(d["id"])], "total": int(d["total"] or 0),
+            })
+    return list(grupos.values()) + sueltos
 
 
 def pedidos_de_base(base_id: int):
@@ -874,48 +1040,28 @@ def _seccion_flujo_caja(cierre: dict):
             st.caption(f"⚠️ Faltan ${fmt_money(pend_saldo)} por cobrar para cerrar esta base.")
 
     # Histórico compacto del turno + neto.
-    movs = movimientos_del_turno(cid)
-    if movs:
-        neto = neto_movimientos(cid)
-        signo = "+" if neto >= 0 else "−"
-        color = "#16a34a" if neto >= 0 else "#dc2626"
-        st.markdown(
-            f'<div style="font-size:0.82rem; color:#45443e; margin-top:8px;">Efecto neto en el '
-            f'cajón: <b style="color:{color};">{signo}${fmt_money(abs(neto))}</b></div>',
-            unsafe_allow_html=True,
-        )
-        with st.expander(f"Ver movimientos del turno ({len(movs)})"):
-            for mv in movs:
-                etiqueta, c = _MOV_LABEL.get(mv["tipo"], (mv["tipo"], "#6b6b64"))
-                signo_mv = "+" if mv["tipo"] in TIPOS_ENTRADA else "−"
-                extra = f" · {html.escape(str(mv['motivo'] or mv['actor_nombre'] or ''))}".rstrip(" ·")
-                st.markdown(
-                    f'<div style="display:flex; justify-content:space-between; font-size:0.8rem; '
-                    f'padding:4px 0; border-bottom:1px solid #f2f1ed;">'
-                    f'<span style="color:#45443e;">{etiqueta} · {_fechahora(mv["creado_at"])}'
-                    f'{"" if extra == " · " else extra}</span>'
-                    f'<span style="color:{c}; font-weight:700;">{signo_mv}${fmt_money(mv["monto"])}</span></div>',
-                    unsafe_allow_html=True,
-                )
+    _bloque_historial_movimientos(cid)
 
 
 # ── Confirmación de cierre (doble chequeo del monto contado) ────────────────────
 @st.dialog("🔒 Confirmar cierre de caja")
 def _dialog_confirmar_cierre(cierre_id: int, efvo_esp: int, transf_esp: int,
                              efectivo_real: int, transferencia_real: int,
-                             diferencia: int, total_esperado: int):
-    """Reconfirma los montos CONTADOS antes de cerrar el turno. Muestra grandes el efectivo
-    y las transferencias que el cajero está a punto de registrar para que los verifique
-    contra el dinero físico (no revela lo esperado → respeta el conteo a ciegas). Solo al
-    pulsar 'Sí, cerrar caja' se congela el arqueo (irreversible)."""
+                             diferencia: int, total_esperado: int,
+                             tarjeta_esp: int = 0, tarjeta_real: int = 0):
+    """Reconfirma los montos CONTADOS antes de cerrar el turno. Muestra grandes el efectivo,
+    las transferencias y (si el restaurante usa datáfono) la tarjeta que el cajero está a
+    punto de registrar, para que los verifique contra el dinero físico y el banco (no
+    revela lo esperado → respeta el conteo a ciegas). Solo al pulsar 'Sí, cerrar caja' se
+    congela el arqueo (irreversible)."""
     st.markdown(
         '<div style="color:#45443e; font-size:0.9rem; margin-bottom:10px;">'
         'Revisa el dinero contado antes de cerrar el turno: verifica que coincida con lo '
         'que tienes físicamente. Esta acción no se puede deshacer.</div>',
         unsafe_allow_html=True,
     )
-    st.markdown(
-        '<div style="display:flex; gap:10px; margin-bottom:4px;">'
+    _acepta_tarjeta = bool(metodos_pago().get("tarjeta"))
+    _cajas_html = (
         '<div style="flex:1; background:#f6f7f9; border:1px solid #e6e8ec; border-radius:10px; '
         'padding:10px 14px;">'
         '<div style="font-size:0.78rem; color:#6b6b64;">💵 Efectivo contado</div>'
@@ -923,10 +1069,20 @@ def _dialog_confirmar_cierre(cierre_id: int, efvo_esp: int, transf_esp: int,
         f'color:#26262b;">${fmt_money(efectivo_real)}</div></div>'
         '<div style="flex:1; background:#f6f7f9; border:1px solid #e6e8ec; border-radius:10px; '
         'padding:10px 14px;">'
-        '<div style="font-size:0.78rem; color:#6b6b64;">💳 Transferencias</div>'
+        '<div style="font-size:0.78rem; color:#6b6b64;">📲 Transferencias</div>'
         '<div style="font-family:\'DM Sans\',sans-serif; font-size:1.5rem; font-weight:800; '
         f'color:#26262b;">${fmt_money(transferencia_real)}</div></div>'
-        '</div>',
+    )
+    if _acepta_tarjeta:
+        _cajas_html += (
+            '<div style="flex:1; background:#f6f7f9; border:1px solid #e6e8ec; border-radius:10px; '
+            'padding:10px 14px;">'
+            '<div style="font-size:0.78rem; color:#6b6b64;">💳 Datáfono</div>'
+            '<div style="font-family:\'DM Sans\',sans-serif; font-size:1.5rem; font-weight:800; '
+            f'color:#26262b;">${fmt_money(tarjeta_real)}</div></div>'
+        )
+    st.markdown(
+        f'<div style="display:flex; gap:10px; margin-bottom:4px;">{_cajas_html}</div>',
         unsafe_allow_html=True,
     )
     st.caption("Si algún monto no coincide, vuelve y corrígelo antes de cerrar.")
@@ -935,7 +1091,8 @@ def _dialog_confirmar_cierre(cierre_id: int, efvo_esp: int, transf_esp: int,
         if st.button("✅ Sí, cerrar caja", key="btn_confirmar_cierre_final",
                      type="primary", use_container_width=True):
             cerrar_caja(cierre_id, efvo_esp, transf_esp,
-                        efectivo_real, transferencia_real, diferencia)
+                        efectivo_real, transferencia_real, diferencia,
+                        tarjeta_esperada=tarjeta_esp, tarjeta_real=tarjeta_real)
             if diferencia == 0:
                 estado = "cuadrada"
             elif diferencia < 0:
@@ -957,6 +1114,740 @@ def _dialog_confirmar_cierre(cierre_id: int, efvo_esp: int, transf_esp: int,
             st.rerun()
 
 
+def _bloque_historial_movimientos(cid: int):
+    """Histórico compacto del turno (neto + expander con cada movimiento). Compartido por
+    la sección de flujo de caja del admin y la caja simple del cajero."""
+    movs = movimientos_del_turno(cid)
+    if not movs:
+        return
+    neto = neto_movimientos(cid)
+    signo = "+" if neto >= 0 else "−"
+    color = "#16a34a" if neto >= 0 else "#dc2626"
+    st.markdown(
+        f'<div style="font-size:0.82rem; color:#45443e; margin-top:8px;">Efecto neto en el '
+        f'cajón: <b style="color:{color};">{signo}${fmt_money(abs(neto))}</b></div>',
+        unsafe_allow_html=True,
+    )
+    with st.expander(f"Ver movimientos del turno ({len(movs)})"):
+        for mv in movs:
+            etiqueta, c = _MOV_LABEL.get(mv["tipo"], (mv["tipo"], "#6b6b64"))
+            signo_mv = "+" if mv["tipo"] in TIPOS_ENTRADA else "−"
+            extra = f" · {html.escape(str(mv['motivo'] or mv['actor_nombre'] or ''))}".rstrip(" ·")
+            st.markdown(
+                f'<div style="display:flex; justify-content:space-between; font-size:0.8rem; '
+                f'padding:4px 0; border-bottom:1px solid #f2f1ed;">'
+                f'<span style="color:#45443e;">{etiqueta} · {_fechahora(mv["creado_at"])}'
+                f'{"" if extra == " · " else extra}</span>'
+                f'<span style="color:{c}; font-weight:700;">{signo_mv}${fmt_money(mv["monto"])}</span></div>',
+                unsafe_allow_html=True,
+            )
+
+
+def _bloque_resultado_cierre():
+    """Revelación del resultado del último cierre (conteo a ciegas): se muestra una sola
+    vez, justo después de finalizar el turno. Compartida por el render de admin y el de
+    la caja simple — misma regla, mismo texto en los dos."""
+    _res = st.session_state.pop("_cierre_resultado", None)
+    if not _res:
+        return
+    dif = int(_res["diferencia"])
+    contado = int(_res["efectivo_real"])
+    if dif == 0:
+        _pill("#dcfce7", "#86efac", "#14532d",
+              f"✅ Caja cuadrada. Contaste ${fmt_money(contado)} y coincide con lo esperado.")
+    elif dif < 0:
+        _pill("#fef3c7", "#fcd34d", "#92400e",
+              f"⚠️ Faltante en caja: -${fmt_money(-dif)} (contaste ${fmt_money(contado)}).")
+    else:
+        _pill("#e9e7fb", "#bcb4f0", "#4b43b0",
+              f"ℹ️ Sobrante en caja: +${fmt_money(dif)} (contaste ${fmt_money(contado)}).")
+    st.markdown("<div style='height:10px;'></div>", unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CAJA SIMPLE · home del cajero (botones grandes)
+# ══════════════════════════════════════════════════════════════════════════════
+# Reutiliza los MISMOS diálogos y helpers de BD que usa el admin (_dialog_gasto,
+# _dialog_base, _dialog_retorno, _dialog_cobro_masivo, _dialog_confirmar_cierre,
+# pedidos.dialog_cobrar…): esta sección solo cambia la PRESENTACIÓN, nunca la lógica de
+# negocio ni los candados de caja (conteo a ciegas, H1, H2, anti-skimming).
+#
+# Streamlit no permite abrir un @st.dialog dentro de otro en el mismo run. Los diálogos
+# de la caja simple (Repartidores, Gastos, Cobrar) necesitan abrir un SEGUNDO diálogo
+# desde dentro (p. ej. "Cobrar" de una mesa → pedidos.dialog_cobrar). Se resuelve con el
+# mismo patrón "pedir/abrir" que ya usa monitor_mesas.py: se guarda la intención en
+# session_state y se relanza; el diálogo real se abre en el run siguiente, DESDE FUERA
+# del diálogo que lo pidió.
+# Refresco en vivo (Tanda 3): mientras un diálogo esté en camino/abierto, el fragmento de
+# la home NO debe auto-relanzarse por su temporizador (le cerraría el modal encima del
+# cajero). Mismo problema que resuelve Monitor con '_mon_refresco_pausa', pero aquí la
+# pausa se guarda como TIMESTAMP, no como booleano: algunos cierres (p. ej. un cobro
+# exitoso en pedidos.dialog_cobrar, que no conoce este módulo) no pasan por
+# _reanudar_refresco_caja(), así que un booleano se quedaría pegado en pausa para
+# siempre. Con el timestamp, la pausa expira sola a los _REFRESCO_PAUSA_MAX segundos
+# aunque nadie la libere explícitamente — red de seguridad, no el camino normal. El
+# techo es generoso (10 min, no 90s): un diálogo abierto de verdad (p. ej. "Cerrar
+# turno" mientras el cajero cuenta efectivo) puede durar más de 90s, y si la pausa
+# expirara con el modal todavía abierto, el timer del fragmento lo relanzaría y
+# podría tumbarlo — el mismo fallo que Monitor evita manteniendo su pausa sin límite.
+_REFRESCO_PAUSA_MAX = 600  # s
+
+
+def _pedir_dialogo_simple(kind: str, **args) -> None:
+    st.session_state["_caja_simple_dialog"] = {"kind": kind, **args}
+    st.session_state["_caja_refresco_pausa_ts"] = time.time()
+    st.rerun()
+
+
+def _reanudar_refresco_caja() -> None:
+    """Quita la pausa del refresco en vivo de la home del cajero. Se llama desde los
+    cierres que vuelven a la home (no desde los que encadenan a otro diálogo)."""
+    st.session_state.pop("_caja_refresco_pausa_ts", None)
+
+
+def _refresco_caja_pausado() -> bool:
+    ts = st.session_state.get("_caja_refresco_pausa_ts")
+    if not ts:
+        return False
+    if time.time() - float(ts) > _REFRESCO_PAUSA_MAX:
+        st.session_state.pop("_caja_refresco_pausa_ts", None)
+        return False
+    return True
+
+
+def _abrir_dialogo_simple_pendiente() -> None:
+    d = st.session_state.get("_caja_simple_dialog")
+    if not d:
+        return
+    st.session_state["_caja_simple_dialog"] = None   # one-shot: Streamlit mantiene el modal abierto
+    kind = d.get("kind")
+    if kind == "cobrar":
+        pedidos.dialog_cobrar(d["ids"], d["titulo"], d["saldo"], d["uid"])
+    elif kind == "cobrar_mesas":
+        _dialog_cobrar_mesas()
+    elif kind == "detalle_cuenta":
+        _dialog_detalle_cuenta(d["ids"], d["nombre"], d["tipo"])
+    elif kind == "home_repartidores":
+        _dialog_repartidores_simple(d["cierre_id"])
+    elif kind == "home_gastos":
+        _dialog_gastos_simple(d["cierre_id"])
+    elif kind == "home_cerrar_turno":
+        _dialog_cerrar_turno_simple(d["cierre"])
+    elif kind == "home_cajon":
+        _dialog_abrir_cajon_simple(d["cierre_id"])
+    elif kind == "home_equipo":
+        _dialog_equipo_turno()
+    elif kind == "base":
+        _dialog_base(d["cierre_id"])
+    elif kind == "retorno":
+        _dialog_retorno(d["bid"], d["base_monto"], d.get("nombre", ""), d.get("pend_saldo", 0))
+    elif kind == "cobro_masivo":
+        _dialog_cobro_masivo(d["bid"], d["nombre"], d["ids"], d["saldo_total"])
+    elif kind == "gasto":
+        _dialog_gasto(d["cierre_id"])
+    elif kind == "reingreso":
+        _dialog_reingreso(d["gasto_id"], d["gasto_monto"], d.get("motivo", ""))
+    elif kind == "confirmar_cierre":
+        _dialog_confirmar_cierre(d["cierre_id"], d["efvo_esp"], d["transf_esp"],
+                                 d["efectivo_real"], d["transferencia_real"],
+                                 d["diferencia"], d["total_esperado"],
+                                 tarjeta_esp=d.get("tarjeta_esp", 0),
+                                 tarjeta_real=d.get("tarjeta_real", 0))
+
+
+def _on_abrir_caja_dismiss() -> None:
+    """El usuario cerró el modal con la ✕/Esc. Como el despacho es PERSISTENTE (bandera
+    '_dlg_abrir_caja_open': render() reabre el diálogo en cada run mientras siga en
+    True), hay que limpiar el estado aquí o el diálogo se reabriría de inmediato en el
+    siguiente rerun — quedaría atrapado sin poder cerrarse. Streamlit re-ejecuta solo
+    tras el callback, así que NO llamamos st.rerun() (mismo patrón que
+    monitor_mesas._on_edit_dismiss)."""
+    st.session_state["_dlg_abrir_caja_open"] = False
+    st.session_state.pop("_dlg_abrir_caja_id", None)
+
+
+@st.dialog("🟢 Abrir caja", on_dismiss=_on_abrir_caja_dismiss)
+def _dialog_abrir_caja():
+    """Apertura de turno EN DOS PASOS, compartida por admin y caja simple: (1) define la
+    base de efectivo, (2) si el cierre anterior dejó meseros bloqueados (cerrar_caja los
+    bloquea en bloque), los activa aquí mismo — así el cajero no tiene que ir aparte a
+    Administración cada mañana solo para que los meseros puedan volver a entrar.
+
+    Se mantiene abierto entre reruns con el mismo mecanismo de flag persistente en
+    session_state que usa el resto de la caja simple: mientras '_dlg_abrir_caja_open' siga
+    en True, render() vuelve a llamar esta función en cada run (ver abajo)."""
+    if not st.session_state.get("_dlg_abrir_caja_id"):
+        monto_apertura = int(st.number_input(
+            "Monto de Apertura (Base en Efectivo)", min_value=0, value=0, step=1000,
+            format="%d", key="dlg_monto_apertura",
+            help="Efectivo con el que arranca la caja al inicio del turno.",
+        ) or 0)
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("🟢 Abrir Caja / Iniciar Turno", key="dlg_btn_abrir_caja",
+                         type="primary", use_container_width=True):
+                if abrir_caja(monto_apertura):
+                    flash(f"Caja abierta · base ${fmt_money(monto_apertura)}", "🟢")
+                    st.session_state["_dlg_abrir_caja_id"] = True
+                    st.rerun()
+                else:
+                    st.error("Ya hay un turno abierto.")
+        with c2:
+            if st.button("Cancelar", key="dlg_btn_abrir_caja_cancelar",
+                         use_container_width=True):
+                st.session_state["_dlg_abrir_caja_open"] = False
+                st.rerun()
+        return
+
+    # Paso 2: el turno ya abrió. Meseros que quedaron bloqueados por el cierre anterior.
+    bloqueados = [e for e in empleados.listar_empleados(incluir_inactivos=False)
+                  if e["rol"] == "mesero" and e["bloqueado"]]
+    if not bloqueados:
+        st.session_state["_dlg_abrir_caja_open"] = False
+        st.session_state.pop("_dlg_abrir_caja_id", None)
+        st.rerun()
+        return
+
+    st.success("Turno iniciado.")
+    st.caption("Estos meseros quedaron bloqueados por el cierre anterior. Actívalos para "
+               "que su PIN vuelva a servir.")
+    for e in bloqueados:
+        eid = int(e["id"])
+        col_a, col_b = st.columns([3, 1])
+        with col_a:
+            st.markdown(
+                f'<div style="font-size:0.9rem; color:#45443e; padding:6px 0;">'
+                f'🧑‍🍳 {html.escape(str(e["nombre"]))}</div>', unsafe_allow_html=True)
+        with col_b:
+            if st.button("Activar", key=f"dlg_activar_mesero_{eid}",
+                         use_container_width=True):
+                if empleados.reactivar_acceso(eid):
+                    # Mismo nombre de evento que usaba la vista Meseros (Reactivar),
+                    # para no fragmentar el libro mayor en dos taxonomías distintas.
+                    audit.registrar("acceso_reactivado", "empleado", eid,
+                                    {"nombre": e["nombre"], "via": "apertura_caja"})
+                    flash(f"{e['nombre']} activado", "🟢")
+                st.rerun()
+    if len(bloqueados) > 1:
+        if st.button("Activar todos", key="dlg_activar_todos", use_container_width=True):
+            for e in bloqueados:
+                eid = int(e["id"])
+                if empleados.reactivar_acceso(eid):
+                    audit.registrar("acceso_reactivado", "empleado", eid,
+                                    {"nombre": e["nombre"], "via": "apertura_caja"})
+            flash("Todos los meseros activados", "🟢")
+            st.rerun()
+    if st.button("Listo, empezar turno", key="dlg_abrir_caja_listo", type="primary",
+                 use_container_width=True):
+        st.session_state["_dlg_abrir_caja_open"] = False
+        st.session_state.pop("_dlg_abrir_caja_id", None)
+        st.rerun()
+
+
+@st.dialog("🗄️ Abrir cajón")
+def _dialog_abrir_cajon_simple(cierre_id: int):
+    st.caption("Abre el cajón sin que haya una venta detrás (p. ej. cambiar un billete). "
+               "Queda registrado en la auditoría.")
+    motivo = st.text_input("Motivo (opcional)", key="dlg_cajon_motivo",
+                           placeholder="Ej: cambio de billete de $50.000")
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("🗄️ Abrir cajón", key="dlg_cajon_confirmar", type="primary",
+                     use_container_width=True):
+            enqueue_abrir_cajon(motivo)
+            audit.registrar("cajon_abierto", "caja", int(cierre_id),
+                            {"motivo": (motivo or "").strip() or None})
+            flash("Cajón abierto", "🗄️")
+            _reanudar_refresco_caja()
+            st.rerun()
+    with c2:
+        if st.button("Cancelar", key="dlg_cajon_cancelar", use_container_width=True):
+            _reanudar_refresco_caja()
+            st.rerun()
+
+
+@st.dialog("👥 Equipo del turno")
+def _dialog_equipo_turno():
+    """Salida (bloquear acceso) / Reactivar de un MESERO a media jornada — no solo al
+    abrir caja (_dialog_abrir_caja ya cubre los que quedaron bloqueados del cierre
+    anterior, pero no a alguien que llega tarde o hay que sacar a medio turno). Antes
+    esto vivía en la vista Meseros, que ahora es solo-admin (P3); esto reabre SOLO ese
+    gesto puntual para el cajero, sin la gestión de perfiles/PIN (crear, regenerar PIN,
+    dar de baja siguen siendo manage_empleados → solo admin, ver views/meseros.py)."""
+    lista = [e for e in empleados.listar_empleados(incluir_inactivos=False)
+             if e["rol"] == "mesero"]
+    if not lista:
+        st.caption("No hay meseros con perfil activo.")
+    for e in lista:
+        eid = int(e["id"])
+        nombre = str(e["nombre"])
+        col_a, col_b = st.columns([3, 1.2])
+        with col_a:
+            estado = "🔒 Bloqueado" if e["bloqueado"] else "🟢 Activo"
+            st.markdown(
+                f'<div style="font-size:0.9rem; color:#45443e; padding:6px 0;">'
+                f'{html.escape(nombre)} · {estado}</div>', unsafe_allow_html=True)
+        with col_b:
+            if e["bloqueado"]:
+                if st.button("▶ Reactivar", key=f"equipo_reactivar_{eid}",
+                             use_container_width=True):
+                    if empleados.reactivar_acceso(eid):
+                        audit.registrar("acceso_reactivado", "empleado", eid,
+                                        {"nombre": nombre, "via": "equipo_turno"})
+                        flash(f"Acceso reactivado · {nombre}", "▶")
+                    st.rerun()
+            else:
+                if st.button("⏹ Salida", key=f"equipo_salida_{eid}",
+                             use_container_width=True,
+                             help="Cerrar turno: bloquea el PIN y cierra su sesión ahora"):
+                    if empleados.bloquear_acceso(eid):
+                        audit.registrar("acceso_bloqueado", "empleado", eid,
+                                        {"nombre": nombre, "via": "equipo_turno"})
+                        flash(f"Turno cerrado · {nombre} (su acceso queda bloqueado)", "🔒")
+                    st.rerun()
+    if st.button("Cerrar", key="equipo_turno_cerrar", use_container_width=True):
+        _reanudar_refresco_caja()
+        st.rerun()
+
+
+@st.dialog("💵 Cobrar")
+def _dialog_cobrar_mesas():
+    cuentas = _cuentas_por_cobrar_hoy()
+    if cuentas is None:
+        st.error("⚠️ No se pudieron leer las cuentas pendientes (conexión). Reintenta en "
+                 "unos segundos.")
+        if st.button("Volver", key="simple_cobrarmesas_err", use_container_width=True):
+            _reanudar_refresco_caja()
+            st.rerun()
+        return
+    if cuentas:
+        st.caption("Elige la cuenta para ver el detalle y cobrar.")
+        for c in cuentas:
+            col_a, col_b = st.columns([3, 1])
+            with col_a:
+                icono = "🍽️" if c["tipo"] == "mesa" else "🛍️"
+                lista_txt = (' <span style="color:#16a34a; font-weight:700;">✅ lista</span>'
+                            if c.get("lista") else "")
+                st.markdown(
+                    f'<div style="font-size:0.9rem; color:#45443e; padding:6px 0;">{icono} '
+                    f'<b>{html.escape(str(c["nombre"]))}</b>{lista_txt} · '
+                    f'restan ${fmt_money(c["saldo"])}</div>', unsafe_allow_html=True)
+            with col_b:
+                key = f"simple_vercuenta_{c['tipo']}_{'_'.join(map(str, c['ids']))}"
+                if st.button("Ver", key=key, use_container_width=True):
+                    _pedir_dialogo_simple("detalle_cuenta", ids=c["ids"], nombre=c["nombre"],
+                                          tipo=c["tipo"])
+    else:
+        st.info("No hay cuentas pendientes de cobro por ahora.")
+
+    # Cobradas hoy: sin esto, reimprimir un recibo era casi inalcanzable (esa opción
+    # solo vive dentro del checkout de una cuenta, y una cuenta ya saldada no aparece en
+    # ningún otro listado). 'Reimprimir' es una acción directa (no abre otro diálogo),
+    # así que se llama sin pasar por el despacho pedir/abrir.
+    cobradas = _cuentas_cobradas_hoy()
+    if cobradas:
+        st.divider()
+        with st.expander(f"Cobradas hoy ({len(cobradas)})"):
+            for c in cobradas:
+                col_a, col_b = st.columns([3, 1])
+                with col_a:
+                    icono = "🍽️" if c["tipo"] == "mesa" else "🛍️"
+                    st.markdown(
+                        f'<div style="font-size:0.85rem; color:#6b6b64; padding:6px 0;">'
+                        f'{icono} {html.escape(str(c["nombre"]))} · '
+                        f'${fmt_money(c["total"])}</div>', unsafe_allow_html=True)
+                with col_b:
+                    key = f"simple_reimprimir_{c['tipo']}_{'_'.join(map(str, c['ids']))}"
+                    if st.button("🖨️", key=key, use_container_width=True,
+                                help="Reimprimir recibo"):
+                        pedidos.reimprimir_recibo(c["ids"], c["nombre"])
+                        flash(f"Recibo reimpreso · {c['nombre']}", "🖨️")
+                        st.rerun()
+
+    if st.button("Cerrar", key="simple_cobrarmesas_cerrar", use_container_width=True):
+        _reanudar_refresco_caja()
+        st.rerun()
+
+
+# Detalle de cuenta: escoger mesa/pedido → ver TODO lo que consumió (ítems, abonos,
+# saldo) → confirmar el cobro (todo de una vez o pedido por pedido) o imprimir la
+# cuenta. Evita cobrar a ciegas y evita que el cajero tenga que ir a Monitor a
+# verificar qué pidió la mesa cuando el cliente pregunta.
+@st.dialog("🧾 Cuenta")
+def _dialog_detalle_cuenta(ids: list, nombre: str, tipo: str):
+    ids = [int(i) for i in ids]
+    ordenes = _pedidos_con_items(ids)
+    if ordenes is None:
+        st.error("⚠️ No se pudo leer el detalle de esta cuenta (conexión). Reintenta en "
+                 "unos segundos.")
+        if st.button("Volver", key="detalle_cuenta_err", use_container_width=True):
+            _reanudar_refresco_caja()
+            st.rerun()
+        return
+
+    icono = "🍽️" if tipo == "mesa" else "🛍️"
+    st.markdown(f'<div style="font-size:1rem; font-weight:700; color:#26262b; '
+               f'margin-bottom:8px;">{icono} {html.escape(str(nombre))}</div>',
+               unsafe_allow_html=True)
+
+    # Conciliación en vivo: el saldo real sale de AQUÍ (no del que traía la tarjeta de
+    # la lista), igual que hace _dialog_retorno con las bases de repartidor.
+    saldo_real = sum(o["saldo"] for o in ordenes)
+    varios = len(ordenes) > 1
+    for o in ordenes:
+        with st.container(border=True):
+            if varios:
+                st.markdown(f'<div style="font-size:0.78rem; color:#a3a39b; '
+                           f'margin-bottom:2px;">Pedido #{o["id"]}</div>',
+                           unsafe_allow_html=True)
+            st.markdown(_items_html(o["items"]), unsafe_allow_html=True)
+            if o["total_pagado"] > 0:
+                st.markdown(
+                    f'<div style="display:flex; justify-content:space-between; '
+                    f'padding-top:4px; margin-top:4px; border-top:1px solid #ececec; '
+                    f'font-size:0.82rem; color:#6b6b64;">'
+                    f'<span>Abonado</span><span>${fmt_money(o["total_pagado"])}</span></div>',
+                    unsafe_allow_html=True)
+            st.markdown(
+                f'<div style="display:flex; justify-content:space-between; '
+                f'font-weight:700; color:#26262b; font-size:0.9rem; margin-top:2px;">'
+                f'<span>{"Saldo" if o["total_pagado"] > 0 else "Total"}</span>'
+                f'<span>${fmt_money(o["saldo"] if o["saldo"] > 0 else o["total"])}</span></div>',
+                unsafe_allow_html=True)
+            if varios and o["saldo"] > 0:
+                if st.button(f"💵 Cobrar #{o['id']} (${fmt_money(o['saldo'])})",
+                             key=f"detalle_cobrar_{o['id']}", use_container_width=True):
+                    _pedir_dialogo_simple(
+                        "cobrar", ids=[o["id"]], titulo=f"Pedido #{o['id']} · {nombre}",
+                        saldo=int(o["saldo"]), uid=f"detalle_{o['id']}")
+
+    st.markdown("<div style='height:4px;'></div>", unsafe_allow_html=True)
+    if saldo_real > 0:
+        if st.button(f"💵 Cobrar todo (${fmt_money(saldo_real)})", key="detalle_cobrar_todo",
+                     type="primary", use_container_width=True):
+            _pedir_dialogo_simple(
+                "cobrar", ids=ids, titulo=nombre, saldo=int(saldo_real),
+                uid=f"detalle_todo_{'_'.join(map(str, ids))}")
+    else:
+        st.success("✅ Esta cuenta ya está saldada.")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("🧾 Imprimir cuenta", key="detalle_imprimir", use_container_width=True):
+            pedidos.enqueue_prerecibo(ids, titulo=nombre)
+            flash(f"Cuenta impresa · {nombre}", "🖨️")
+            _reanudar_refresco_caja()
+            st.rerun()
+    with c2:
+        if st.button("← Volver", key="detalle_volver", use_container_width=True):
+            _pedir_dialogo_simple("cobrar_mesas")
+
+
+@st.dialog("🛵 Repartidores")
+def _dialog_repartidores_simple(cierre_id: int):
+    cid = int(cierre_id)
+    bases = movimientos_abiertos(cid, "base_repartidor")
+    if not bases:
+        st.caption("No hay repartidores en ruta.")
+    for b in bases:
+        bid = int(b["id"])
+        nombre = str(b["actor_nombre"] or "Repartidor")
+        base_monto = int(b["monto"])
+        ordenes = pedidos_de_base(bid)
+        if ordenes is None:
+            st.warning(f"⚠️ No se pudieron leer los pedidos de la base de {html.escape(nombre)} "
+                       "(conexión). Reintenta.")
+            continue
+        n_ped = len(ordenes)
+        total_ped = sum(o["total"] for o in ordenes)
+        cobrado_ped = sum(o["cobrado"] for o in ordenes)
+        pend_saldo = sum(o["saldo"] for o in ordenes)
+        color_pend = "#16a34a" if pend_saldo == 0 else "#dc2626"
+        st.markdown(
+            f'<div class="order-card" style="border-left:4px solid #6c5ce0; margin-bottom:6px;">'
+            f'<div style="font-size:0.9rem; color:#45443e;">🛵 <b>{html.escape(nombre)}</b></div>'
+            f'<div style="font-size:0.8rem; color:#6b6b64; margin-top:2px;">'
+            f'Base ${fmt_money(base_monto)} · {n_ped} pedido(s) · '
+            f'cobrado ${fmt_money(cobrado_ped)} de ${fmt_money(total_ped)} · '
+            f'<b style="color:{color_pend};">por cobrar ${fmt_money(pend_saldo)}</b></div></div>',
+            unsafe_allow_html=True,
+        )
+        efectivo_ids = [int(o["id"]) for o in ordenes
+                        if o["saldo"] > 0 and (o["metodo_pago"] or "efectivo") == "efectivo"]
+        efectivo_saldo = sum(o["saldo"] for o in ordenes
+                             if o["saldo"] > 0 and (o["metodo_pago"] or "efectivo") == "efectivo")
+        if len(efectivo_ids) > 1:
+            if st.button(f"💵 Cobrar todo en efectivo (${fmt_money(efectivo_saldo)})",
+                         key=f"simple_basecobro_masivo_{bid}", use_container_width=True):
+                _pedir_dialogo_simple("cobro_masivo", bid=bid, nombre=nombre,
+                                      ids=efectivo_ids, saldo_total=efectivo_saldo)
+        for o in ordenes:
+            oid = int(o["id"])
+            if o["saldo"] <= 0:
+                continue
+            col_o, col_b = st.columns([3, 1])
+            with col_o:
+                detalle = f'por cobrar ${fmt_money(o["saldo"])}'
+                if o["vueltas"] > 0:
+                    detalle += f' · vueltas ${fmt_money(o["vueltas"])}'
+                st.markdown(
+                    f'<div style="font-size:0.8rem; color:#6b6b64; padding:4px 0;">'
+                    f'#{oid} · {html.escape(str(o["nombre"]))} · {detalle}</div>',
+                    unsafe_allow_html=True,
+                )
+            with col_b:
+                if st.button("💵 Cobrar", key=f"simple_basecobro_{bid}_{oid}",
+                             use_container_width=True):
+                    _pedir_dialogo_simple("cobrar", ids=[oid],
+                                          titulo=f"Pedido #{oid} · {nombre}",
+                                          saldo=int(o["saldo"]), uid=f"simplebase_{bid}_{oid}")
+        cerrar_bloqueado = pend_saldo > 0
+        if st.button("🟢 Cerrar base · recibir vueltas", key=f"simple_ret_{bid}",
+                     use_container_width=True, disabled=cerrar_bloqueado,
+                     help=("Cobra primero los pedidos pendientes para poder cerrar."
+                           if cerrar_bloqueado else
+                           "Devuelve las vueltas sobrantes y concilia la base.")):
+            _pedir_dialogo_simple("retorno", bid=bid, base_monto=base_monto, nombre=nombre,
+                                  pend_saldo=pend_saldo)
+        if cerrar_bloqueado:
+            st.caption(f"⚠️ Faltan ${fmt_money(pend_saldo)} por cobrar para cerrar esta base.")
+        st.divider()
+    if st.button("🛵 Nueva base de repartidor", key="simple_btn_nueva_base", type="primary",
+                 use_container_width=True):
+        # Higiene de estado (ver _seccion_flujo_caja): una base anterior no debe dejar
+        # nombre/monto/selección pegados en el diálogo.
+        for _k in ("base_nombre", "base_monto", "base_pedidos", "_base_prev_sel"):
+            st.session_state.pop(_k, None)
+        _pedir_dialogo_simple("base", cierre_id=cid)
+    if st.button("Cerrar", key="simple_repartidores_cerrar", use_container_width=True):
+        _reanudar_refresco_caja()
+        st.rerun()
+
+
+@st.dialog("🧾 Gasto de caja")
+def _dialog_gastos_simple(cierre_id: int):
+    cid = int(cierre_id)
+    gastos = movimientos_abiertos(cid, "gasto")
+    if gastos:
+        st.caption("Gastos abiertos · esperan la devolución del cambio.")
+        for g in gastos:
+            gid = int(g["id"])
+            motivo = str(g["motivo"] or "")
+            quien = f" · {html.escape(str(g['actor_nombre']))}" if g["actor_nombre"] else ""
+            col_a, col_b = st.columns([3, 1])
+            with col_a:
+                st.markdown(
+                    f'<div style="font-size:0.85rem; color:#45443e; padding:6px 0;">'
+                    f'${fmt_money(g["monto"])}{quien}<br>'
+                    f'<span style="font-size:0.78rem; color:#a3a39b;">{html.escape(motivo)}'
+                    f'</span></div>',
+                    unsafe_allow_html=True,
+                )
+            with col_b:
+                if st.button("↩️ Devolver", key=f"simple_reing_{gid}", use_container_width=True):
+                    _pedir_dialogo_simple("reingreso", gasto_id=gid,
+                                          gasto_monto=int(g["monto"]), motivo=motivo)
+        st.divider()
+    if st.button("🧾 Nuevo gasto", key="simple_btn_nuevo_gasto", type="primary",
+                 use_container_width=True):
+        _pedir_dialogo_simple("gasto", cierre_id=cid)
+    if st.button("Cerrar", key="simple_gastos_cerrar", use_container_width=True):
+        _reanudar_refresco_caja()
+        st.rerun()
+
+
+@st.dialog("🔒 Cerrar turno")
+def _dialog_cerrar_turno_simple(cierre: dict):
+    # La caja SIEMPRE cuenta a ciegas (esta vista solo renderiza para quien no ve
+    # ingresos): sin métricas de venta ni diferencia en vivo, igual que el formulario
+    # de cierre del admin cuando ver_esperado=False.
+    cid = int(cierre["id"])
+    monto_apertura = int(cierre["monto_apertura"])
+    esp = ingresos_esperados(cierre["fecha_apertura"])
+    efvo_esp = esp["efectivo"]
+    transf_esp = esp["transferencia"]
+    tarjeta_esp = esp["tarjeta"]
+    neto_mov = neto_movimientos(cid)
+    total_esperado = monto_apertura + efvo_esp + neto_mov
+
+    st.caption("🙈 Conteo a ciegas: cuenta el efectivo y las transferencias y finaliza el "
+               "turno. Al cerrar verás si la caja cuadró o si falta/sobra.")
+
+    efectivo_real = int(st.number_input(
+        "Efectivo Físico Contado ($)", min_value=0, value=0, step=1000,
+        format="%d", key=f"simple_efectivo_real_{cid}",
+        help="Dinero en efectivo realmente contado en la caja.",
+    ) or 0)
+    transferencia_real = int(st.number_input(
+        "Transferencias Verificadas en Banco ($)", min_value=0, value=0, step=1000,
+        format="%d", key=f"simple_transferencia_real_{cid}",
+        help="Transferencias confirmadas en la cuenta bancaria.",
+    ) or 0)
+    # Datáfono (bloque A): solo se pide si el restaurante lo activó en Ajustes — si no,
+    # el formulario queda IDÉNTICO al de antes de este bloque.
+    tarjeta_real = 0
+    if bool(metodos_pago().get("tarjeta")):
+        tarjeta_real = int(st.number_input(
+            "Datáfono Verificado en el Banco ($)", min_value=0, value=0, step=1000,
+            format="%d", key=f"simple_tarjeta_real_{cid}",
+            help="Total de la tarjeta confirmado contra el reporte del datáfono/banco.",
+        ) or 0)
+    diferencia = efectivo_real - total_esperado
+
+    if st.button("Finalizar Turno y Cerrar Caja", key="simple_btn_finalizar_cierre",
+                 type="primary", use_container_width=True):
+        _pedir_dialogo_simple("confirmar_cierre", cierre_id=cid, efvo_esp=efvo_esp,
+                              transf_esp=transf_esp, efectivo_real=efectivo_real,
+                              transferencia_real=transferencia_real, diferencia=diferencia,
+                              total_esperado=total_esperado, tarjeta_esp=tarjeta_esp,
+                              tarjeta_real=tarjeta_real)
+    if st.button("Volver", key="simple_btn_cerrar_volver", use_container_width=True):
+        _reanudar_refresco_caja()
+        st.rerun()
+
+
+def _tarjeta_simple(col, icono: str, titulo: str, subtitulo: str, key: str, kind: str,
+                    destacar: bool = False, **kind_args):
+    """Una tarjeta grande y clicable de la home del cajero: icono + título + subtítulo de
+    estado (p. ej. 'N sin devolución') y un botón 'Abrir' de ancho completo. Abre su
+    diálogo vía _pedir_dialogo_simple (kind/kind_args), NUNCA llamándolo directo: esta
+    tarjeta vive dentro del fragmento en vivo (Tanda 3) y un diálogo llamado directo ahí
+    no sobrevive al siguiente refresco automático (mismo motivo por el que Monitor usa
+    _pedir_dialogo en vez de invocar sus diálogos en el sitio).
+    'destacar' pinta el borde izquierdo de la tarjeta en verde (alerta discreta, p. ej.
+    mesas listas para cobrar) vía el mismo patrón de centinela que usa la nav (.nav-box)."""
+    with col:
+        with st.container(border=True):
+            centinela = '<span class="tile-alerta"></span>' if destacar else ''
+            st.markdown(
+                f'{centinela}<div style="text-align:center; padding:4px 0;">'
+                f'<div style="font-size:1.8rem; line-height:1;">{icono}</div>'
+                f'<div style="font-family:\'DM Sans\',sans-serif; font-weight:800; '
+                f'font-size:1.05rem; color:#26262b; margin-top:6px;">{titulo}</div>'
+                f'<div style="font-size:0.8rem; color:#6b6b64; margin-top:2px;">{subtitulo}</div>'
+                f'</div>', unsafe_allow_html=True,
+            )
+            if st.button("Abrir", key=key, use_container_width=True):
+                _pedir_dialogo_simple(kind, **kind_args)
+
+
+def _caja_simple_en_vivo():
+    """Cuerpo EN VIVO de la home del cajero (Tanda 3): se re-ejecuta solo (fragmento,
+    ver _render_caja_simple) cada 30s mientras no haya un diálogo abierto/pendiente, así
+    los contadores (cuentas por cobrar, mesas listas, domicilios sin asignar) y el banner
+    de vueltas aparecen sin que el cajero tenga que tocar nada."""
+    st.markdown(
+        "<style>"
+        ".st-key-simple_tile_cobrar button, .st-key-simple_tile_repartidores button, "
+        ".st-key-simple_tile_gasto button, .st-key-simple_tile_cerrar button {"
+        "height:52px !important; font-weight:700 !important; font-size:1rem !important;}"
+        '[data-testid="stVerticalBlockBorderWrapper"]:has(.tile-alerta) {'
+        "border-left:4px solid #16a34a !important;}"
+        "</style>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(titulo_seccion('💰 Caja'), unsafe_allow_html=True)
+    st.markdown(
+        f'<div style="margin:-4px 0 12px 0;">{badge_agente_html()}</div>',
+        unsafe_allow_html=True,
+    )
+    _bloque_resultado_cierre()
+    pedidos.banner_cambio("caja")
+
+    cierre = cierre_activo()
+
+    if not cierre:
+        st.markdown(
+            '<div class="order-card" style="text-align:center; padding:1.6rem 1rem;">'
+            '<div style="font-size:2rem; line-height:1;">🔒</div>'
+            '<div style="font-family:\'DM Sans\',sans-serif; font-size:1.3rem; '
+            'font-weight:800; color:#26262b; margin-top:6px;">La caja se encuentra cerrada.</div>'
+            '<div style="color:#6b6b64; font-size:0.9rem; margin-top:4px;">Define la base en '
+            'efectivo e inicia un nuevo turno para comenzar a operar.</div>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("🟢 Abrir Caja / Iniciar Turno", key="simple_btn_abrir_caja",
+                     type="primary", use_container_width=True):
+            st.session_state["_dlg_abrir_caja_open"] = True
+            st.rerun()
+        return
+
+    cid = int(cierre["id"])
+    st.markdown(
+        f'<div class="order-card" style="border-left:4px solid #16a34a; margin-bottom:1rem;">'
+        f'<div class="order-id">Turno abierto · desde las {_hora(cierre["fecha_apertura"])}</div>'
+        f'<div style="color:#6b6b64; font-size:0.85rem; margin-top:2px;">'
+        f'Base ${fmt_money(int(cierre["monto_apertura"]))} · 🙈 Conteo a ciegas</div></div>',
+        unsafe_allow_html=True,
+    )
+
+    # Cuentas por cobrar hoy + cuántas ya están LISTAS (todo entregado, solo falta el
+    # pago — mismo criterio AZUL del Monitor). Alerta discreta: SOLO un número en el
+    # subtítulo y el borde verde de la tarjeta; el detalle vive en el diálogo.
+    n_cuentas = _cuentas_por_cobrar_hoy()
+    if n_cuentas is None:
+        sub_cobrar, n_listas = "—", 0
+    elif n_cuentas:
+        n_listas = sum(1 for c in n_cuentas if c.get("lista"))
+        sub_cobrar = f"{len(n_cuentas)} cuenta(s)" + (f" · {n_listas} lista(s) ✅" if n_listas else "")
+    else:
+        sub_cobrar, n_listas = "Sin pendientes", 0
+
+    bases_abiertas = movimientos_abiertos(cid, "base_repartidor")
+    gastos_abiertos = movimientos_abiertos(cid, "gasto")
+
+    # Domicilios/para llevar sin asignar a una base: mismo criterio, SOLO el número (evita
+    # llenar la home de tarjetas — el detalle vive dentro de 🛵 Repartidores).
+    domicilios = pedidos_domicilio_pendientes()
+    n_domicilios = len(domicilios) if domicilios else 0
+    sub_repartidores = f"{len(bases_abiertas)} en ruta" if bases_abiertas else "Ninguno en ruta"
+    if n_domicilios:
+        sub_repartidores += f" · {n_domicilios} por asignar"
+
+    r1c1, r1c2 = st.columns(2)
+    _tarjeta_simple(r1c1, "💵", "Cobrar mesa", sub_cobrar, "simple_tile_cobrar",
+                    "cobrar_mesas", destacar=(n_listas > 0))
+    _tarjeta_simple(r1c2, "🛵", "Repartidores", sub_repartidores, "simple_tile_repartidores",
+                    "home_repartidores", cierre_id=cid)
+
+    r2c1, r2c2 = st.columns(2)
+    _tarjeta_simple(r2c1, "🧾", "Gasto de caja",
+                    f"{len(gastos_abiertos)} sin devolución" if gastos_abiertos else
+                    "Ninguno abierto",
+                    "simple_tile_gasto", "home_gastos", cierre_id=cid)
+    _tarjeta_simple(r2c2, "🔒", "Cerrar turno", "Contar y finalizar",
+                    "simple_tile_cerrar", "home_cerrar_turno", cierre=cierre)
+
+    st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
+    s1, s2 = st.columns(2)
+    with s1:
+        if st.button("🗄️ Abrir cajón (cambio)", key="simple_btn_abrir_cajon",
+                     use_container_width=True):
+            _pedir_dialogo_simple("home_cajon", cierre_id=cid)
+    with s2:
+        if st.button("👥 Equipo del turno", key="simple_btn_equipo_turno",
+                     use_container_width=True,
+                     help="Da salida o reactiva a un mesero a media jornada"):
+            _pedir_dialogo_simple("home_equipo")
+
+    st.markdown("<div style='height:12px;'></div>", unsafe_allow_html=True)
+    _bloque_historial_movimientos(cid)
+
+
+def _render_caja_simple():
+    """Home del cajero: sin pestañas, sin inventario/importar, sin métricas de venta — 4
+    acciones grandes que cubren el turno completo (cobrar, repartidores, gastos, cerrar).
+    El diálogo pendiente se abre FUERA del fragmento en vivo (mismo patrón que Monitor:
+    'ya FUERA de los fragmentos: así es estable y los fragmentos quedan pausados mientras
+    esté abierto'); el cuerpo dinámico corre en un fragmento run_every=30s que se pausa
+    mientras haya un diálogo en camino o abierto (_refresco_caja_pausado)."""
+    _abrir_dialogo_simple_pendiente()
+    rv = None if _refresco_caja_pausado() else "30s"
+    st.fragment(run_every=rv)(_caja_simple_en_vivo)()
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # SECCIÓN: CAJA · CIERRE DE TURNO
 # ══════════════════════════════════════════════════════════════════════════════
@@ -966,17 +1857,26 @@ def render():
     if not auth.can("manage_caja"):
         st.error("🔒 Acceso denegado")
         st.stop()
-    # Caja reúne el cierre operativo + Inventario e Importar (movidos desde 🍔 Menú): el
-    # cajero fija el stock del día y hace cargas masivas sin entrar a Administración. Las
-    # dos vistas se reutilizan tal cual desde views/menu.py (no se duplica su lógica).
-    tab_cierre, tab_inv, tab_imp = st.tabs(
-        ["💰 Cierre de caja", "📦 Inventario", "📥 Importar"])
-    with tab_cierre:
-        _render_cierre()
-    with tab_inv:
-        menu._render_inventario()
-    with tab_imp:
-        menu._render_importar()
+    # Apertura de turno: diálogo compartido por admin y caja simple (ver _dialog_abrir_caja).
+    # Se re-invoca en CADA run mientras el flag siga activo — así Streamlit mantiene el
+    # mismo diálogo abierto a través de sus dos pasos (base → activar meseros).
+    if st.session_state.get("_dlg_abrir_caja_open"):
+        _dialog_abrir_caja()
+    # El admin (ve_revenue) usa el entorno completo: cierre + Inventario e Importar
+    # (movidos desde 🍔 Menú, reutilizados tal cual sin duplicar su lógica). El cajero usa
+    # una home simplificada de botones grandes (_render_caja_simple): sin pestañas, sin
+    # inventario/importar — esas son tareas de configuración, no del turno del día a día.
+    if auth.can("see_revenue"):
+        tab_cierre, tab_inv, tab_imp = st.tabs(
+            ["💰 Cierre de caja", "📦 Inventario", "📥 Importar"])
+        with tab_cierre:
+            _render_cierre()
+        with tab_inv:
+            menu._render_inventario()
+        with tab_imp:
+            menu._render_importar()
+    else:
+        _render_caja_simple()
 
 
 def _render_cierre():
@@ -1003,20 +1903,8 @@ def _render_cierre():
     # Resultado del último cierre (REVELACIÓN del conteo a ciegas): tras finalizar el turno se
     # muestra aquí, prominente, si la caja cuadró o cuánto faltó/sobró. Se consume una sola vez
     # (la caja contó a ciegas, así que este es el momento en que se entera del resultado).
-    _res = st.session_state.pop("_cierre_resultado", None)
-    if _res:
-        dif = int(_res["diferencia"])
-        contado = int(_res["efectivo_real"])
-        if dif == 0:
-            _pill("#dcfce7", "#86efac", "#14532d",
-                  f"✅ Caja cuadrada. Contaste ${fmt_money(contado)} y coincide con lo esperado.")
-        elif dif < 0:
-            _pill("#fef3c7", "#fcd34d", "#92400e",
-                  f"⚠️ Faltante en caja: -${fmt_money(-dif)} (contaste ${fmt_money(contado)}).")
-        else:
-            _pill("#e9e7fb", "#bcb4f0", "#4b43b0",
-                  f"ℹ️ Sobrante en caja: +${fmt_money(dif)} (contaste ${fmt_money(contado)}).")
-        st.markdown("<div style='height:10px;'></div>", unsafe_allow_html=True)
+    _bloque_resultado_cierre()
+    pedidos.banner_cambio("caja_admin")
 
     cierre = cierre_activo()
 
@@ -1034,17 +1922,9 @@ def _render_cierre():
         )
         st.markdown("<br>", unsafe_allow_html=True)
 
-        monto_apertura = int(st.number_input(
-            "Monto de Apertura (Base en Efectivo)", min_value=0, value=0, step=1000,
-            format="%d", key="monto_apertura_nuevo",
-            help="Efectivo con el que arranca la caja al inicio del turno.",
-        ) or 0)
         if st.button("🟢 Abrir Caja / Iniciar Turno", key="btn_abrir_caja",
                      type="primary", use_container_width=True):
-            if abrir_caja(monto_apertura):
-                flash(f"Caja abierta · base ${fmt_money(monto_apertura)}", "🟢")
-            else:
-                flash("Ya hay un turno abierto", "⚠️")
+            st.session_state["_dlg_abrir_caja_open"] = True
             st.rerun()
 
     # ── ESTADO B: caja abierta (turno activo) ───────────────────────────────────
@@ -1053,6 +1933,10 @@ def _render_cierre():
         esp = ingresos_esperados(cierre["fecha_apertura"])
         efvo_esp = esp["efectivo"]
         transf_esp = esp["transferencia"]
+        tarjeta_esp = esp["tarjeta"]
+        # Datáfono (bloque A): solo se ve/pide si el restaurante lo activó en Ajustes — si
+        # no, esta pantalla queda IDÉNTICA a como estaba antes de este bloque.
+        _acepta_tarjeta = bool(metodos_pago().get("tarjeta"))
         # Efectivo esperado = base + ventas en efectivo + efecto neto del flujo de caja
         # (gastos/devoluciones y bases de repartidor/depósitos). Así el arqueo concilia
         # automáticamente con el dinero que salió y entró del cajón fuera de las ventas.
@@ -1097,10 +1981,15 @@ def _render_cierre():
         # Métricas en vivo del turno. Las ventas ESPERADAS solo para quien ve ingresos (admin);
         # a la caja se le muestra únicamente la base (no compromete el conteo a ciegas).
         if ver_esperado:
-            m1, m2, m3 = st.columns(3)
+            if _acepta_tarjeta:
+                m1, m2, m3, m4 = st.columns(4)
+            else:
+                m1, m2, m3 = st.columns(3)
             _metric(m1, f"${fmt_money(monto_apertura)}", "Base de Apertura")
             _metric(m2, f"${fmt_money(efvo_esp)}", "💵 Ventas Efectivo Esperadas", "metric-green")
-            _metric(m3, f"${fmt_money(transf_esp)}", "💳 Ventas Transferencia Esperadas", "metric-blue")
+            _metric(m3, f"${fmt_money(transf_esp)}", "📲 Ventas Transferencia Esperadas", "metric-blue")
+            if _acepta_tarjeta:
+                _metric(m4, f"${fmt_money(tarjeta_esp)}", "💳 Ventas Datáfono Esperadas", "metric-blue")
         else:
             _metric(st.columns(1)[0], f"${fmt_money(monto_apertura)}", "Base de Apertura")
 
@@ -1131,8 +2020,13 @@ def _render_cierre():
             # siquiera prellenado en el campo.
             efvo_default = max(0, total_esperado) if ver_esperado else 0
             transf_default = max(0, transf_esp) if ver_esperado else 0
+            tarjeta_default = max(0, tarjeta_esp) if ver_esperado else 0
 
-            f1, f2 = st.columns(2)
+            if _acepta_tarjeta:
+                f1, f2, f3 = st.columns(3)
+            else:
+                f1, f2 = st.columns(2)
+                f3 = None
             with f1:
                 # value se acota a >=0: 'total_esperado' puede salir NEGATIVO si los gastos /
                 # bases superan la base + ventas (el efectivo no puede ser negativo), y un
@@ -1149,6 +2043,14 @@ def _render_cierre():
                     step=1000, format="%d", key=f"transferencia_real_{cierre['id']}",
                     help="Transferencias confirmadas en la cuenta bancaria.",
                 ) or 0)
+            tarjeta_real = 0
+            if _acepta_tarjeta:
+                with f3:
+                    tarjeta_real = int(st.number_input(
+                        "Datáfono Verificado en el Banco ($)", min_value=0, value=tarjeta_default,
+                        step=1000, format="%d", key=f"tarjeta_real_{cierre['id']}",
+                        help="Total de la tarjeta confirmado contra el reporte del datáfono/banco.",
+                    ) or 0)
 
             # Diferencia de caja (solo efectivo). Se calcula siempre, pero el conteo a ciegas
             # solo la REVELA tras cerrar: la caja no la ve en vivo (no podría "cuadrar a mano"),
@@ -1173,7 +2075,19 @@ def _render_cierre():
                     transf_txt = f"faltan ${fmt_money(-dif_transf)} por verificar"
                 else:
                     transf_txt = f"hay ${fmt_money(dif_transf)} de más sobre lo esperado"
-                st.caption(f"💳 Transferencias verificadas vs. esperadas: {transf_txt}.")
+                st.caption(f"📲 Transferencias verificadas vs. esperadas: {transf_txt}.")
+
+                if _acepta_tarjeta:
+                    # Mismo contraste que transferencias, sobre el datáfono (contexto; no
+                    # afecta la caja física — la tarjeta nunca entra al cajón).
+                    dif_tarjeta = tarjeta_real - tarjeta_esp
+                    if dif_tarjeta == 0:
+                        tarjeta_txt = "coinciden con lo esperado"
+                    elif dif_tarjeta < 0:
+                        tarjeta_txt = f"faltan ${fmt_money(-dif_tarjeta)} por verificar"
+                    else:
+                        tarjeta_txt = f"hay ${fmt_money(dif_tarjeta)} de más sobre lo esperado"
+                    st.caption(f"💳 Datáfono verificado vs. esperado: {tarjeta_txt}.")
             else:
                 st.caption("🙈 Conteo a ciegas: cuenta el efectivo y las transferencias y finaliza "
                            "el turno. Al cerrar verás si la caja cuadró o si falta/sobra.")
@@ -1186,7 +2100,8 @@ def _render_cierre():
                          use_container_width=True):
                 _dialog_confirmar_cierre(int(cierre["id"]), efvo_esp, transf_esp,
                                          efectivo_real, transferencia_real, diferencia,
-                                         total_esperado)
+                                         total_esperado, tarjeta_esp=tarjeta_esp,
+                                         tarjeta_real=tarjeta_real)
 
     # ── Historial de turnos cerrados ────────────────────────────────────────────
     recientes = cierres_recientes()
@@ -1203,12 +2118,16 @@ def _render_cierre():
                 color, etiqueta = "#dc2626", f"faltante ${fmt_money(-dif)}"
             efectivo_real = int(t["efectivo_real"]) if t["efectivo_real"] is not None else 0
             transf_real = int(t["transferencia_real"]) if t["transferencia_real"] is not None else 0
+            tarjeta_real_t = int(t["tarjeta_real"]) if t.get("tarjeta_real") is not None else 0
+            # La tarjeta solo se agrega a la línea si ese turno tuvo movimiento: no ensucia
+            # el historial de turnos previos al datáfono (bloque A).
+            _tarjeta_txt = f' · datáfono ${fmt_money(tarjeta_real_t)}' if tarjeta_real_t else ''
             st.markdown(f"""
             <div class="order-card" style="border-left:4px solid {color};">
               <div style="display:flex; justify-content:space-between; align-items:center;">
                 <div style="font-size:0.85rem; color:#45443e;">
                   {_fechahora(t["fecha_apertura"])} → {_fechahora(t["fecha_cierre"])}
-                  <span style="color:#a3a39b;"> · base ${fmt_money(t["monto_apertura"])} · efectivo ${fmt_money(efectivo_real)} · transf. ${fmt_money(transf_real)}</span>
+                  <span style="color:#a3a39b;"> · base ${fmt_money(t["monto_apertura"])} · efectivo ${fmt_money(efectivo_real)} · transf. ${fmt_money(transf_real)}{_tarjeta_txt}</span>
                 </div>
                 <div style="color:{color}; font-weight:700; font-size:0.85rem;">{html.escape(etiqueta)}</div>
               </div>

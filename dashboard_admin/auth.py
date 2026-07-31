@@ -53,9 +53,11 @@ _ENV = {
 ROLE_VIEWS = {
     # 'admin' (Administración) va al FINAL → su ítem de navegación queda al fondo del
     # menú lateral. Entorno SOLO-ADMIN, aislado del flujo operativo: agrupa Resumen de
-    # ventas, Cancelaciones y Personal (marcaje de turno) en pestañas.
-    ADMIN:  ["monitor", "menu", "mesas", "nuevo", "caja", "meseros", "admin"],
-    CAJA:   ["monitor", "menu", "mesas", "nuevo", "caja", "meseros"],
+    # ventas, Cancelaciones, gestión de Personal (perfiles/PIN) y Actividad (marcaje de
+    # turno) en pestañas. 'meseros' (crear perfiles, PIN) ya NO es vista de navegación
+    # propia: crear/regenerar PIN es tarea de configuración, no del turno del cajero.
+    ADMIN:  ["monitor", "menu", "mesas", "nuevo", "caja", "admin"],
+    CAJA:   ["monitor", "menu", "mesas", "nuevo", "caja"],
     # Mesero NO gestiona mesas (crear/editar/borrar es tarea de caja/admin): solo toma
     # pedidos (nuevo), ve el salón en vivo (monitor) y consulta el menú (solo lectura).
     MESERO: ["nuevo", "monitor", "menu"],  # sin caja, sin gestión de mesas ni meseros

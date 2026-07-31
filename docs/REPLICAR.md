@@ -17,7 +17,7 @@ Tiempo estimado: una tarde. Requisitos: cuenta de Railway, cuenta de Twilio, el 
    ```bash
    cp scripts/restaurante.example.json mi_restaurante.json
    ```
-   Ahí defines: nombre/dirección/teléfono, saludo del bot, precios (plato del día, especiales, recargo de entrega), métodos de pago, **grupos del Plato del Día** (los pasos del configurador: mín/máx selecciones, si permite repetir), componentes iniciales y número de mesas.
+   Ahí defines: nombre/dirección/teléfono, saludo del bot, precios (plato del día, especiales, recargo de entrega), métodos de pago, **grupos del Plato del Día** (los pasos del configurador: mín/máx selecciones, si permite repetir), componentes iniciales, número de mesas y, opcionalmente, **extras incluidos por categoría** (`categorias_extras`, ver más abajo).
 2. Corre el aprovisionador (usa `psycopg2`, no necesitas `psql`):
    ```bash
    pip install psycopg2-binary
@@ -87,7 +87,17 @@ Notas:
 | Grupos del Plato del Día (pasos, mín/máx, repetir) | Panel → 🍽️ Plato del Día → 🧩 Grupos |
 | Opciones/stock de cada grupo | Panel → 🍽️ Plato del Día / 📦 Inventario |
 | Categorías de la carta (nombre, emoji, orden, horario) | Panel → 🍔 Menú → ⚙️ Ajustes → 🏷️ Categorías |
+| Extras incluidos por categoría (entrada/bebida sin costo) | Panel → 🍔 Menú → ⚙️ Ajustes → 🏷️ Categorías |
 | Carta (las 4 clásicas + las que agregue el restaurante) | Panel → 🍔 Menú |
 | Mesas | Panel → 🪑 Mesas |
 
 Lo que sigue requiriendo deploy/env: credenciales de Twilio, contraseñas del panel, `RESTAURANTE_ID`, URL de la app cliente y zona horaria (hoy fija en America/Bogota).
+
+### Extras incluidos por categoría (entrada/bebida sin costo)
+
+Una categoría del catálogo (p. ej. Especiales, A la carta, o una que agregue el restaurante) puede marcarse para que sus platos ofrezcan, sin costo extra, un selector opcional de uno o más grupos del Plato del Día (típicamente Entrada y/o Bebida) — el clásico "corrientazo" con sopa y jugo incluidos. Se activa por categoría desde 🏷️ Categorías; **ninguna categoría nueva lo trae por defecto** (catálogo simple).
+
+Dos cosas a tener en cuenta:
+
+- **Comparte inventario con el Plato del Día.** Si Sopa del día tiene stock/control de porciones, un Especial que la incluye descuenta del MISMO contador que el Plato del Día. Es el comportamiento correcto (es la misma olla de sopa), pero avísalo al restaurante para que no le parezca un error si ve bajar las porciones más rápido de lo esperado.
+- Solo se pueden marcar como extra los grupos de **selección única** del Plato del Día (mín/máx = 1, como Entrada o Bebida); un grupo multi-selección (como Acompañamientos) no aparece como opción en el editor.

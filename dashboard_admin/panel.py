@@ -28,7 +28,7 @@ import login_guard
 import mesero_keys
 import remember
 from views import (pedidos, monitor_mesas, nuevo_pedido, menu, mesas, resumen,
-                   caja, cancelaciones, meseros, reporte_personal)
+                   caja, cancelaciones, meseros, reporte_personal, facturas)
 from db import fecha_larga, ahora_bogota, restaurante_nombre
 
 load_dotenv()
@@ -518,10 +518,9 @@ div[data-testid="stColumn"] .stButton > button[kind="primary"]:hover {
 
 /* Verde vibrante → avanzar estado / cobrar / guardar / confirmar (positivas). */
 [class*="st-key-avanzar_"] button, [class*="st-key-cobrar_"] button,
-[class*="st-key-mon_cobrar_mesa_"] button, [class*="st-key-confirm_cobrar_"] button,
+[class*="st-key-confirm_cobrar_"] button,
 [class*="st-key-btn_guardar"] button, [class*="st-key-btn_confirmar"] button,
 div[data-testid="stColumn"] [class*="st-key-avanzar_"] .stButton > button,
-div[data-testid="stColumn"] [class*="st-key-mon_cobrar_mesa_"] .stButton > button,
 div[data-testid="stColumn"] [class*="st-key-confirm_cobrar_"] .stButton > button,
 div[data-testid="stColumn"] [class*="st-key-btn_guardar"] .stButton > button,
 div[data-testid="stColumn"] [class*="st-key-btn_confirmar"] .stButton > button {
@@ -529,10 +528,9 @@ div[data-testid="stColumn"] [class*="st-key-btn_confirmar"] .stButton > button {
     color: #ffffff !important; font-weight: 700 !important;
 }
 [class*="st-key-avanzar_"] button:hover, [class*="st-key-cobrar_"] button:hover,
-[class*="st-key-mon_cobrar_mesa_"] button:hover, [class*="st-key-confirm_cobrar_"] button:hover,
+[class*="st-key-confirm_cobrar_"] button:hover,
 [class*="st-key-btn_guardar"] button:hover, [class*="st-key-btn_confirmar"] button:hover,
 div[data-testid="stColumn"] [class*="st-key-avanzar_"] .stButton > button:hover,
-div[data-testid="stColumn"] [class*="st-key-mon_cobrar_mesa_"] .stButton > button:hover,
 div[data-testid="stColumn"] [class*="st-key-confirm_cobrar_"] .stButton > button:hover,
 div[data-testid="stColumn"] [class*="st-key-btn_guardar"] .stButton > button:hover,
 div[data-testid="stColumn"] [class*="st-key-btn_confirmar"] .stButton > button:hover {
@@ -776,9 +774,6 @@ st.markdown("""
 [class*="st-key-nav_active_caja"] button, [class*="st-key-nav_inactive_caja"] button {
     --ic: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><path d='M9 4.5h6'/><path d='M9 4.5l1.6 2.6M15 4.5l-1.6 2.6'/><path d='M10.6 7.1c-3 1.5-5.1 4.8-5.1 8.1 0 3 2.4 4.5 6.5 4.5s6.5-1.5 6.5-4.5c0-3.3-2.1-6.6-5.1-8.1z'/><path d='M12 11v5.6'/><path d='M13.8 12.2a2.1 2.1 0 0 0-1.9-1c-1 0-1.8.5-1.8 1.4 0 2 3.7 1 3.7 3 0 .9-.9 1.5-2 1.5a2.1 2.1 0 0 1-1.9-1.1'/></svg>");
 }
-[class*="st-key-nav_active_meseros"] button, [class*="st-key-nav_inactive_meseros"] button {
-    --ic: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><circle cx='12' cy='8' r='3.4'/><path d='M5.5 19.5a6.5 6.5 0 0 1 13 0'/></svg>");
-}
 [class*="st-key-nav_active_admin"] button, [class*="st-key-nav_inactive_admin"] button {
     --ic: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'><path d='M12 3.5l6.5 2.4v4.7c0 4-2.8 6.7-6.5 8-3.7-1.3-6.5-4-6.5-8V5.9z'/><circle cx='12' cy='10.3' r='1.3'/><path d='M12 11.6v2.3'/></svg>");
 }
@@ -826,10 +821,11 @@ st.markdown("""
 # run siguiente, antes de pintar la vista). Ver pedidos.flash()/drain_toasts().
 pedidos.drain_toasts()
 
-# Resumen ya no es una vista propia: vive como pestaña dentro de Administración. Si una
-# sesión traía 'resumen' como vista activa, la reapuntamos a 'admin'; el saneo por rol de
-# más abajo la corrige si el rol no la permite (p. ej. caja → su vista de aterrizaje).
-if st.session_state.get("current_view") == "resumen":
+# Resumen y Personal (gestión de empleados/PIN) ya no son vistas propias: viven como
+# pestañas dentro de Administración. Si una sesión traía alguna como vista activa, la
+# reapuntamos a 'admin'; el saneo por rol de más abajo la corrige si el rol no la permite
+# (p. ej. caja → su vista de aterrizaje, ya que 'admin' no está en su ROLE_VIEWS).
+if st.session_state.get("current_view") in ("resumen", "meseros"):
     st.session_state["current_view"] = "admin"
 
 # Vista activa por defecto / saneada al rol: si la vista guardada no existe o el rol
@@ -846,7 +842,6 @@ NAV_LABELS = {
     "mesas":   "🪑 Mesas",
     "nuevo":   "➕ Nuevo pedido",
     "caja":    "💰 Caja",
-    "meseros": "👤 Personal",
     "admin":   "🔐 Administración",
 }
 
@@ -859,7 +854,6 @@ NAV_TEXT = {
     "mesas":   "Mesas",
     "nuevo":   "Nuevo pedido",
     "caja":    "Caja",
-    "meseros": "Personal",
     "admin":   "Administración",
 }
 
@@ -867,16 +861,22 @@ NAV_TEXT = {
 def _render_admin():
     """Entorno de Administración (SOLO admin), aislado del flujo operativo de Caja:
     reúne los reportes y registros sensibles en pestañas limpias — Resumen de ventas,
-    Cancelaciones y Personal (marcaje de turno). El acceso lo gobierna la matriz de rol
+    Cancelaciones, Facturas (documentos fiscales, bloque C del plan de facturación
+    electrónica), gestión de Personal (perfiles/PIN, antes vista 'meseros' propia) y
+    Actividad (marcaje de turno, libro mayor). El acceso lo gobierna la matriz de rol
     (solo ADMIN tiene la vista 'admin'); require_view ya lo valida en _dispatch, así que
     aquí no hace falta otro candado."""
-    tab_resumen, tab_cancel, tab_personal = st.tabs(
-        ["📊 Resumen", "🚫 Cancelaciones", "👥 Personal"])
+    tab_resumen, tab_cancel, tab_facturas, tab_personal, tab_actividad = st.tabs(
+        ["📊 Resumen", "🚫 Cancelaciones", "🧾 Facturas", "👤 Personal", "🕒 Actividad"])
     with tab_resumen:
         resumen.render()
     with tab_cancel:
         cancelaciones.render()
+    with tab_facturas:
+        facturas.render()
     with tab_personal:
+        meseros.render()
+    with tab_actividad:
         reporte_personal.render()
 
 
@@ -885,9 +885,9 @@ def _dispatch(view: str):
     profundidad) ANTES de renderizar nada."""
     auth.require_view(view, role)
     if view == "caja":
-        # Caja = SOLO el arqueo/cierre operativo. Resumen, Cancelaciones y Personal se
-        # movieron al entorno de Administración (🔐, al fondo del menú) → la caja queda
-        # limpia para el cajero.
+        # Caja = SOLO el arqueo/cierre operativo. Resumen, Cancelaciones, Personal y
+        # Actividad se movieron al entorno de Administración (🔐, al fondo del menú) →
+        # la caja queda limpia para el cajero.
         caja.render()
     elif view == "monitor":
         monitor_mesas.render()
@@ -897,8 +897,6 @@ def _dispatch(view: str):
         mesas.render()
     elif view == "nuevo":
         nuevo_pedido.render()
-    elif view == "meseros":
-        meseros.render()
     elif view == "admin":
         _render_admin()
 
@@ -962,6 +960,27 @@ def _render_mobile_shell():
     _dispatch(st.session_state["current_view"])
 
 
+def _destacar_nav_caja() -> None:
+    """Para el rol CAJA: el botón 'Caja' de la nav destaca sobre el resto (fondo sólido,
+    ambos estados activo/inactivo) porque es donde vive TODO lo urgente del turno — el
+    cajero no debería tener que pensar dónde ir. Solo se inyecta para este rol: la nav
+    del admin no cambia (Caja es una vista más entre varias)."""
+    st.markdown("""
+    <style>
+    [class*="st-key-nav_active_caja"] button, [class*="st-key-nav_inactive_caja"] button {
+        background: #16a34a !important; color: #ffffff !important;
+        border: 1px solid #16a34a !important; font-weight: 700 !important;
+    }
+    [class*="st-key-nav_active_caja"] button:hover, [class*="st-key-nav_inactive_caja"] button:hover {
+        background: #15803d !important; border-color: #15803d !important; color: #ffffff !important;
+    }
+    [class*="st-key-nav_active_caja"] button::before, [class*="st-key-nav_inactive_caja"] button::before {
+        background-color: #ffffff !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # SHELL ESCRITORIO (admin / caja) · navegación · contenido · pedidos en vivo
 # ══════════════════════════════════════════════════════════════════════════════
@@ -969,6 +988,9 @@ def _render_desktop_shell():
     # Proporciones: el panel de Pedidos (derecha) se estrechó (2.0 → 1.7) para dar más
     # ancho al contenido (3.3 → 3.6), donde vive el Menú con sus categorías en acordeón.
     col_nav, col_content, col_pedidos = st.columns([0.7, 3.6, 1.7], gap="medium")
+
+    if role == auth.CAJA:
+        _destacar_nav_caja()
 
     with col_nav:
         with st.container(border=True):

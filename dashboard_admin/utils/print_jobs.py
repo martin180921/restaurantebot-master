@@ -139,7 +139,8 @@ def _recargo_entrega(items: list, tipo_entrega, total: int) -> int:
 def enqueue_recibo(ids, titulo: str, total: int, abono: int, metodo: str,
                    recibido: int | None = None, submetodo: str | None = None,
                    comprobante: str | None = None, desglose: list | None = None,
-                   imprimir: bool = True) -> None:
+                   imprimir: bool = True, forzar_abrir_cajon: bool | None = None,
+                   copia: bool = False, documento_fiscal: dict | None = None) -> None:
     """Encola el ticket de un cobro recién commiteado.
 
     Regla del cajón SAT: solo se abre cuando hubo efectivo (abrir_cajon).
@@ -158,6 +159,19 @@ def enqueue_recibo(ids, titulo: str, total: int, abono: int, metodo: str,
     nada. Así el cajero confirma el cobro y abre el cajón sin gastar un recibo que nadie
     pidió.
 
+    'forzar_abrir_cajon' (opcional): si viene True/False, PISA la regla automática
+    (tuvo efectivo → abre). Lo usa la reimpresión de un recibo ya cobrado: reabrir el
+    cajón en una copia no tiene sentido (el efectivo de esa venta ya se guardó la
+    primera vez), así que la reimpresión pasa False explícito.
+
+    'copia' (default False): marca el payload como una REIMPRESIÓN (no un cobro nuevo);
+    el print_agent la rotula 'COPIA' en el ticket para que no se confunda con el original.
+
+    'documento_fiscal' (opcional, bloque C del plan de facturación): resultado de
+    facturacion.emitir_para_cobro (numero/cufe/qr_texto/estado). Solo si su estado es
+    'emitido' se agrega el bloque fiscal (CUFE + QR) al ticket; con la facturación
+    apagada o un documento rechazado, el recibo sale igual que siempre.
+
     Tolera cualquier fallo: la impresión no debe tumbar el cobro ya registrado.
     """
     try:
@@ -165,6 +179,8 @@ def enqueue_recibo(ids, titulo: str, total: int, abono: int, metodo: str,
         desg = [d for d in (desglose or []) if int(d.get("monto") or 0) > 0]
         tiene_efectivo = (metodo == "efectivo") or any(
             str(d.get("metodo")) == "efectivo" for d in desg)
+        if forzar_abrir_cajon is not None:
+            tiene_efectivo = bool(forzar_abrir_cajon)
         # Cliente no pidió recibo: no imprimimos papel. Solo abrimos el cajón (si hubo
         # efectivo) con un trabajo mínimo; sin efectivo no hay nada que encolar.
         if not imprimir:
@@ -196,8 +212,16 @@ def enqueue_recibo(ids, titulo: str, total: int, abono: int, metodo: str,
             "cambio": max(0, int(recibido) - int(abono)) if recibido is not None else 0,
             "abrir_cajon": tiene_efectivo,
             "pedido_ids": [int(i) for i in ids],
+            "copia": bool(copia),
         }
         payload.update(_branding_payload())
+        if documento_fiscal and documento_fiscal.get("estado") == "emitido":
+            payload["fiscal"] = {
+                "tipo": "factura",
+                "numero": documento_fiscal.get("numero"),
+                "cufe": documento_fiscal.get("cufe"),
+                "qr_texto": documento_fiscal.get("qr_texto"),
+            }
         if desg:
             tramos = []
             for d in desg:
@@ -218,6 +242,24 @@ def enqueue_recibo(ids, titulo: str, total: int, abono: int, metodo: str,
         # El cobro ya está en la BD; un fallo de encolado no debe propagarse a la UI, pero
         # H5: lo dejamos auditado para que no pase inadvertido (recibo sin imprimir).
         _log_fallo_impresion("recibo", exc, {"pedido_ids": ids})
+
+
+def enqueue_abrir_cajon(motivo: str = "") -> None:
+    """Abre el cajón SIN que haya una venta detrás (p. ej. cambiar un billete). Mismo
+    trabajo 'cajon' que ya usa enqueue_recibo(imprimir=False) para dar el cambio de un
+    cobro sin ticket, pero sin pedido de por medio — el print_agent solo lee
+    'abrir_cajon'. 'motivo' viaja en el payload solo como rastro (el agente no lo
+    imprime); auditar la apertura es responsabilidad de quien llama. Tolera cualquier
+    fallo: no debe tumbar el flujo de caja."""
+    try:
+        enqueue_job(RESTAURANTE_ID, "cajon", {
+            "mesa": "Apertura sin venta",
+            "abrir_cajon": True,
+            "pedido_ids": [],
+            "motivo": (motivo or "").strip() or None,
+        })
+    except Exception as exc:
+        _log_fallo_impresion("cajon", exc, {"motivo": motivo})
 
 
 # ── Salud del Agente de Impresión Local (heartbeat) ─────────────────────────────

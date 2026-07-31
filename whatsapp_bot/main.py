@@ -376,13 +376,20 @@ def init_db():
                 orden             INTEGER     NOT NULL DEFAULT 0,
                 activo            BOOLEAN     NOT NULL DEFAULT TRUE,
                 disponible_desde  TIME,
-                disponible_hasta  TIME
+                disponible_hasta  TIME,
+                extras_grupos     TEXT        NOT NULL DEFAULT ''
             )
         """))
         # El horario va además en ALTER aparte: una base que ya tenga la tabla de una build
         # anterior NO re-ejecuta el CREATE y se quedaría sin estas columnas.
         conn.execute(text("ALTER TABLE categorias ADD COLUMN IF NOT EXISTS disponible_desde TIME"))
         conn.execute(text("ALTER TABLE categorias ADD COLUMN IF NOT EXISTS disponible_hasta TIME"))
+        # extras_grupos: claves de grupo del Plato del Día (coma-separadas) que la
+        # categoría ofrece INCLUIDAS sin costo (p. ej. 'entrada,bebida'). '' = catálogo
+        # simple; default vacío a propósito, ningún restaurante nuevo nace con extras
+        # encendidos. Mismo motivo de ALTER aparte que las columnas de horario.
+        conn.execute(text(
+            "ALTER TABLE categorias ADD COLUMN IF NOT EXISTS extras_grupos TEXT NOT NULL DEFAULT ''"))
         # Seed one-time con las 4 categorías clásicas del código anterior.
         if not _ya_sembrado('seed_categorias'):
             conn.execute(text("""

@@ -84,6 +84,10 @@ CREATE TABLE IF NOT EXISTS plato_dia_grupos (
 -- las 11:00); NULL en cualquiera de las dos = visible todo el día. Ese horario SOLO
 -- se aplica en la carta digital del cliente (app_cliente); el panel y el POS del
 -- mesero siempre ven todas las categorías activas, sin importar la hora.
+-- extras_grupos: claves de grupo del Plato del Día (separadas por coma, p. ej.
+-- 'entrada,bebida') que esta categoría ofrece INCLUIDAS sin costo extra. '' = catálogo
+-- simple (default: ningún restaurante nuevo sale con extras encendidos). Ver
+-- db.extras_de_categoria().
 CREATE TABLE IF NOT EXISTS categorias (
     id                SERIAL      PRIMARY KEY,
     clave             VARCHAR(20) UNIQUE NOT NULL,
@@ -92,7 +96,8 @@ CREATE TABLE IF NOT EXISTS categorias (
     orden             INTEGER     NOT NULL DEFAULT 0,
     activo            BOOLEAN     NOT NULL DEFAULT TRUE,
     disponible_desde  TIME,
-    disponible_hasta  TIME
+    disponible_hasta  TIME,
+    extras_grupos     TEXT        NOT NULL DEFAULT ''
 );
 
 -- Ajustes clave/valor: precios planos, recargo de entrega, nº de acompañamientos
@@ -208,7 +213,9 @@ CREATE TABLE IF NOT EXISTS turnos_caja (
     nota             TEXT
 );
 
--- Cierre de caja v2 (apertura con base + congelado esperado vs. contado).
+-- Cierre de caja v2 (apertura con base + congelado esperado vs. contado). tarjeta_* =
+-- datáfono manual (bloque A del plan de facturación/datáfono): se concilia aparte del
+-- efectivo y la transferencia, nunca entra al cajón físico.
 CREATE TABLE IF NOT EXISTS cierres_caja (
     id                     SERIAL      PRIMARY KEY,
     fecha_apertura         TIMESTAMP   DEFAULT CURRENT_TIMESTAMP,
@@ -216,8 +223,10 @@ CREATE TABLE IF NOT EXISTS cierres_caja (
     monto_apertura         INTEGER     NOT NULL,
     efectivo_esperado      INTEGER     NOT NULL DEFAULT 0,
     transferencia_esperada INTEGER     NOT NULL DEFAULT 0,
+    tarjeta_esperada       INTEGER     NOT NULL DEFAULT 0,
     efectivo_real          INTEGER,
     transferencia_real     INTEGER,
+    tarjeta_real           INTEGER,
     diferencia             INTEGER     DEFAULT 0,
     estado                 VARCHAR(10) NOT NULL DEFAULT 'abierto'
 );
@@ -342,6 +351,31 @@ CREATE TABLE IF NOT EXISTS agentes_estado (
     cola_pendiente INTEGER   NOT NULL DEFAULT 0
 );
 
+-- Facturación electrónica (bloque C del plan en docs/plan_facturacion_y_datafono.md),
+-- APAGADA por defecto (ajuste 'facturacion_electronica'). Libro append-only, mismo
+-- espíritu que 'auditoria': una fila por documento fiscal emitido/rechazado/anulado
+-- (por un PAC real o por el ProveedorSimulado de demo), enlazado a los pedidos que
+-- cobró. Ver dashboard_admin/facturacion.py.
+CREATE TABLE IF NOT EXISTS documentos_fiscales (
+    id              SERIAL      PRIMARY KEY,
+    pedido_ids      TEXT        NOT NULL,
+    tipo            VARCHAR(10) NOT NULL DEFAULT 'pos',
+    numero          VARCHAR(40),
+    cufe            VARCHAR(120),
+    qr_texto        TEXT,
+    estado          VARCHAR(15) NOT NULL DEFAULT 'borrador',
+    proveedor       VARCHAR(30),
+    cliente_doc     VARCHAR(30),
+    cliente_nombre  VARCHAR(120),
+    cliente_email   VARCHAR(120),
+    monto           INTEGER     NOT NULL DEFAULT 0,
+    fecha           TIMESTAMP   NOT NULL DEFAULT NOW(),
+    respuesta_cruda JSONB,
+    restaurante_id  INTEGER     NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_documentos_fiscales_rid_fecha
+    ON documentos_fiscales (restaurante_id, fecha DESC);
+
 -- ── Upgrade de tablas preexistentes (idempotente) ───────────────────────────
 -- Si menu/pedidos YA existían (base de datos en uso), los CREATE de arriba no los
 -- tocan, así que estos ALTER garantizan las columnas nuevas sin perder datos —
@@ -351,6 +385,9 @@ ALTER TABLE menu    ADD COLUMN IF NOT EXISTS categoria VARCHAR(20) NOT NULL DEFA
 ALTER TABLE menu    ADD COLUMN IF NOT EXISTS descripcion TEXT;
 ALTER TABLE menu             ADD COLUMN IF NOT EXISTS stock INTEGER;  -- inventario diario (NULL = ilimitado)
 ALTER TABLE menu_componentes ADD COLUMN IF NOT EXISTS stock INTEGER;  -- inventario diario por componente
+ALTER TABLE categorias ADD COLUMN IF NOT EXISTS disponible_desde TIME;
+ALTER TABLE categorias ADD COLUMN IF NOT EXISTS disponible_hasta TIME;
+ALTER TABLE categorias ADD COLUMN IF NOT EXISTS extras_grupos TEXT NOT NULL DEFAULT '';
 ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS mesa_id INTEGER REFERENCES mesas(id);
 ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS mesero VARCHAR(120);
 ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS motivo_cancelacion TEXT;
@@ -367,6 +404,10 @@ ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS fee INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS nota_general TEXT;
 ALTER TABLE pagos   ADD COLUMN IF NOT EXISTS submetodo VARCHAR(20);
 ALTER TABLE pagos   ADD COLUMN IF NOT EXISTS comprobante VARCHAR(60);
+-- Datáfono manual (bloque A del plan de facturación/datáfono): la tarjeta se concilia
+-- aparte del efectivo y la transferencia (no entra al cajón físico).
+ALTER TABLE cierres_caja ADD COLUMN IF NOT EXISTS tarjeta_esperada INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE cierres_caja ADD COLUMN IF NOT EXISTS tarjeta_real INTEGER;
 -- FASE 1: anti-skimming + descuentos en pedidos, y reclamado_at en la cola de impresión.
 ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS cobro_iniciado BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE pedidos ADD COLUMN IF NOT EXISTS descuento_valor INTEGER NOT NULL DEFAULT 0;
@@ -422,6 +463,13 @@ INSERT INTO ajustes (clave, valor) VALUES
     ('bot_saludo', E'¡Hola! \U0001F44B Bienvenido a *{nombre}*.\n\n\U0001F4F2 Haz tu pedido a domicilio o para llevar desde nuestra carta digital:\n{link}\n\nElige cómo lo quieres, arma tu pedido y nosotros nos encargamos. ¡Gracias!'),
     ('metodos_pago', '{"efectivo": true, "transferencia": {"nequi": "Nequi", "daviplata": "Daviplata", "breb": "Bre-B"}}'),
     ('moneda_simbolo', '$')
+ON CONFLICT (clave) DO NOTHING;
+
+-- Facturación electrónica: APAGADA por defecto, proveedor 'simulado' (sin API real,
+-- solo para demo). Ver dashboard_admin/facturacion.py.
+INSERT INTO ajustes (clave, valor) VALUES
+    ('facturacion_electronica', 'false'),
+    ('proveedor_factura',       'simulado')
 ON CONFLICT (clave) DO NOTHING;
 
 -- Grupos clásicos del Plato del Día. Solo siembra si la tabla está vacía (no
