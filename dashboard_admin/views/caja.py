@@ -1405,6 +1405,51 @@ def _dialog_equipo_turno():
                                         {"nombre": nombre, "via": "equipo_turno"})
                         flash(f"Turno cerrado · {nombre} (su acceso queda bloqueado)", "🔒")
                     st.rerun()
+
+    # ── Accesos de turno efímeros (PIN del día) ──────────────────────────────────
+    # Distinto de "▶ Reactivar" arriba: ese reabre el PIN FIJO del perfil (sirve todos los
+    # días, así el empleado haya faltado). Este genera un PIN que solo vale para ESTE turno
+    # y se revoca junto con los demás al cerrar caja — si alguien no vino hoy, no puede
+    # entrar con el PIN de ayer aunque el cajero use "Activar todos".
+    st.divider()
+    with st.expander("🔑 PIN de turno del día (acceso temporal)"):
+        st.caption("Genera un PIN que solo sirve para el turno de hoy; se revoca solo al "
+                   "cerrar caja. Útil para dar acceso puntual sin reabrir el PIN fijo del "
+                   "perfil de alguien que no vino.")
+        pin_gen = st.session_state.get("_pin_generado_caja")
+        if pin_gen is not None:
+            if pin_gen == "ERROR":
+                st.error("No se pudo generar el PIN. Intenta de nuevo.")
+            else:
+                st.success("PIN de turno generado · entrégaselo al mesero:")
+                st.code(pin_gen, language=None)
+            if st.button("Ocultar", key="equipo_ocultar_pin", use_container_width=True):
+                st.session_state.pop("_pin_generado_caja", None)
+                st.rerun()
+        etiqueta = st.text_input("Nombre (opcional)", key="equipo_nuevo_pin_nombre",
+                                 placeholder="Ej: Mesero de refuerzo sábado")
+        if st.button("Generar PIN de turno", key="equipo_btn_gen_efimero",
+                     use_container_width=True):
+            st.session_state["_pin_generado_caja"] = (
+                mesero_keys.generar_clave(etiqueta, audit.actor()[0]) or "ERROR")
+            st.rerun()
+
+        activas_ef = mesero_keys.claves_activas()
+        if activas_ef:
+            st.markdown("**PINs de turno activos**")
+            for k in activas_ef:
+                kid = int(k["id"])
+                nombre_ef = str(k.get("etiqueta") or "Mesero")
+                col_a, col_b = st.columns([3, 1])
+                with col_a:
+                    st.markdown(f'🔑 {html.escape(nombre_ef)}')
+                with col_b:
+                    if st.button("⏹ Cerrar", key=f"equipo_revoke_pin_{kid}",
+                                 use_container_width=True):
+                        mesero_keys.revocar_clave(kid)
+                        flash(f"Acceso cerrado · {nombre_ef}", "🔒")
+                        st.rerun()
+
     if st.button("Cerrar", key="equipo_turno_cerrar", use_container_width=True):
         _reanudar_refresco_caja()
         st.rerun()
