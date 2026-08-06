@@ -9,9 +9,11 @@ su propio módulo dentro de views/ para poder trabajarlas de forma independiente
     - views/nuevo_pedido.py   → creación manual de pedidos
     - views/menu.py           → CRUD del menú
     - views/mesas.py          → gestión de mesas
-    - views/caja.py           → arqueo de caja (apertura/cierre de turno)
-    - views/resumen.py, cancelaciones.py, reporte_personal.py → pestañas del entorno de
-      Administración (🔐, solo admin, al fondo del menú lateral; ver _render_admin)
+    - views/caja.py           → flujo operativo de caja (cobrar, repartidores, gastos,
+      apertura/cierre de turno); una sola vista para admin y cajero
+    - views/resumen.py, cancelaciones.py, reporte_personal.py, y las pestañas de
+      Inventario/Importar de menu.py → pestañas del entorno de Administración (🔐, solo
+      admin, al fondo del menú lateral; ver _render_admin)
 """
 import base64 as _b64
 import html as _html
@@ -862,12 +864,15 @@ def _render_admin():
     """Entorno de Administración (SOLO admin), aislado del flujo operativo de Caja:
     reúne los reportes y registros sensibles en pestañas limpias — Resumen de ventas,
     Cancelaciones, Facturas (documentos fiscales, bloque C del plan de facturación
-    electrónica), gestión de Personal (perfiles/PIN, antes vista 'meseros' propia) y
-    Actividad (marcaje de turno, libro mayor). El acceso lo gobierna la matriz de rol
-    (solo ADMIN tiene la vista 'admin'); require_view ya lo valida en _dispatch, así que
-    aquí no hace falta otro candado."""
-    tab_resumen, tab_cancel, tab_facturas, tab_personal, tab_actividad = st.tabs(
-        ["📊 Resumen", "🚫 Cancelaciones", "🧾 Facturas", "👤 Personal", "🕒 Actividad"])
+    electrónica), gestión de Personal (perfiles/PIN, antes vista 'meseros' propia),
+    Actividad (marcaje de turno, libro mayor) e Inventario/Importar (configuración del
+    menú, movidas desde Caja: la Caja ahora es 100% operativa — cobrar, repartidores,
+    gastos, cerrar turno — para admin y cajero por igual). El acceso lo gobierna la
+    matriz de rol (solo ADMIN tiene la vista 'admin'); require_view ya lo valida en
+    _dispatch, así que aquí no hace falta otro candado."""
+    tab_resumen, tab_cancel, tab_facturas, tab_personal, tab_actividad, tab_inv, tab_imp = st.tabs(
+        ["📊 Resumen", "🚫 Cancelaciones", "🧾 Facturas", "👤 Personal", "🕒 Actividad",
+         "📦 Inventario", "📥 Importar"])
     with tab_resumen:
         resumen.render()
     with tab_cancel:
@@ -878,6 +883,10 @@ def _render_admin():
         meseros.render()
     with tab_actividad:
         reporte_personal.render()
+    with tab_inv:
+        menu._render_inventario()
+    with tab_imp:
+        menu._render_importar()
 
 
 def _dispatch(view: str):
@@ -885,9 +894,10 @@ def _dispatch(view: str):
     profundidad) ANTES de renderizar nada."""
     auth.require_view(view, role)
     if view == "caja":
-        # Caja = SOLO el arqueo/cierre operativo. Resumen, Cancelaciones, Personal y
-        # Actividad se movieron al entorno de Administración (🔐, al fondo del menú) →
-        # la caja queda limpia para el cajero.
+        # Caja = flujo operativo del turno (cobrar, repartidores, gastos, cerrar), igual
+        # para admin y cajero (caja.render() bifurca internamente cuánto revela cada
+        # rol — ver see_revenue). Resumen, Cancelaciones, Personal, Actividad e
+        # Inventario/Importar viven en el entorno de Administración (🔐, al fondo del menú).
         caja.render()
     elif view == "monitor":
         monitor_mesas.render()
