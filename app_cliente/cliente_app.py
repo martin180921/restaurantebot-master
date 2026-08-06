@@ -875,14 +875,23 @@ def _items_para_ticket(items):
     return flat
 
 
-def _encolar_comanda(pedido_id: int, mesa_label: str, items) -> None:
-    """Encola la comanda de cocina del pedido QR. Tolera cualquier fallo: la impresión
-    NUNCA debe tumbar el pedido del comensal (ya está commiteado en pedidos)."""
+def _encolar_comanda(pedido_id: int, mesa_label: str, items, *, tipo_entrega=None,
+                     telefono=None, direccion=None) -> None:
+    """Encola la comanda de cocina del pedido del cliente (QR de mesa o domicilio/para
+    llevar). Tolera cualquier fallo: la impresión NUNCA debe tumbar el pedido del
+    comensal (ya está commiteado en pedidos).
+
+    'tipo_entrega'/'telefono'/'direccion' (opcionales) viajan igual que en el
+    enqueue_comanda del panel, para que el repartidor tenga la dirección impresa; en
+    los pedidos de mesa por QR van en None y el agente omite ese bloque."""
     try:
         payload = {
             "pedido_id": int(pedido_id),
             "mesa": mesa_label,
             "items": _items_para_ticket(items),
+            "tipo_entrega": tipo_entrega or None,
+            "telefono": (str(telefono).strip() or None) if telefono else None,
+            "direccion": (str(direccion).strip() or None) if direccion else None,
             "abrir_cajon": False,
         }
         with engine.begin() as conn:
@@ -908,7 +917,15 @@ def guardar_pedido(numero_cliente, items, total, *, tipo_entrega, cliente_nombre
     además que un reintento consuma un num_dia: _siguiente_num_dia() incrementa el
     contador SIEMPRE que se llama, así que pedirlo antes de saber si el pedido ya existe
     dejaba un hueco en la numeración del día por cada reintento (cosmético para el
-    restaurante, pero confunde: "¿por qué falta el pedido #7?")."""
+    restaurante, pero confunde: "¿por qué falta el pedido #7?").
+
+    Encola además la comanda de cocina (mismo patrón que guardar_pedido_mesa): antes
+    estos pedidos aparecían en el Monitor pero no salía papel salvo reimpresión manual.
+    Solo en una creación real, y fuera del txn."""
+    etiqueta = {"domicilio": "🛵 Domicilio",
+                "para_llevar": "🛍️ Para llevar"}.get(tipo_entrega, "Web")
+    label = f"{etiqueta} · {cliente_nombre or numero_cliente or 'Cliente'}"
+    creado = False
     with engine.begin() as conn:
         if idem_key:
             existente = conn.execute(text(
@@ -934,12 +951,19 @@ def guardar_pedido(numero_cliente, items, total, *, tipo_entrega, cliente_nombre
         if nuevo_id is None:
             # Carrera con otra conexión entre el SELECT de arriba y este INSERT (el
             # caso común, mismo idem_key sin carrera, ya salió por el return temprano).
-            return int(conn.execute(text(
-                "SELECT id FROM pedidos WHERE idem_key = :k"), {"k": idem_key}).scalar() or 0)
-        # Descuento inmediato del inventario (mismo txn): evita revender lo ya pedido. Si no
-        # alcanza, SinStock revienta el txn → el pedido NO se crea.
-        _descontar_inventario(conn, items)
-        return int(nuevo_id)
+            nuevo_id = conn.execute(text(
+                "SELECT id FROM pedidos WHERE idem_key = :k"), {"k": idem_key}).scalar()
+        else:
+            creado = True
+            # Descuento inmediato del inventario (mismo txn): evita revender lo ya pedido. Si no
+            # alcanza, SinStock revienta el txn → el pedido NO se crea.
+            _descontar_inventario(conn, items)
+    # Comanda fuera del txn del pedido: un fallo de impresión no revierte la venta. Solo
+    # en una creación real (en reintentos la comanda ya se encoló la primera vez).
+    if creado and nuevo_id:
+        _encolar_comanda(int(nuevo_id), label, items, tipo_entrega=tipo_entrega,
+                         telefono=cliente_telefono, direccion=direccion)
+    return int(nuevo_id or 0)
 
 
 def guardar_pedido_mesa(mesa_id, mesa_nombre, items, total, *, para_llevar, fee,
