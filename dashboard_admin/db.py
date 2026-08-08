@@ -836,6 +836,31 @@ def titulo_seccion(texto, style: str = "") -> str:
     return f'<div class="section-title"{style_attr}>{icono}{s}</div>'
 
 
+# ── Ganancias del día: ocultas hasta que alguien las pide (tablero + Monitor) ───
+# El tablero de Pedidos (panel derecho, SIEMPRE abierto) y el Monitor de mesas son
+# pantallas que cualquiera que pase por el mostrador puede ver de reojo; la cifra de
+# ventas del día no debería quedar expuesta todo el turno. Se tapa por defecto y solo
+# se revela al pulsar el ojo. Un único flag de sesión sincroniza el estado entre las
+# dos vistas: revelarla en una la deja revelada en la otra hasta que se vuelva a ocultar.
+def render_ventas_hoy(ventas_hoy: int, key: str) -> None:
+    visible = st.session_state.get("ver_ventas_hoy", False)
+    cifra = (f"${fmt_money(ventas_hoy)}" if visible
+             else '<span style="letter-spacing:2px;">••••••</span>')
+    col_cifra, col_ojo = st.columns([5, 1])
+    with col_cifra:
+        st.markdown(
+            '<div class="ped-stats"><div class="ped-stat">'
+            f'<span class="ped-stat-n">{cifra}</span>'
+            '<span class="ped-stat-l">Ventas hoy</span></div></div>',
+            unsafe_allow_html=True,
+        )
+    with col_ojo:
+        if st.button("🙈" if visible else "👁", key=key, use_container_width=True,
+                      help="Ocultar ganancias del día" if visible else "Ver ganancias del día"):
+            st.session_state["ver_ventas_hoy"] = not visible
+            st.rerun()
+
+
 # ── Menú (lectura compartida por views/menu.py y views/nuevo_pedido.py) ────────
 # P1: el menú cambia poco; lo cacheamos para no consultar la BD en cada rerun
 # (cada tap de +/- dispara un rerun). menu.py llama cargar_menu.clear() tras

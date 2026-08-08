@@ -14,7 +14,7 @@ import facturacion
 from db import (engine, titulo_seccion, fmt_money, fecha_corta, flash, drain_toasts,
                 saldo_pedido, cobrado_pedido, _es_pagado, _a_entero,
                 aplicar_inventario, SinStock, ahora_bogota, hoy_bogota, metodos_pago,
-                facturacion_electronica)
+                facturacion_electronica, render_ventas_hoy)
 from utils.print_jobs import enqueue_recibo, enqueue_comanda, enqueue_prerecibo
 from utils.items import (formatear_items_html, lineas_por_categoria,
                          parse_items, etiqueta_item)
@@ -2078,11 +2078,10 @@ def _tablero_en_vivo():
         '<span class="ped-stat-l">En prep.</span></div>'
         f'<div class="ped-stat"><span class="ped-stat-n metric-green">{listos}</span>'
         '<span class="ped-stat-l">Listos</span></div>'
-        f'<div class="ped-stat"><span class="ped-stat-n">${fmt_money(ventas_hoy)}</span>'
-        '<span class="ped-stat-l">Ventas hoy</span></div>'
         '</div>',
         unsafe_allow_html=True,
     )
+    render_ventas_hoy(ventas_hoy, key="ver_ventas_hoy_tablero")
 
     st.markdown("<br>", unsafe_allow_html=True)
 
