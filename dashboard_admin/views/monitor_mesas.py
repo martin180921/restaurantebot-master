@@ -19,7 +19,7 @@ import time
 
 import auth
 from db import (fmt_money, cargar_mesas_activas, saldo_pedido, titulo_seccion,
-                hoy_bogota, cobrado_pedido)
+                hoy_bogota, cobrado_pedido, render_ventas_hoy)
 from utils.print_jobs import badge_agente_html, badge_fallos_html
 from utils.items import parse_items, etiqueta_item
 from views import pedidos
@@ -711,11 +711,10 @@ def _monitor_en_vivo():
             '<span class="ped-stat-l">Por cobrar</span></div>'
             f'<div class="ped-stat"><span class="ped-stat-n"{atencion_style}>{atencion}</span>'
             '<span class="ped-stat-l">Atención</span></div>'
-            f'<div class="ped-stat"><span class="ped-stat-n">${fmt_money(ventas_hoy)}</span>'
-            '<span class="ped-stat-l">Ventas hoy</span></div>'
             '</div>',
             unsafe_allow_html=True,
         )
+        render_ventas_hoy(ventas_hoy, key="ver_ventas_hoy_monitor")
 
     # ── CSS: botones-tarjeta de la fila superior (objetivo 3: horizontal) ───────
     st.markdown("""
