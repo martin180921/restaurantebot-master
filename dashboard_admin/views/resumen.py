@@ -47,6 +47,29 @@ def cargar_metodos_por_pedido(ids) -> dict:
     return out
 
 
+def cargar_comprobantes_por_pedido(ids) -> dict:
+    """{pedido_id: "comp1, comp2"} con los n.º de comprobante (transferencia) o
+    voucher/aprobación (tarjeta) que caja tecleó al cobrar, para poder cruzarlos contra
+    los físicos al revisar el día. Varios abonos con comprobante en un mismo pedido se
+    listan separados por coma. Tolerante: si la tabla aún no existe (pre-migración) o
+    falla, devuelve {}."""
+    ids = [int(i) for i in ids]
+    if not ids:
+        return {}
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(text(
+                "SELECT pedido_id, comprobante FROM pagos WHERE pedido_id IN :ids "
+                "AND comprobante IS NOT NULL AND comprobante <> '' ORDER BY id"
+            ).bindparams(bindparam("ids", expanding=True)), {"ids": ids}).mappings().all()
+    except Exception:
+        return {}
+    out = {}
+    for r in rows:
+        out.setdefault(int(r["pedido_id"]), []).append(r["comprobante"])
+    return {pid: ", ".join(comps) for pid, comps in out.items()}
+
+
 # Etiquetas de tipo de entrega para la tabla de pedidos del día.
 _TIPO_LABEL = {
     "mesa":        "🪑 Mesa",
@@ -237,6 +260,7 @@ def render():
     st.markdown('<div class="section-title">Pedidos del día</div>', unsafe_allow_html=True)
 
     metodos_por_pedido = cargar_metodos_por_pedido([p["id"] for p in pedidos])
+    comprobantes_por_pedido = cargar_comprobantes_por_pedido([p["id"] for p in pedidos])
 
     f1, f2, f3 = st.columns(3)
     with f1:
@@ -295,6 +319,7 @@ def render():
             "Descuento":    desc_txt,
             "Estado":       "❌ Cancelado" if cancelado else str(p.get("estado") or ""),
             "Pago":         _metodo_label(metodos),
+            "Comprobante":  comprobantes_por_pedido.get(pid, "—"),
             "Cobrado":      f"${fmt_money(cobrado_pedido(p))}",
             "Saldo":        f"${fmt_money(saldo_pedido(p))}",
             "Mesero":       str(p.get("mesero") or ""),
@@ -330,6 +355,7 @@ def render():
     # Abonado / Saldo por pedido: el registro de pagos parciales para contabilidad.
     export["abonado"] = df.apply(cobrado_pedido, axis=1)
     export["saldo"]   = df.apply(saldo_pedido, axis=1)
+    export["comprobante"] = df["id"].map(comprobantes_por_pedido)
     if "pagado" in export.columns:
         export["pagado"] = export["pagado"].fillna(False).astype(bool).map({True: "Sí", False: "No"})
     export = export.drop(columns=["total_pagado"], errors="ignore")
@@ -338,6 +364,7 @@ def render():
         "total": "Total", "estado": "Estado", "fecha": "Fecha",
         "mesa_id": "Mesa", "motivo_cancelacion": "Motivo cancelación",
         "pagado": "Pagado", "abonado": "Abonado", "saldo": "Saldo",
+        "comprobante": "Comprobante",
     })
     csv = export.to_csv(index=False).encode("utf-8-sig")  # BOM → Excel lee acentos
     st.download_button(
