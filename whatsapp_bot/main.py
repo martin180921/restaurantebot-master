@@ -593,11 +593,55 @@ def _procesar(payload):
 
 
 def _atender_entrante(ev: proveedor.Evento):
-    print(f"[TODO] _atender_entrante: {ev.telefono}")
+    """El bot no conversa: a cualquier mensaje responde el saludo + enlace a la
+    carta digital, salvo que el interruptor esté apagado, alguien del local ya
+    esté atendiendo a mano, o ya se haya saludado hace poco.
+    """
+    if ajuste_int("bot_activo", 1) != 1:
+        return
+
+    cooldown_min = ajuste_int("bot_saludo_cooldown_min", 180)
+    with engine.connect() as conn:
+        fila = conn.execute(text("""
+            SELECT pausado_hasta > NOW() AS pausado,
+                   ultimo_saludo > NOW() - (:cooldown || ' minutes')::interval AS en_cooldown
+            FROM wa_contactos WHERE telefono = :telefono
+        """), {"telefono": ev.telefono, "cooldown": cooldown_min}).fetchone()
+
+    # Sin fila (contacto nuevo) o columnas NULL (nunca pausado / nunca saludado):
+    # las comparaciones anteriores devuelven NULL, que Python trata como falsy.
+    if fila and (fila[0] or fila[1]):
+        return
+
+    if not proveedor.enviar_texto(ev.telefono, mensaje_bienvenida(ev.telefono)):
+        # No se marca ultimo_saludo: el próximo mensaje del cliente reintenta solo.
+        return
+
+    with engine.connect() as conn:
+        conn.execute(text("""
+            INSERT INTO wa_contactos (telefono, ultimo_saludo, actualizado)
+            VALUES (:telefono, NOW(), NOW())
+            ON CONFLICT (telefono) DO UPDATE SET
+                ultimo_saludo = NOW(), actualizado = NOW()
+        """), {"telefono": ev.telefono})
+        conn.commit()
 
 
 def _pausar_por_humano(ev: proveedor.Evento):
-    print(f"[TODO] _pausar_por_humano: {ev.telefono}")
+    """Evento 'echo': alguien del local escribió desde su celular o WhatsApp
+    Web. El bot se aparta por un rato; no responde nada, no notifica nada.
+    """
+    minutos = ajuste_int("bot_pausa_min", 45)
+    with engine.connect() as conn:
+        conn.execute(text("""
+            INSERT INTO wa_contactos (telefono, pausado_hasta, pausa_motivo, actualizado)
+            VALUES (:telefono, NOW() + (:minutos || ' minutes')::interval, 'humano', NOW())
+            ON CONFLICT (telefono) DO UPDATE SET
+                pausado_hasta = NOW() + (:minutos || ' minutes')::interval,
+                pausa_motivo = 'humano',
+                actualizado = NOW()
+        """), {"telefono": ev.telefono, "minutos": minutos})
+        conn.commit()
 
 
 def _upsert_contacto(ev: proveedor.Evento):
@@ -606,6 +650,35 @@ def _upsert_contacto(ev: proveedor.Evento):
 
 def _alerta_cuenta(ev: proveedor.Evento):
     print(f"[TODO] _alerta_cuenta: {ev.crudo}")
+
+
+# ── Ajustes enteros con cache (bot_activo, bot_pausa_min, ...) ──────────────────
+_ajustes_int_cache = {}  # clave -> (valor: int, ts: float)
+
+
+def ajuste_int(clave: str, default: int) -> int:
+    """Entero desde 'ajustes', con cache de 60s por clave y fallback a
+    'default' si falla la lectura o el valor guardado no es un entero válido.
+    El bot nunca debe dejar de funcionar por un ajuste mal puesto.
+    """
+    cache = _ajustes_int_cache.get(clave)
+    if cache and time.time() - cache[1] <= 60:
+        return cache[0]
+
+    valor = default
+    try:
+        with engine.connect() as conn:
+            fila = conn.execute(text(
+                "SELECT valor FROM ajustes WHERE clave = :clave"
+            ), {"clave": clave}).fetchone()
+        if fila and fila[0] is not None:
+            valor = int(fila[0])
+    except Exception as e:
+        print(f"[WARN] No se pudo leer el ajuste '{clave}': {e}")
+        valor = default
+
+    _ajustes_int_cache[clave] = (valor, time.time())
+    return valor
 
 
 # ── Branding configurable (nombre y saludo viven en 'ajustes') ─────────────────
