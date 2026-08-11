@@ -34,7 +34,7 @@ Para cada carpeta (`whatsapp_bot/`, `dashboard_admin/`, `app_cliente/`): **+ New
 | Servicio | Variables |
 |---|---|
 | `whatsapp_bot` | `DATABASE_URL`, `APP_CLIENTE_URL` (la URL pública del servicio app_cliente), `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_WHATSAPP_NUMBER` |
-| `dashboard_admin` | `DATABASE_URL`, `RESTAURANTE_ID` (=1 salvo que sepas por qué no), `PANEL_PASSWORD_ADMIN`, `PANEL_PASSWORD_CAJA` |
+| `dashboard_admin` | `DATABASE_URL`, `RESTAURANTE_ID` (=1 salvo que sepas por qué no), `PANEL_PASSWORD_ADMIN`, `PANEL_PASSWORD_CAJA`. Opcionales: `WA_TOKEN`, `WA_BUSINESS_ACCOUNT_ID` (solo para Administración → Plantillas WA, peaje del App Review de Meta) |
 | `app_cliente` | `DATABASE_URL`, `RESTAURANTE_ID` |
 
 Notas:
