@@ -1,6 +1,6 @@
-# OLO — plataforma tecnológica para el pequeño comercio
+# OKU — plataforma tecnológica para el pequeño comercio
 
-Sistema para restaurantes independientes: pedidos por WhatsApp, POS en mesa, cocina e impresión de comandas. Este repositorio es el producto; la estrategia, la marca y los backlogs viven en el hub **OLO** de Notion.
+Sistema para restaurantes independientes: pedidos por WhatsApp, POS en mesa, cocina e impresión de comandas. Este repositorio es el producto; la estrategia, la marca y los backlogs viven en el hub **OKU** de Notion.
 
 > **One Thing:** hacer que administrar un pequeño negocio sea simple. Si una función no simplifica la vida del cliente, no entra.
 

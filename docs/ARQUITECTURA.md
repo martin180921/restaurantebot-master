@@ -1,6 +1,6 @@
 # Arquitectura
 
-Cómo se conectan las piezas de OLO dentro de **un** restaurante (recuerda: un deploy por restaurante, nada se comparte entre restaurantes).
+Cómo se conectan las piezas de OKU dentro de **un** restaurante (recuerda: un deploy por restaurante, nada se comparte entre restaurantes).
 
 ```
   Comensal                    Restaurante (local)                Tú (flota)

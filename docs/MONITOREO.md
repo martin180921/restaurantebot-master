@@ -51,7 +51,7 @@ python scripts/monitor_salud.py --config scripts/restaurantes_monitor.json
 
 ## Dejarlo corriendo cada pocos minutos
 
-**1 clic:** doble clic en `scripts/instalar_flota.bat` — crea la tarea `OLO_Monitor` (cada 10
+**1 clic:** doble clic en `scripts/instalar_flota.bat` — crea la tarea `OKU_Monitor` (cada 10
 min) junto con la de respaldo diario, y genera `scripts/monitor_flota.bat` donde pegas el
 token y chat id de Telegram del paso anterior.
 

@@ -1,11 +1,15 @@
-from fastapi import FastAPI, Request, BackgroundTasks, Response
-from twilio.rest import Client
-from twilio.request_validator import RequestValidator
+from fastapi import FastAPI, Request, BackgroundTasks
+from fastapi.responses import PlainTextResponse
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
+import hashlib
+import hmac
+import json
 import os
 import time
 import urllib.parse
+
+import proveedor
 
 load_dotenv()
 
@@ -19,15 +23,13 @@ if hasattr(time, "tzset"):
 
 app = FastAPI()
 
-ACCOUNT_SID     = os.getenv("TWILIO_ACCOUNT_SID")
-AUTH_TOKEN      = os.getenv("TWILIO_AUTH_TOKEN")
-TWILIO_NUMBER   = os.getenv("TWILIO_WHATSAPP_NUMBER")
 APP_CLIENTE_URL = os.getenv(
     "APP_CLIENTE_URL", "https://app-client-production-3486.up.railway.app"
 ).rstrip("/")
-# C4: validar la firma de Twilio salvo que se desactive a propósito (p. ej. en
-# pruebas locales donde la URL pública no coincide con la que firma Twilio).
-TWILIO_VALIDATE = os.getenv("TWILIO_VALIDATE", "true").lower() != "false"
+WA_APP_SECRET  = os.getenv("WA_APP_SECRET", "")
+WA_VERIFY_TOKEN = os.getenv("WA_VERIFY_TOKEN", "")
+# Desactivable en local, donde no hay WA_APP_SECRET real para firmar el payload.
+WA_VALIDATE = os.getenv("WA_VALIDATE", "true").lower() != "false"
 
 
 # ── Config de base de datos (C7) ────────────────────────────────────────────────
@@ -63,16 +65,6 @@ engine = create_engine(
     max_overflow=5,
     pool_timeout=10,
 )
-
-# C4/C7: si faltan credenciales de Twilio no reventamos al importar; avisamos y
-# degradamos con elegancia (init_db y /webhook siguen respondiendo).
-if ACCOUNT_SID and AUTH_TOKEN:
-    client    = Client(ACCOUNT_SID, AUTH_TOKEN)
-    validator = RequestValidator(AUTH_TOKEN)
-else:
-    client    = None
-    validator = None
-    print("[WARN] Credenciales de Twilio incompletas; el bot no enviará mensajes.")
 
 # ── Inicializar tablas ─────────────────────────────────────────────────────────
 # El bot es el dueño del esquema: crea/actualiza las tablas en cada arranque.
@@ -437,6 +429,62 @@ def init_db():
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_pedidos_idem ON pedidos (idem_key)"
         ))
 
+        # ════════════════════════════════════════════════════════════════════
+        # CLOUD API DE META (aditivo): eventos ya procesados (anti-duplicado),
+        # estado de pausa por contacto y bitácora cruda de webhooks.
+        # ════════════════════════════════════════════════════════════════════
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS wa_eventos (
+                wamid   VARCHAR(120) PRIMARY KEY,
+                tipo    VARCHAR(30)  NOT NULL,
+                visto   TIMESTAMP    NOT NULL DEFAULT NOW()
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_wa_eventos_visto ON wa_eventos (visto)"
+        ))
+
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS wa_contactos (
+                telefono       VARCHAR(40) PRIMARY KEY,
+                pausado_hasta  TIMESTAMP,
+                pausa_motivo   VARCHAR(30),
+                ultimo_saludo  TIMESTAMP,
+                actualizado    TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """))
+
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS wa_log (
+                id      SERIAL PRIMARY KEY,
+                campo   VARCHAR(40),
+                payload TEXT,
+                creado  TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS idx_wa_log_creado ON wa_log (creado)"
+        ))
+
+        for _k, _v in {
+            "bot_activo":               "1",
+            "bot_pausa_min":            "45",
+            "bot_saludo_cooldown_min":  "180",
+        }.items():
+            conn.execute(text(
+                "INSERT INTO ajustes (clave, valor) VALUES (:k, :v) "
+                "ON CONFLICT (clave) DO NOTHING"
+            ), {"k": _k, "v": _v})
+
+        # Poda: sin esto wa_eventos y wa_log crecen sin límite. Corre en cada
+        # arranque; con eso basta, no hace falta un cron aparte.
+        conn.execute(text(
+            "DELETE FROM wa_eventos WHERE visto < NOW() - INTERVAL '30 days'"
+        ))
+        conn.execute(text(
+            "DELETE FROM wa_log WHERE creado < NOW() - INTERVAL '30 days'"
+        ))
+
         conn.commit()
 
 init_db()
@@ -446,36 +494,118 @@ init_db()
 # El bot ya no procesa pedidos por texto. A cualquier mensaje responde con el
 # enlace a la carta digital (app_cliente), donde el cliente elige su mesa, arma
 # el carrito y lo envía directo a la cocina.
-def _url_publica(request: Request) -> str:
-    """URL con la que Twilio firmó la petición.
 
-    Detrás del proxy de Railway el esquema interno es http, pero Twilio firma con
-    la URL pública https; corregimos el esquema con X-Forwarded-Proto.
+@app.get("/webhook")
+async def verificar_webhook(request: Request):
+    """Handshake de alta de Meta. El challenge se devuelve como texto plano,
+    sin comillas: si vuelve como JSON, Meta rechaza la URL sin decir por qué.
     """
-    proto = request.headers.get("x-forwarded-proto", request.url.scheme)
-    return str(request.url.replace(scheme=proto))
+    params = request.query_params
+    if (
+        params.get("hub.mode") == "subscribe"
+        and params.get("hub.verify_token") == WA_VERIFY_TOKEN
+    ):
+        return PlainTextResponse(params.get("hub.challenge", ""))
+    return PlainTextResponse("", status_code=403)
 
 
 @app.post("/webhook")
-async def recibir_mensaje(request: Request, background_tasks: BackgroundTasks):
-    form   = await request.form()
-    params = dict(form)
+async def recibir_webhook(request: Request, background_tasks: BackgroundTasks):
+    # Cuerpo crudo ANTES de parsear nada: la firma se calcula sobre estos bytes
+    # tal cual llegaron. Si se parsea el JSON y se vuelve a serializar para
+    # firmar, la firma nunca cuadra.
+    cuerpo_crudo = await request.body()
 
-    # C4: rechaza cualquier POST que no provenga de Twilio (firma HMAC en la
-    # cabecera X-Twilio-Signature). Sin esto, cualquiera podía disparar envíos.
-    if TWILIO_VALIDATE and validator is not None:
-        firma = request.headers.get("X-Twilio-Signature", "")
-        if not validator.validate(_url_publica(request), params, firma):
-            return Response(status_code=403)
+    if WA_VALIDATE:
+        firma = request.headers.get("X-Hub-Signature-256", "")
+        esperada = "sha256=" + hmac.new(
+            WA_APP_SECRET.encode(), cuerpo_crudo, hashlib.sha256
+        ).hexdigest()
+        if not hmac.compare_digest(firma, esperada):
+            return PlainTextResponse("", status_code=403)
 
-    numero = params.get("From", "")
-    if numero:
-        # C4: la llamada a Twilio es bloqueante (y ahora el saludo puede leer la
-        # BD); todo va en segundo plano para no frenar el event loop ni demorar
-        # el 200 (si tardamos, Twilio reintenta y se enviaban bienvenidas
-        # duplicadas).
-        background_tasks.add_task(_enviar_bienvenida, numero)
+    try:
+        payload = json.loads(cuerpo_crudo)
+    except ValueError:
+        # JSON malformado: no es nuestro problema reintentarlo, así que 200.
+        return {"status": "ok"}
+
+    # El webhook nunca debe fallar ni tardar: todo el trabajo real va en
+    # segundo plano. Si Meta recibe error o timeout, reintenta, y los
+    # reintentos generan saludos duplicados.
+    background_tasks.add_task(_procesar, payload)
     return {"status": "ok"}
+
+
+def _guardar_log(payload):
+    """Bitácora cruda del webhook completo. Tolerante a fallos: un error de
+    log jamás debe cortar el procesamiento de los eventos.
+    """
+    try:
+        campos = []
+        for entrada in payload.get("entry") or []:
+            for change in entrada.get("changes") or []:
+                campo = change.get("field")
+                if campo and campo not in campos:
+                    campos.append(campo)
+        with engine.connect() as conn:
+            conn.execute(text(
+                "INSERT INTO wa_log (campo, payload) VALUES (:campo, :payload)"
+            ), {"campo": ", ".join(campos) or None, "payload": json.dumps(payload)})
+            conn.commit()
+    except Exception as e:
+        print(f"[WARN] No se pudo guardar en wa_log: {e}")
+
+
+def _reclamar_evento(ev: proveedor.Evento) -> bool:
+    """Reclama el wamid en wa_eventos. True si es la primera vez que se ve
+    (queda reclamado); False si ya se procesó (reintento de Meta). Los
+    eventos sin wamid propio ('contacto', 'cuenta') no tienen con qué
+    deduplicar y se tratan siempre como nuevos.
+    """
+    if not ev.wamid:
+        return True
+    with engine.connect() as conn:
+        fila = conn.execute(text(
+            "INSERT INTO wa_eventos (wamid, tipo) VALUES (:wamid, :tipo) "
+            "ON CONFLICT (wamid) DO NOTHING RETURNING wamid"
+        ), {"wamid": ev.wamid, "tipo": ev.tipo}).fetchone()
+        conn.commit()
+    return fila is not None
+
+
+def _procesar(payload):
+    """Corre en BackgroundTasks, fuera del ciclo de request/response."""
+    _guardar_log(payload)
+
+    for ev in proveedor.parsear_webhook(payload):
+        if not _reclamar_evento(ev):
+            continue
+        if ev.tipo == "entrante":
+            _atender_entrante(ev)
+        elif ev.tipo == "echo":
+            _pausar_por_humano(ev)
+        elif ev.tipo == "contacto":
+            _upsert_contacto(ev)
+        elif ev.tipo == "cuenta":
+            _alerta_cuenta(ev)
+        # 'estado': nada más que hacer, ya quedó en wa_log.
+
+
+def _atender_entrante(ev: proveedor.Evento):
+    print(f"[TODO] _atender_entrante: {ev.telefono}")
+
+
+def _pausar_por_humano(ev: proveedor.Evento):
+    print(f"[TODO] _pausar_por_humano: {ev.telefono}")
+
+
+def _upsert_contacto(ev: proveedor.Evento):
+    print(f"[TODO] _upsert_contacto: {ev.telefono}")
+
+
+def _alerta_cuenta(ev: proveedor.Evento):
+    print(f"[TODO] _alerta_cuenta: {ev.crudo}")
 
 
 # ── Branding configurable (nombre y saludo viven en 'ajustes') ─────────────────
@@ -523,23 +653,3 @@ def mensaje_bienvenida(numero: str) -> str:
         # Plantilla malformada guardada desde el panel (llaves sueltas, campos
         # desconocidos): degradar al saludo por defecto antes que no responder.
         return _SALUDO_DEFAULT.format(nombre=nombre, link=link)
-
-
-def _enviar_bienvenida(numero: str):
-    enviar_mensaje(numero, mensaje_bienvenida(numero))
-
-
-# ── Enviar mensaje WhatsApp ────────────────────────────────────────────────────
-def enviar_mensaje(numero: str, texto: str):
-    if client is None or not TWILIO_NUMBER:
-        print("[WARN] Twilio no configurado; no se envió el mensaje.")
-        return
-    try:
-        client.messages.create(
-            from_=f"whatsapp:{TWILIO_NUMBER}",
-            body=texto,
-            to=numero,
-        )
-    except Exception as e:
-        # Corre como background task tras responder 200, así que no propagamos.
-        print(f"[ERROR] No se pudo enviar el WhatsApp: {e}")

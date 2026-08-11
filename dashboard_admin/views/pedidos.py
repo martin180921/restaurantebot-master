@@ -378,7 +378,7 @@ def _distribuir_abono(pendientes, monto):
 _SUBMETODOS_CLASICOS = {"nequi", "daviplata", "breb"}
 
 # Métodos de cobro válidos en el libro 'pagos'. 'tarjeta' = datáfono manual (bloque A del
-# plan): el aparato lo opera el cajero aparte, OLO solo registra el voucher.
+# plan): el aparato lo opera el cajero aparte, OKU solo registra el voucher.
 _METODOS_VALIDOS = {"efectivo", "transferencia", "tarjeta"}
 
 
