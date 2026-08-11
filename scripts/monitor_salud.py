@@ -181,7 +181,7 @@ def main() -> None:
           f"{n_alerta} alerta(s) · {n_aviso} aviso(s)")
 
     if n_alerta or n_aviso:
-        notificar_telegram("olo · salud de la flota\n" + "\n".join(lineas))
+        notificar_telegram("oku · salud de la flota\n" + "\n".join(lineas))
 
     sys.exit(1 if n_alerta else 0)
 

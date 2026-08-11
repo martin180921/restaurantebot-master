@@ -1021,7 +1021,7 @@ def _render_ajustes():
             "Acepta datáfono / tarjeta", value=bool(mp.get("tarjeta", False)),
             key="aj_mp_tarjeta",
             help="Datáfono físico que ya opera el restaurante (Redeban, Bold, etc.). "
-                 "El cobro solo registra el voucher; OLO no se conecta al aparato.")
+                 "El cobro solo registra el voucher; OKU no se conecta al aparato.")
     with c2:
         mp_txt = st.text_area(
             "Transferencias aceptadas (una por línea: clave=Etiqueta, o solo la etiqueta)",

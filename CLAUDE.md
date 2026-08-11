@@ -1,6 +1,6 @@
-# OLO — reglas de trabajo
+# OKU — reglas de trabajo
 
-Este repo es el producto de **OLO** (antes "RestauranteBot"). La estrategia, marca y backlogs viven en el hub OLO de Notion; aquí solo código y documentación técnica.
+Este repo es el producto de **OKU** (antes "RestauranteBot"). La estrategia, marca y backlogs viven en el hub OKU de Notion; aquí solo código y documentación técnica.
 
 ## Filtro de producto
 

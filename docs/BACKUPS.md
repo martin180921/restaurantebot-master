@@ -53,10 +53,10 @@ que quieres.
 ## Dejarlo automático
 
 **Opción A — 1 clic, desde tu PC (recomendada para el piloto):** doble clic en
-`scripts/instalar_flota.bat`. Crea las tareas programadas `OLO_Respaldo` (respaldo diario de
-toda la flota vía `--config`, 09:00 por defecto) y `OLO_Monitor` (monitor cada 10 min), con
+`scripts/instalar_flota.bat`. Crea las tareas programadas `OKU_Respaldo` (respaldo diario de
+toda la flota vía `--config`, 09:00 por defecto) y `OKU_Monitor` (monitor cada 10 min), con
 sus wrappers editables en `scripts/`. Tu PC debe estar encendido a esa hora; verifica el
-primer día con `schtasks /Run /TN OLO_Respaldo` y mirando `backups/respaldo.log`.
+primer día con `schtasks /Run /TN OKU_Respaldo` y mirando `backups/respaldo.log`.
 
 **Opción B — en el PC del restaurante:** el mismo PC que corre el `print_agent` (siempre
 encendido) respalda su propia base cada noche. El archivo queda en el disco del local,
@@ -71,7 +71,7 @@ Programador de tareas de Windows (una sola vez):
      `PATH` de tu sesión de usuario y "python" a secas no se encuentra. Averíguala con
      `where python` en una terminal normal (algo como
      `C:\Users\<tú>\AppData\Local\Programs\Python\Python313\python.exe`).
-   - Argumentos: `C:\ruta\a\scripts\backup_db.py --database-url "postgresql://..." --nombre "Doña Marta" --out-dir C:\olo\backups`
+   - Argumentos: `C:\ruta\a\scripts\backup_db.py --database-url "postgresql://..." --nombre "Doña Marta" --out-dir C:\oku\backups`
 4. Marca *Ejecutar aunque el usuario no haya iniciado sesión* para que corra sin nadie logueado.
 
 > Verifica al día siguiente que apareció el primer `.sql.gz` en la carpeta.

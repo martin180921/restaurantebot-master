@@ -113,7 +113,7 @@ def respaldar(url: str, out_dir: str, nombre: str | None = None) -> tuple:
                 def w(texto: str):
                     gz.write(texto.encode("utf-8"))
 
-                w(f"-- olo backup lógico\n-- generado: {datetime.now().isoformat()}\n")
+                w(f"-- oku backup lógico\n-- generado: {datetime.now().isoformat()}\n")
                 w(f"-- server_version: {server_version}\n-- tablas: {len(tablas_cols)}\n\n")
                 # Durante la restauración: ignora FKs/triggers para no pelear con el orden.
                 w("SET session_replication_role = replica;\n\n")
