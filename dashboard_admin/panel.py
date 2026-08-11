@@ -30,7 +30,7 @@ import login_guard
 import mesero_keys
 import remember
 from views import (pedidos, monitor_mesas, nuevo_pedido, menu, mesas, resumen,
-                   caja, cancelaciones, meseros, reporte_personal, facturas)
+                   caja, cancelaciones, meseros, reporte_personal, facturas, plantillas_wa)
 from db import fecha_larga, ahora_bogota, restaurante_nombre
 
 load_dotenv()
@@ -864,21 +864,26 @@ def _render_admin():
     """Entorno de Administración (SOLO admin), aislado del flujo operativo de Caja:
     reúne los reportes y registros sensibles en pestañas limpias — Resumen de ventas,
     Cancelaciones, Facturas (documentos fiscales, bloque C del plan de facturación
-    electrónica), gestión de Personal (perfiles/PIN, antes vista 'meseros' propia),
-    Actividad (marcaje de turno, libro mayor) e Inventario/Importar (configuración del
-    menú, movidas desde Caja: la Caja ahora es 100% operativa — cobrar, repartidores,
-    gastos, cerrar turno — para admin y cajero por igual). El acceso lo gobierna la
-    matriz de rol (solo ADMIN tiene la vista 'admin'); require_view ya lo valida en
-    _dispatch, así que aquí no hace falta otro candado."""
-    tab_resumen, tab_cancel, tab_facturas, tab_personal, tab_actividad, tab_inv, tab_imp = st.tabs(
-        ["📊 Resumen", "🚫 Cancelaciones", "🧾 Facturas", "👤 Personal", "🕒 Actividad",
-         "📦 Inventario", "📥 Importar"])
+    electrónica), Plantillas WA (gestión mínima de plantillas de WhatsApp, solo peaje
+    del App Review de Meta — el bot no las usa), gestión de Personal (perfiles/PIN,
+    antes vista 'meseros' propia), Actividad (marcaje de turno, libro mayor) e
+    Inventario/Importar (configuración del menú, movidas desde Caja: la Caja ahora es
+    100% operativa — cobrar, repartidores, gastos, cerrar turno — para admin y cajero
+    por igual). El acceso lo gobierna la matriz de rol (solo ADMIN tiene la vista
+    'admin'); require_view ya lo valida en _dispatch, así que aquí no hace falta otro
+    candado."""
+    (tab_resumen, tab_cancel, tab_facturas, tab_plantillas, tab_personal, tab_actividad,
+     tab_inv, tab_imp) = st.tabs(
+        ["📊 Resumen", "🚫 Cancelaciones", "🧾 Facturas", "🧩 Plantillas WA", "👤 Personal",
+         "🕒 Actividad", "📦 Inventario", "📥 Importar"])
     with tab_resumen:
         resumen.render()
     with tab_cancel:
         cancelaciones.render()
     with tab_facturas:
         facturas.render()
+    with tab_plantillas:
+        plantillas_wa.render()
     with tab_personal:
         meseros.render()
     with tab_actividad:
