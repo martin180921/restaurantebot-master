@@ -1009,6 +1009,27 @@ def _render_ajustes():
         help="Plantilla del mensaje de bienvenida. {nombre} = nombre del restaurante, "
              "{link} = enlace a la carta digital. Déjalo vacío para usar el texto por defecto.")
 
+    bot_activo = st.toggle(
+        "🤖 El bot responde automáticamente", value=bool(_int_aj(aj, "bot_activo", 1)),
+        key="aj_bot_activo",
+        help="Si lo apagas, el bot deja de contestar y todos los mensajes los atiende el "
+             "personal.")
+    c1, c2 = st.columns(2)
+    with c1:
+        bot_pausa_min = st.slider(
+            "Minutos que el bot espera tras una respuesta manual",
+            min_value=15, max_value=180, step=5,
+            value=_int_aj(aj, "bot_pausa_min", 45), key="aj_bot_pausa_min",
+            help="Cuando alguien del restaurante responde un chat a mano, el bot no vuelve "
+                 "a escribirle a esa persona durante este tiempo.")
+    with c2:
+        bot_cooldown_min = st.slider(
+            "No repetir el saludo antes de (minutos)",
+            min_value=30, max_value=480, step=10,
+            value=_int_aj(aj, "bot_saludo_cooldown_min", 180), key="aj_bot_cooldown",
+            help="Si un cliente escribe varios mensajes seguidos, el bot no le vuelve a "
+                 "mandar el enlace antes de que pase este tiempo.")
+
     # ── Métodos de pago (antes quemados: Nequi/Daviplata/Bre-B) ───────────────
     st.markdown('<div class="section-title" style="margin-top:1rem;">Métodos de pago</div>',
                 unsafe_allow_html=True)
@@ -1048,6 +1069,9 @@ def _render_ajustes():
             "restaurante_direccion": r_dir.strip(),
             "restaurante_telefono": r_tel.strip(),
             "bot_saludo": saludo.strip(),
+            "bot_activo": 1 if bot_activo else 0,
+            "bot_pausa_min": int(bot_pausa_min),
+            "bot_saludo_cooldown_min": int(bot_cooldown_min),
             "metodos_pago": json.dumps(
                 {"efectivo": bool(mp_ef), "transferencia": transf,
                  "tarjeta": bool(mp_tarjeta)}, ensure_ascii=False),
