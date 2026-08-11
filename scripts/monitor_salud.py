@@ -27,13 +27,17 @@ import argparse
 import json
 import os
 import sys
-import urllib.parse
-import urllib.request
 
 try:
     import psycopg2
 except ImportError:
     sys.exit("[FATAL] Falta psycopg2. Instala: pip install psycopg2-binary")
+
+# notificar_telegram() vive en whatsapp_bot/ (compartida con _alerta_cuenta):
+# ese servicio SÍ se despliega solo, este script SIEMPRE corre desde un clon
+# completo del repo, así que puede llegar a él por ruta relativa.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "whatsapp_bot"))
+from notificar import notificar_telegram  # noqa: E402
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -132,22 +136,6 @@ def cargar_objetivos(args) -> list:
     if args.database_url:
         objetivos.append((args.nombre or _host_de(args.database_url), args.database_url))
     return objetivos
-
-
-def notificar_telegram(texto: str) -> None:
-    """Push a Telegram si hay token+chat en el entorno; si no, no hace nada."""
-    token = os.getenv("TELEGRAM_BOT_TOKEN")
-    chat = os.getenv("TELEGRAM_CHAT_ID")
-    if not (token and chat):
-        return
-    try:
-        datos = urllib.parse.urlencode({"chat_id": chat, "text": texto}).encode()
-        url = f"https://api.telegram.org/bot{token}/sendMessage"
-        with urllib.request.urlopen(urllib.request.Request(url, data=datos), timeout=15) as resp:
-            resp.read()
-        print("  (aviso enviado a Telegram)")
-    except Exception as exc:
-        print(f"  (no se pudo avisar por Telegram: {exc})")
 
 
 def main() -> None:

@@ -9,6 +9,7 @@ import os
 import time
 import urllib.parse
 
+import notificar
 import proveedor
 
 load_dotenv()
@@ -645,11 +646,51 @@ def _pausar_por_humano(ev: proveedor.Evento):
 
 
 def _upsert_contacto(ev: proveedor.Evento):
-    print(f"[TODO] _upsert_contacto: {ev.telefono}")
+    """Evento 'contacto' (smb_app_state_sync): la agenda del celular del
+    restaurante llega por webhook. 'add' guarda el nombre en 'clientes' (SIN
+    tocar 'direccion': la escribió el propio cliente al pedir y es mejor dato
+    que la agenda). 'remove' se ignora, no se borra: puede tener pedidos
+    históricos que referencian la fila.
+    """
+    if (ev.crudo or {}).get("action") != "add":
+        return
+    contacto = (ev.crudo or {}).get("contact") or {}
+    nombre = (contacto.get("full_name") or "").strip()
+    if not ev.telefono or not nombre:
+        return
+    with engine.connect() as conn:
+        conn.execute(text("""
+            INSERT INTO clientes (telefono, nombre)
+            VALUES (:telefono, :nombre)
+            ON CONFLICT (telefono) DO UPDATE SET
+                nombre = EXCLUDED.nombre, actualizado = NOW()
+        """), {"telefono": ev.telefono, "nombre": nombre})
+        conn.commit()
+
+
+# event de account_update que significa "el número se desconectó de la API,
+# el bot dejó de funcionar". Estructura real del payload de Meta:
+# value = {"event": "PARTNER_REMOVED", "disconnection_info": {"reason": ...}}
+_EVENTOS_DESCONEXION = {"PARTNER_REMOVED", "ACCOUNT_OFFBOARDED"}
 
 
 def _alerta_cuenta(ev: proveedor.Evento):
-    print(f"[TODO] _alerta_cuenta: {ev.crudo}")
+    """Evento 'cuenta' (account_update). El restaurante NO se entera solo de
+    que el bot murió: desde su lado, WhatsApp sigue funcionando normal. El
+    payload crudo ya quedó en wa_log (_guardar_log); esto decide cuándo avisar
+    por Telegram y con qué texto.
+    """
+    crudo = ev.crudo or {}
+    evento = crudo.get("event", "desconocido")
+    if evento not in _EVENTOS_DESCONEXION:
+        return
+
+    razon = (crudo.get("disconnection_info") or {}).get("reason", "sin motivo reportado")
+    nombre, _ = _branding()
+    notificar.notificar_telegram(
+        f"🔴 OKU · El WhatsApp de {nombre} se desconectó de la API (motivo: {razon}).\n"
+        f"El bot no está respondiendo. Pídeles que abran la app de WhatsApp Business."
+    )
 
 
 # ── Ajustes enteros con cache (bot_activo, bot_pausa_min, ...) ──────────────────
