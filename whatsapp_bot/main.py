@@ -47,6 +47,10 @@ def _normalizar_db_url(url):
         )
     if url.startswith("postgres://"):
         url = url.replace("postgres://", "postgresql://", 1)
+    # El bot solo trae psycopg2: un prefijo '+psycopg' (driver v3) revienta al arrancar
+    # con ModuleNotFoundError. Se fuerza el driver por defecto.
+    if url.startswith("postgresql+psycopg://"):
+        url = url.replace("postgresql+psycopg://", "postgresql://", 1)
     return url
 
 
