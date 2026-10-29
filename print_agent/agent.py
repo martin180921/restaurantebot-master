@@ -15,6 +15,7 @@ import json
 import os
 import socket
 import sys
+import threading
 import time
 import signal
 from datetime import datetime
@@ -216,8 +217,19 @@ def _conectar(dsn: str):
     que los otros 3 servicios (dashboard/bot/cliente fijan connect_args igual, ver
     db.py). Sin esto, el NOW() de este agente queda en la tz por defecto del server
     (UTC en Railway) mientras el panel lee/resta en Bogotá, y el latido que escribe
-    heartbeat() en agentes_estado.visto_at sale desfasado ~5h frente al panel."""
-    return psycopg2.connect(dsn, options="-c timezone=America/Bogota")
+    heartbeat() en agentes_estado.visto_at sale desfasado ~5h frente al panel.
+
+    También fija timeouts y keepalives TCP: sin connect_timeout/keepalive, una conexión
+    que la red mata en silencio deja el agente colgado minutos esperando una respuesta
+    que no llega, el latido se detiene y el panel marca 'sin conexión' a los 30 s.
+    Con estos valores el socket muerto se detecta en ~30 s y el bucle reconecta."""
+    return psycopg2.connect(
+        dsn,
+        options="-c timezone=America/Bogota -c statement_timeout=15000",
+        connect_timeout=10,
+        keepalives=1, keepalives_idle=30, keepalives_interval=10, keepalives_count=3,
+        tcp_user_timeout=30000,
+    )
 
 
 # ── Impresora ────────────────────────────────────────────────────────────────────
@@ -1259,18 +1271,23 @@ def _imprimir_trabajo(conn, trabajo, printer_cfg) -> bool:
 def _ensure_agent_schema(conn) -> None:
     """Garantiza las piezas que el agente necesita aunque arranque antes que el panel:
     la columna reclamado_at (marca cuándo se tomó un job, para detectar atascos) y la
-    tabla agentes_estado (latido). El agente es autosuficiente: no depende del panel."""
-    with conn.cursor() as cur:
-        cur.execute("ALTER TABLE print_jobs ADD COLUMN IF NOT EXISTS reclamado_at TIMESTAMP")
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS agentes_estado (
-                restaurante_id INTEGER   PRIMARY KEY,
-                hostname       VARCHAR(120),
-                visto_at       TIMESTAMP NOT NULL DEFAULT NOW(),
-                cola_pendiente INTEGER   NOT NULL DEFAULT 0
-            )
-        """)
-    conn.commit()
+    tabla agentes_estado (latido). Si el usuario de base no es dueño de las tablas (usuario
+    limitado del agente) el DDL falla: se avisa y se sigue, porque el panel ya las crea."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute("ALTER TABLE print_jobs ADD COLUMN IF NOT EXISTS reclamado_at TIMESTAMP")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS agentes_estado (
+                    restaurante_id INTEGER   PRIMARY KEY,
+                    hostname       VARCHAR(120),
+                    visto_at       TIMESTAMP NOT NULL DEFAULT NOW(),
+                    cola_pendiente INTEGER   NOT NULL DEFAULT 0
+                )
+            """)
+        conn.commit()
+    except Exception as exc:
+        conn.rollback()
+        print(f"[agent] aviso: no se pudo verificar el esquema ({exc}); el panel lo crea. Continúo.")
 
 
 def recuperar_huerfanos(conn, restaurante_id: int, max_intentos: int = 5) -> None:
@@ -1331,6 +1348,35 @@ def heartbeat(conn, restaurante_id: int, dummy: bool = False) -> None:
 _corriendo = True
 
 
+def _hilo_latido(dsn: str, restaurante_id: int, dummy: bool, intervalo: int = 5) -> None:
+    """Latido en hilo propio con su PROPIA conexión: una impresión lenta o una consulta
+    lenta del bucle principal ya no frena el latido (el panel marca 'sin conexión' a los
+    30 s; 5 s deja margen)."""
+    conn = None
+    while _corriendo:
+        try:
+            if conn is None or conn.closed:
+                conn = _conectar(dsn)
+            heartbeat(conn, restaurante_id, dummy)
+        except Exception as exc:
+            print(f"[agent] latido: error {exc}")
+            try:
+                if conn is not None:
+                    conn.close()
+            except Exception:
+                pass
+            conn = None
+        for _ in range(intervalo):
+            if not _corriendo:
+                break
+            time.sleep(1)
+    try:
+        if conn is not None:
+            conn.close()
+    except Exception:
+        pass
+
+
 def _parar(*_):
     global _corriendo
     _corriendo = False
@@ -1344,6 +1390,12 @@ def main() -> None:
     # ANTES de nada más, para que soporte pueda revisar qué pasó.
     if sys.stdout is None or sys.stderr is None:
         log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent.log")
+        # Log acotado: al pasar de 5 MB se rota a agent.log.1 (una sola generación).
+        try:
+            if os.path.exists(log_path) and os.path.getsize(log_path) > 5_000_000:
+                os.replace(log_path, log_path + ".1")
+        except OSError:
+            pass
         try:
             log_fh = open(log_path, "a", encoding="utf-8", buffering=1)
             sys.stdout = log_fh
@@ -1405,6 +1457,9 @@ def main() -> None:
 
     signal.signal(signal.SIGINT, _parar)
     signal.signal(signal.SIGTERM, _parar)
+    threading.Thread(target=_hilo_latido,
+                     args=(cfg["DATABASE_URL"], restaurante_id, es_dummy),
+                     daemon=True).start()
 
     print(f"[agent] iniciado · restaurante_id={restaurante_id} · poll={poll}s")
     conn = None
@@ -1413,13 +1468,17 @@ def main() -> None:
             if conn is None or conn.closed:
                 conn = _conectar(cfg["DATABASE_URL"])
                 _ensure_agent_schema(conn)
-            # Cada ciclo: limpia atascos / reintenta errores transitorios y emite el latido
-            # (barato e indexado) ANTES de reclamar el siguiente trabajo.
+            # Cada ciclo: limpia atascos / reintenta errores transitorios ANTES de
+            # reclamar el siguiente trabajo. El latido va en su propio hilo.
             recuperar_huerfanos(conn, restaurante_id)
-            heartbeat(conn, restaurante_id, dummy=es_dummy)
             trabajo = reclamar_trabajo(conn, restaurante_id)
         except Exception as exc:  # caída de BD → reintentar tras el sleep
             print(f"[agent] error de BD: {exc}")
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
             conn = None
             time.sleep(poll)
             continue
@@ -1432,6 +1491,11 @@ def main() -> None:
             _imprimir_trabajo(conn, trabajo, printer_cfg)
         except Exception as exc:  # fallo de BD al cerrar el estado → reconectar
             print(f"[agent] error de BD al cerrar job: {exc}")
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
             conn = None
 
     if conn and not conn.closed:

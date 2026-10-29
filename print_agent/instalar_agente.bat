@@ -97,20 +97,9 @@ schtasks /End /TN "PrintAgent" >nul 2>&1
 
 echo.
 echo Registrando la tarea programada 'PrintAgent'...
-schtasks /Create /F /TN "PrintAgent" /SC ONLOGON ^
-    /TR "\"%~dp0.venv\Scripts\pythonw.exe\" \"%~dp0agent.py\"" >nul
-if errorlevel 1 (
-    echo.
-    echo [ERROR] No se pudo crear la tarea programada. Avisa a soporte.
-    pause
-    exit /b 1
-)
-
-REM try/catch + exit 1: sin esto, powershell.exe devuelve 0 aunque Start-ScheduledTask
-REM falle (error no-terminante) y el 'if errorlevel 1' nunca detectaria el fallo.
-REM Ademas verifica que la tarea quedo Running, no solo que el Start no exploto.
-powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-    "try { Start-ScheduledTask -TaskName 'PrintAgent' -ErrorAction Stop; Start-Sleep -Seconds 2; $t = Get-ScheduledTask -TaskName 'PrintAgent' -ErrorAction Stop; if ($t.State -ne 'Running') { Write-Host ('La tarea NO quedo corriendo. Estado: ' + $t.State); exit 1 } } catch { Write-Host ('Fallo: ' + $_); exit 1 }"
+REM registrar_tarea.ps1 crea la tarea sin limite de 72 h, con bateria y reinicio automatico,
+REM ajusta energia del PC, la arranca y verifica que quede Running (falla con exit 1 si no).
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0registrar_tarea.ps1"
 if errorlevel 1 (
     echo.
     echo [ERROR] La tarea se creo pero no quedo corriendo. Avisa a soporte.

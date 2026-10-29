@@ -18,6 +18,7 @@ Señales del monitor: *Agente sin latir*, *Comandas en `error`*, *Cola `pendient
 2. **¿El PC del local está encendido y con internet?** El agente corre ahí. Si reiniciaron el PC, la tarea programada `PrintAgent` arranca sola al iniciar sesión — pídeles iniciar sesión en Windows.
 3. **Reiniciar el agente** (en el PC del local): doble clic en `print_agent/reiniciar_agente.bat`. Verifica que la tarea quede *Running*.
 4. **Ver el log**: `print_agent/agent.log` (el agente corre sin ventana; ahí van sus errores). Errores típicos: nombre de impresora cambiado en Windows (corregir `printer_name` en `config.json`, listar con `python agent.py --list-printers`), o base inaccesible (ver sección Railway).
+   > Si el panel marca 🔴 y `agent.log` muestra `latido: error`, el problema es red o base; si los tickets quedan en `error`, es la impresora.
 5. **Ver la cola desde tu PC**: `python agent.py --status` (solo lee la BD) muestra pendientes y últimos errores.
 6. **Reencolar un trabajo fallido** una vez resuelta la causa:
    ```sql
