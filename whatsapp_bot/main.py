@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import time
 import urllib.parse
 
@@ -45,12 +46,12 @@ def _normalizar_db_url(url):
             "DATABASE_URL no está configurada. Define la variable de entorno con "
             "la cadena de conexión de PostgreSQL antes de arrancar el bot."
         )
-    if url.startswith("postgres://"):
-        url = url.replace("postgres://", "postgresql://", 1)
-    # El bot solo trae psycopg2: un prefijo '+psycopg' (driver v3) revienta al arrancar
-    # con ModuleNotFoundError. Se fuerza el driver por defecto.
-    if url.startswith("postgresql+psycopg://"):
-        url = url.replace("postgresql+psycopg://", "postgresql://", 1)
+    # Espacios o comillas pegados al copiar la variable en Railway.
+    url = url.strip().strip("\"'").strip()
+    # El bot solo trae psycopg2: cualquier '+driver' (p. ej. '+psycopg' v3) revienta al
+    # arrancar con ModuleNotFoundError. Se fuerza el driver por defecto, y de paso se
+    # cambia 'postgres://' (esquema de Railway) por 'postgresql://'.
+    url = re.sub(r"^postgres(?:ql)?(?:\+\w+)?://", "postgresql://", url, count=1, flags=re.I)
     return url
 
 
