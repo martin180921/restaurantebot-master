@@ -116,6 +116,30 @@ El cajón se abre **solo en pagos en efectivo**: el panel pone `abrir_cajon:true
 payload y el agente envía el pulso `\x1b\x70\x00\x19\x96` al inicio del buffer. En
 transferencia no se abre.
 
+## Estabilidad de la conexión
+
+- **Base de datos:** el agente conecta con `connect_timeout=10`, `statement_timeout=15 s`
+  y keepalives TCP (a los ~30 s una conexión muerta se detecta y se reconecta). Antes, un
+  corte silencioso de red dejaba al agente colgado minutos y el panel marcaba 🔴.
+- **Latido:** corre en un hilo propio, con su propia conexión, cada 5 s. Una impresión o
+  consulta lenta ya no lo frena (el panel marca "sin conexión" a los 30 s).
+- **Log:** `agent.log` se rota a `agent.log.1` al pasar de 5 MB.
+- **Esquema:** si el usuario de base no es dueño de las tablas, el agente avisa y sigue
+  (el panel crea `reclamado_at` y `agentes_estado`). Permite usar un usuario limitado.
+- **Locales ya instalados:** doble clic en `endurecer_tarea.bat` (acepta UAC). Recrea la
+  tarea `PrintAgent` sin límite de 72 h, que corra con batería, con reinicio automático
+  cada minuto, y evita que el PC se duerma. `instalar_agente.bat` ya lo hace en instalaciones nuevas.
+- **Impresora por red en San Pablo (recomendada):** el modo `windows`/`usb` depende del
+  spooler y del cable USB del PC (se suspende, se afloja); `network` habla directo por
+  TCP 9100 con la impresora, sin depender de drivers ni del estado USB. Requiere IP fija
+  (o reserva DHCP por MAC) y cable Ethernet al router.
+
+| `type` | Conexión | Cuándo |
+|---|---|---|
+| `windows` | Spooler de Windows | Por defecto en PC Windows |
+| `usb` | libusb directo | Linux/Pi, o Windows con Zadig |
+| `network` | TCP 9100 | Más estable; recomendado en San Pablo |
+
 ## Log (`agent.log`)
 
 La tarea programada `PrintAgent` corre con `pythonw.exe` (sin ventana de consola), así
