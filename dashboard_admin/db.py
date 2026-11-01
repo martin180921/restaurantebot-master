@@ -67,8 +67,13 @@ def _normalizar_db_url(url):
             "DATABASE_URL no está configurada. Define la variable de entorno con "
             "la cadena de conexión de PostgreSQL antes de arrancar el panel."
         )
-    if url.startswith("postgres://"):
-        url = url.replace("postgres://", "postgresql://", 1)
+    # Igual que el bot: se toleran espacios, comillas, caracteres invisibles o el nombre de
+    # la variable pegados al valor, y cualquier '+driver' (p. ej. '+psycopg' v3, que no está
+    # instalado y tumba el arranque con ModuleNotFoundError). Siempre psycopg2, y de paso
+    # 'postgres://' (Railway) pasa a 'postgresql://'.
+    url = url.strip().strip("\"'").strip()
+    url = re.sub(r"^.*?postgres(?:ql)?(?:\+\w+)?://", "postgresql://", url, count=1,
+                 flags=re.I | re.S)
     return url
 
 
