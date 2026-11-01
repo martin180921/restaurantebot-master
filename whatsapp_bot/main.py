@@ -46,12 +46,14 @@ def _normalizar_db_url(url):
             "DATABASE_URL no está configurada. Define la variable de entorno con "
             "la cadena de conexión de PostgreSQL antes de arrancar el bot."
         )
-    # Espacios o comillas pegados al copiar la variable en Railway.
-    url = url.strip().strip("\"'").strip()
+    # Espacios, comillas o caracteres invisibles pegados al copiar la variable en Railway,
+    # o el nombre de la variable copiado junto al valor ('DATABASE_URL=postgresql+...').
     # El bot solo trae psycopg2: cualquier '+driver' (p. ej. '+psycopg' v3) revienta al
-    # arrancar con ModuleNotFoundError. Se fuerza el driver por defecto, y de paso se
-    # cambia 'postgres://' (esquema de Railway) por 'postgresql://'.
-    url = re.sub(r"^postgres(?:ql)?(?:\+\w+)?://", "postgresql://", url, count=1, flags=re.I)
+    # arrancar con ModuleNotFoundError. Se descarta todo lo que haya antes del esquema, se
+    # fuerza el driver por defecto y de paso 'postgres://' (Railway) pasa a 'postgresql://'.
+    url = url.strip().strip("\"'").strip()
+    url = re.sub(r"^.*?postgres(?:ql)?(?:\+\w+)?://", "postgresql://", url, count=1,
+                 flags=re.I | re.S)
     return url
 
 
