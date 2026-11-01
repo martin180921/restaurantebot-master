@@ -52,7 +52,8 @@ def _normalizar_db_url(url):
     # arrancar con ModuleNotFoundError. Se descarta todo lo que haya antes del esquema, se
     # fuerza el driver por defecto y de paso 'postgres://' (Railway) pasa a 'postgresql://'.
     url = url.strip().strip("\"'").strip()
-    url = re.sub(r"^.*?postgres(?:ql)?(?:\+\w+)?://", "postgresql://", url, count=1,
+    # Driver EXPLÍCITO: desde SQLAlchemy 2.1 'postgresql://' a secas usa psycopg v3.
+    url = re.sub(r"^.*?postgres(?:ql)?(?:\+\w+)?://", "postgresql+psycopg2://", url, count=1,
                  flags=re.I | re.S)
     return url
 

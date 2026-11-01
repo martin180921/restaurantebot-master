@@ -72,7 +72,8 @@ def _normalizar_db_url(url):
     # instalado y tumba el arranque con ModuleNotFoundError). Siempre psycopg2, y de paso
     # 'postgres://' (Railway) pasa a 'postgresql://'.
     url = url.strip().strip("\"'").strip()
-    url = re.sub(r"^.*?postgres(?:ql)?(?:\+\w+)?://", "postgresql://", url, count=1,
+    # Driver EXPLÍCITO: desde SQLAlchemy 2.1 'postgresql://' a secas usa psycopg v3.
+    url = re.sub(r"^.*?postgres(?:ql)?(?:\+\w+)?://", "postgresql+psycopg2://", url, count=1,
                  flags=re.I | re.S)
     return url
 
